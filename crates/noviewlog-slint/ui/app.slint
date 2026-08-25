@@ -156,6 +156,8 @@ export component AppWindow inherits Window {
     // File → Open log file… / Settings… (engine load_file / set_settings).
     callback open-log-file();
     callback settings-apply(max-scrollback-lines: int);
+    // About → Slint attribution link (https://slint.dev).
+    callback open-url(url: string);
 
     // Title-strip drag → Rust calls winit::Window::drag_window.
     // Only the empty stretch between menus and caption buttons invokes this.
@@ -1949,8 +1951,8 @@ export component AppWindow inherits Window {
 
     // About dialog — product info + Slint Royalty-free attribution.
     about-dlg := PopupWindow {
-        x: max(16px, (root.width - 420px) / 2);
-        y: max(48px, (root.height - 240px) / 2);
+        x: max(16px, (root.width - 840px) / 2);
+        y: max(48px, (root.height - 200px) / 2);
         close-policy: close-on-click-outside;
 
         Rectangle {
@@ -1961,12 +1963,11 @@ export component AppWindow inherits Window {
             drop-shadow-color: Theme.shadow-panel;
             drop-shadow-offset-y: 8px;
             drop-shadow-blur: 20px;
+            width: 720px;
 
             VerticalLayout {
                 padding: 20px;
                 spacing: 10px;
-                min-width: 360px;
-                max-width: 480px;
 
                 HorizontalLayout {
                     spacing: 12px;
@@ -1996,18 +1997,14 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Text {
-                    text: "Rust engine with a Slint UI. The log viewport is rendered by Rust (fontdue bitmap).";
-                    color: Theme.text-secondary;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                }
-
-                Text {
-                    text: "UI built with Slint — see https://slint.dev";
-                    color: Theme.text-muted;
-                    font-size: 11px;
-                    wrap: word-wrap;
+                StyledText {
+                    text: @markdown("UI built with Slint — see [slint.dev](https://slint.dev)");
+                    default-color: Theme.text-muted;
+                    default-font-size: 11px;
+                    link-color: Theme.accent;
+                    link-clicked(url) => {
+                        root.open-url(url);
+                    }
                 }
 
                 HorizontalLayout {
