@@ -211,6 +211,77 @@ enabled: true
 }
 
 #[test]
+fn filter_update_keeps_id_type_regex() {
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    engine
+        .send_command_json(
+            r#"{"cmd":"filter_add","type":"include","pattern":"foo.bar","regex":false}"#,
+        )
+        .expect("filter_add");
+
+    let id = engine.active_tab_config_for_test().filters[0].id.clone();
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"filter_update","id":"{id}","pattern":"baz.qux"}}"#
+        ))
+        .expect("filter_update");
+
+    let cfg = engine.active_tab_config_for_test();
+    assert_eq!(cfg.filters.len(), 1);
+    assert_eq!(cfg.filters[0].id, id);
+    assert_eq!(cfg.filters[0].pattern, "baz.qux");
+    assert!(!cfg.filters[0].use_regex);
+    assert_eq!(cfg.filters[0].filter_type, FilterType::Include);
+    assert!(cfg.filters[0].enabled);
+}
+
+#[test]
+fn filter_update_console_and_empty_are_noop() {
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"filter_update","id":"missing","pattern":"foo"}"#)
+        .expect("filter_update on console");
+    assert!(
+        engine.active_tab_config_for_test().filters.is_empty(),
+        "Console tab must not accept filter_update"
+    );
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    engine
+        .send_command_json(
+            r#"{"cmd":"filter_add","type":"exclude","pattern":"warn","regex":true}"#,
+        )
+        .expect("filter_add");
+
+    let before = engine.active_tab_config_for_test();
+    let id = before.filters[0].id.clone();
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"filter_update","id":"{id}","pattern":""}}"#
+        ))
+        .expect("filter_update empty");
+    engine
+        .send_command_json(r#"{"cmd":"filter_update","id":"no-such","pattern":"other"}"#)
+        .expect("filter_update unknown id");
+
+    let after = engine.active_tab_config_for_test();
+    assert_eq!(after.filters.len(), 1);
+    assert_eq!(after.filters[0].id, id);
+    assert_eq!(after.filters[0].pattern, "warn");
+    assert_eq!(after.filters[0].filter_type, FilterType::Exclude);
+    assert!(after.filters[0].use_regex);
+}
+
+#[test]
 fn set_format_reparses_entire_buffer() {
     use crate::engine::Engine;
 

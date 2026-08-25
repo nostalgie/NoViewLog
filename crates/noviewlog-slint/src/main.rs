@@ -1098,6 +1098,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
+        ui.on_filter_update(move |id, pattern| {
+            let id = id.as_str();
+            let pattern = pattern.trim();
+            if id.is_empty() || pattern.is_empty() {
+                return;
+            }
+            let _ = engine.borrow_mut().send_command(Command::FilterUpdate {
+                id: id.to_string(),
+                pattern: pattern.to_string(),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
         ui.on_filter_clear(move || {
             let _ = engine.borrow_mut().send_command(Command::FilterClear);
             force_render.set(true);

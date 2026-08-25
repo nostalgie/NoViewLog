@@ -225,6 +225,29 @@ fn apply_stats_to_filters(
         })
         .collect();
 
+    if filters.row_count() == next.len()
+        && (0..next.len()).all(|i| {
+            filters
+                .row_data(i)
+                .is_some_and(|cur| cur.id == next[i].id)
+        })
+    {
+        for (i, filt) in next.into_iter().enumerate() {
+            let Some(cur) = filters.row_data(i) else {
+                continue;
+            };
+            if cur.filter_type != filt.filter_type
+                || cur.pattern != filt.pattern
+                || cur.enabled != filt.enabled
+                || cur.use_regex != filt.use_regex
+            {
+                filters.set_row_data(i, filt);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     if filters_model_differs(filters, &next) {
         filters.set_vec(next);
         changed = true;
