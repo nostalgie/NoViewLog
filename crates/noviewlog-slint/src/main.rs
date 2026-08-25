@@ -38,30 +38,6 @@ const FIND_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Debounce for FILTERS draft highlight preview.
 const FILTER_DRAFT_DEBOUNCE: Duration = Duration::from_millis(150);
 
-/// Open an https URL in the default browser (About → Slint attribution).
-fn open_https_url(url: &str) -> Result<(), String> {
-    if !url.starts_with("https://") {
-        return Err("only https urls are allowed".into());
-    }
-    let spawn = {
-        #[cfg(target_os = "windows")]
-        {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open").arg(url).spawn()
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            std::process::Command::new("xdg-open").arg(url).spawn()
-        }
-    };
-    spawn.map(|_| ()).map_err(|err| err.to_string())
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
 
@@ -1144,17 +1120,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
-        });
-    }
-
-    {
-        let ui_url = ui.as_weak();
-        ui.on_open_url(move |url| {
-            if let Err(err) = open_https_url(url.as_str()) {
-                if let Some(ui) = ui_url.upgrade() {
-                    ui.set_status_text(SharedString::from(format!("open url: {err}")));
-                }
-            }
         });
     }
 
