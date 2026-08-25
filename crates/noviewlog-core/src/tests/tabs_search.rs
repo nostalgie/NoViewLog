@@ -386,6 +386,72 @@ fn search_highlight_marks_active_match() {
 }
 
 #[test]
+fn filter_draft_literal_highlights_case_insensitive() {
+    use crate::core::types::TextSegment;
+    use crate::core::visible::{compile_filter_draft_pattern, highlight_search_in_segments};
+
+    assert!(compile_filter_draft_pattern("", false).is_none());
+
+    let pattern = compile_filter_draft_pattern("err", false).expect("literal draft");
+    let segments = vec![TextSegment {
+        text: "WARN Error: boom".to_string(),
+        style: None,
+    }];
+    let highlighted = highlight_search_in_segments(&segments, &pattern, None);
+    let matches: Vec<_> = highlighted
+        .iter()
+        .filter(|s| s.style.as_ref().is_some_and(|st| st.search))
+        .map(|s| s.text.as_str())
+        .collect();
+    // Literal "err" matches the "Err" prefix of "Error" (case-insensitive).
+    assert_eq!(matches, vec!["Err"]);
+}
+
+#[test]
+fn filter_draft_invalid_regex_falls_back_to_literal() {
+    use crate::core::types::TextSegment;
+    use crate::core::visible::{compile_filter_draft_pattern, highlight_search_in_segments};
+
+    // Same escape-fallback as compile_filter — mid-typing "[" still previews.
+    let pattern = compile_filter_draft_pattern("[err", true).expect("invalid regex draft");
+    let segments = vec![TextSegment {
+        text: "got [err here".to_string(),
+        style: None,
+    }];
+    let highlighted = highlight_search_in_segments(&segments, &pattern, None);
+    let matches: Vec<_> = highlighted
+        .iter()
+        .filter(|s| s.style.as_ref().is_some_and(|st| st.search))
+        .map(|s| s.text.as_str())
+        .collect();
+    assert_eq!(matches, vec!["[err"]);
+}
+
+#[test]
+fn filter_draft_set_compiles_and_clears() {
+    use crate::Command;
+
+    let mut engine = crate::Engine::new();
+    engine
+        .send_command(Command::FilterDraftSet {
+            pattern: "boom".into(),
+            use_regex: false,
+        })
+        .unwrap();
+    assert!(engine.filter_draft_pattern.is_some());
+    assert_eq!(engine.filter_draft_query, "boom");
+
+    engine
+        .send_command(Command::FilterDraftSet {
+            pattern: String::new(),
+            use_regex: false,
+        })
+        .unwrap();
+    assert!(engine.filter_draft_pattern.is_none());
+    assert!(engine.filter_draft_query.is_empty());
+}
+
+#[test]
 fn search_incremental_append_extends_matches() {
     use chrono::Utc;
 

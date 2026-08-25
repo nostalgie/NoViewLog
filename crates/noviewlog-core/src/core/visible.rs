@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crate::core::ansi::{overlay_styles, parse_ansi_line, strip_ansi};
 use crate::core::buffer::RecordBuffer;
 use crate::core::filter::FilterEngine;
-use crate::core::types::{FlatLine, SearchMatch, TextSegment, TextStyle};
+use crate::core::types::{
+    compile_filter, FlatLine, FilterRule, FilterType, SearchMatch, TextSegment, TextStyle,
+};
 
 pub fn rebuild_flat_lines(buffer: &RecordBuffer, filter_engine: &FilterEngine) -> Vec<FlatLine> {
     rebuild_flat_lines_for_records(buffer.records(), filter_engine)
@@ -103,6 +105,24 @@ fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
         && a.iter()
             .zip(b.iter())
             .all(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
+/// Compile a FILTERS draft preview pattern with the same rules as [`compile_filter`].
+/// Empty pattern → `None` (no highlight). Invalid regex falls back to escaped literal.
+pub fn compile_filter_draft_pattern(pattern: &str, use_regex: bool) -> Option<SearchPattern> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let rule = compile_filter(FilterRule {
+        id: String::new(),
+        name: None,
+        filter_type: FilterType::Include,
+        pattern: pattern.to_string(),
+        enabled: true,
+        use_regex,
+        regex: None,
+    });
+    rule.regex.map(SearchPattern::Regex)
 }
 
 pub fn compile_search_pattern(

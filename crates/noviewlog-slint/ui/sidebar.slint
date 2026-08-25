@@ -369,9 +369,8 @@ export component FilterRow inherits Rectangle {
         width: 100%;
         height: 100%;
         spacing: 6px;
-        padding-left: 2px;
-        padding-right: 2px;
-        alignment: center;
+        // stretch (not center): HorizontalLayout.alignment is the horizontal axis.
+        alignment: stretch;
 
         // Checkbox (custom — avoid fluent CheckBox chrome clash).
         TouchArea {
@@ -432,6 +431,7 @@ export component FilterRow inherits Rectangle {
             font-size: 12px;
             vertical-alignment: center;
             horizontal-stretch: 1;
+            min-width: 0px;
             overflow: elide;
             opacity: root.enabled ? 1.0 : 0.55;
         }

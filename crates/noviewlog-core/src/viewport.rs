@@ -150,6 +150,7 @@ impl ViewportRenderer {
         wrap_lines: bool,
         selection: Option<&TextSelection>,
         search_pattern: Option<&SearchPattern>,
+        filter_draft_pattern: Option<&SearchPattern>,
         active_match: Option<SearchMatch>,
         caret: Option<ViewportCaret>,
     ) -> Result<(), String> {
@@ -197,6 +198,7 @@ impl ViewportRenderer {
                 visual.start,
                 visual.end,
                 search_pattern,
+                filter_draft_pattern,
                 active_range,
                 selection,
                 self.metrics.cell_width,
@@ -491,6 +493,7 @@ fn draw_visual_line(
     slice_start: usize,
     slice_end: usize,
     search_pattern: Option<&SearchPattern>,
+    filter_draft_pattern: Option<&SearchPattern>,
     active_range: Option<(usize, usize)>,
     selection: Option<&TextSelection>,
     cell_width: u32,
@@ -506,6 +509,9 @@ fn draw_visual_line(
 
     if let Some(pattern) = search_pattern {
         segments = highlight_search_in_segments(&segments, pattern, active_range);
+    }
+    if let Some(pattern) = filter_draft_pattern {
+        segments = highlight_search_in_segments(&segments, pattern, None);
     }
     if let Some(sel) = selection {
         segments =
@@ -921,7 +927,7 @@ mod tests {
         };
         let mut buf = vec![0u8; 400 * 40 * 4];
         renderer
-            .render(&mut buf, 400, 40, &[line], 0.0, 0.0, false, None, Some(&re), Some(active), None)
+            .render(&mut buf, 400, 40, &[line], 0.0, 0.0, false, None, Some(&re), None, Some(active), None)
             .unwrap();
         // Active match uses orange highlight (R > G, B low).
         let orange_pixels = buf
@@ -966,6 +972,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
 
@@ -979,6 +986,7 @@ mod tests {
                 0.0,
                 scroll_x,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -1046,7 +1054,7 @@ mod tests {
             };
             let mut buf = vec![0u8; 600 * 40 * 4];
             renderer
-                .render(&mut buf, 600, 40, &[line], 0.0, 0.0, false, None, None, None, None)
+                .render(&mut buf, 600, 40, &[line], 0.0, 0.0, false, None, None, None, None, None)
                 .unwrap();
             let lit = buf
                 .chunks_exact(4)
@@ -1081,7 +1089,7 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None)
+            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
             .unwrap();
         // Color emoji should contribute chromatic (non-gray) pixels, not tofu/empty.
         let colorful = buf
@@ -1122,7 +1130,7 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None)
+            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
             .unwrap();
         let colorful = buf
             .chunks_exact(4)
@@ -1176,6 +1184,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         let lit = buf
@@ -1218,6 +1227,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         renderer
@@ -1229,6 +1239,7 @@ mod tests {
                 0.0,
                 0.0,
                 false,
+                None,
                 None,
                 None,
                 None,
@@ -1288,7 +1299,7 @@ mod tests {
         let height = 120u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &lines, 0.0, 0.0, false, None, None, None, None)
+            .render(&mut buf, width, height, &lines, 0.0, 0.0, false, None, None, None, None, None)
             .unwrap();
 
         let text_rows = rows_with_text_pixels(&buf, width, height);
@@ -1332,7 +1343,7 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, Some(&re), Some(active), None)
+            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, Some(&re), None, Some(active), None)
             .unwrap();
 
         let orange_pixels = buf
@@ -1385,7 +1396,7 @@ mod tests {
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &flat_lines, 0.0, 0.0, false, None, None, None, None)
+            .render(&mut buf, width, height, &flat_lines, 0.0, 0.0, false, None, None, None, None, None)
             .unwrap();
 
         // Middle divider is at column 11 on every row (after 10-cell-wide left column).
@@ -1483,7 +1494,7 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None)
+            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
             .unwrap();
 
         let lit = buf
@@ -1505,7 +1516,7 @@ mod tests {
         };
         let mut buf2 = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf2, width, height, &[border_only], 0.0, 0.0, false, None, None, None, None)
+            .render(&mut buf2, width, height, &[border_only], 0.0, 0.0, false, None, None, None, None, None)
             .unwrap();
         let lit_border = buf2
             .chunks_exact(4)
@@ -1588,6 +1599,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap();
         renderer
@@ -1599,6 +1611,7 @@ mod tests {
                 0.0,
                 0.0,
                 false,
+                None,
                 None,
                 None,
                 None,

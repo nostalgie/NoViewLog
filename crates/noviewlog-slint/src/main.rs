@@ -35,6 +35,8 @@ use crate::ui::*;
 
 /// Debounce for find `search_set` (search bar cadence).
 const FIND_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Debounce for FILTERS draft highlight preview.
+const FILTER_DRAFT_DEBOUNCE: Duration = Duration::from_millis(150);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
@@ -97,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer_fast = Rc::new(Cell::new(true));
     let find_debounce = Rc::new(Timer::default());
     let find_pending = Rc::new(RefCell::new(None::<(String, bool, bool, bool)>));
+    let filter_draft_debounce = Rc::new(Timer::default());
+    let filter_draft_pending = Rc::new(RefCell::new(None::<(String, bool)>));
     // When true, next stats push overwrites find query/toggles (open / tab switch).
     let find_resync = Rc::new(Cell::new(false));
     let find_stats_tab = Rc::new(Cell::new(-1i32));
@@ -881,6 +885,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         let ui_filt = ui.as_weak();
+        let filter_draft_debounce = filter_draft_debounce.clone();
+        let filter_draft_pending = filter_draft_pending.clone();
         ui.on_filter_add(move |filter_type, pattern, use_regex| {
             let pattern = pattern.trim();
             if pattern.is_empty() {
@@ -895,11 +901,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pattern: pattern.to_string(),
                 regex: use_regex,
             });
+            // Clear draft preview immediately (UI also notifies filter-draft-changed).
+            filter_draft_debounce.stop();
+            *filter_draft_pending.borrow_mut() = None;
+            let _ = engine.borrow_mut().send_command(Command::FilterDraftSet {
+                pattern: String::new(),
+                use_regex: false,
+            });
             if let Some(ui) = ui_filt.upgrade() {
                 ui.set_filter_draft(SharedString::default());
             }
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        let filter_draft_debounce = filter_draft_debounce.clone();
+        let filter_draft_pending = filter_draft_pending.clone();
+        ui.on_filter_draft_changed(move |pattern, use_regex| {
+            *filter_draft_pending.borrow_mut() = Some((pattern.to_string(), use_regex));
+            let engine = engine.clone();
+            let force_render = force_render.clone();
+            let timer = timer.clone();
+            let timer_fast = timer_fast.clone();
+            let filter_draft_pending = filter_draft_pending.clone();
+            filter_draft_debounce.start(
+                TimerMode::SingleShot,
+                FILTER_DRAFT_DEBOUNCE,
+                move || {
+                    let Some((pattern, use_regex)) = filter_draft_pending.borrow_mut().take()
+                    else {
+                        return;
+                    };
+                    let _ = engine.borrow_mut().send_command(Command::FilterDraftSet {
+                        pattern,
+                        use_regex,
+                    });
+                    force_render.set(true);
+                    bump_fast_timer(&timer, &timer_fast);
+                },
+            );
         });
     }
 
@@ -1225,6 +1271,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep Rc<Timer> alive for the UI lifetime (Drop stops the timer).
     let _tick_timer = timer;
     let _find_debounce = find_debounce;
+    let _filter_draft_debounce = filter_draft_debounce;
 
     ui.run()?;
     Ok(())
