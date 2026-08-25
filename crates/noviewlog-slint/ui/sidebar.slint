@@ -1,0 +1,871 @@
+// Sidebar / tab-strip building blocks (terminals list, filters, tabs, scrollbars).
+
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { CtxAccelMenuItem } from "chrome-menus.slint";
+
+// Root is TouchArea so wheel works over chip padding and the 1px divider
+// (child Rectangles do not steal pointer events).
+export component TabChip inherits TouchArea {
+    in property <string> title;
+    in property <bool> active;
+    in property <bool> show-close;
+    // False for Console — double-click / context Rename must not start rename.
+    in property <bool> can-rename: true;
+    in property <bool> renaming: false;
+    in property <string> rename-text: "";
+    in property <int> tab-index: 0;
+    in property <bool> can-reorder: true;
+    in property <bool> show-drop-before: false;
+    in property <bool> dim-as-drag-source: false;
+    callback close-clicked();
+    // Forward wheel so the tab strip can scroll horizontally (Flickable ignores Y-wheel).
+    callback wheel(delta-y: float);
+    callback rename-requested();
+    callback rename-edited(text: string);
+    callback rename-accepted(text: string);
+    callback rename-cancelled();
+    // abs-x is viewport X for drop-index math on AppWindow.
+    callback reorder-drag-start(index: int);
+    callback reorder-drag-move(abs-x: length);
+    callback reorder-drag-end();
+
+    height: 34px;
+    preferred-width: 120px;
+    min-width: 120px;
+    max-width: 150px;
+    // TouchArea defaults to stretch:1 — keep chips at preferred so the empty
+    // gutter overlay stays to the right of real chip bounds.
+    horizontal-stretch: 0;
+    mouse-cursor: pointer;
+    opacity: root.dim-as-drag-source ? 0.45 : 1.0;
+
+    property <length> ctx-menu-x: 0px;
+    property <length> ctx-menu-y: 0px;
+    property <bool> rename-closing: false;
+    // Ignore blur until TextInput has focused once (init focus can race has-focus).
+    property <bool> rename-had-focus: false;
+    property <bool> press-tracking: false;
+    property <float> press-x: 0;
+    property <float> press-y: 0;
+    property <bool> reorder-dragging: false;
+    // double_clicked runs before pointer Up — skip activated on that Up.
+    property <bool> skip-next-activated: false;
+
+    scroll-event(event) => {
+        root.wheel(event.delta-y / 1px);
+        accept
+    }
+
+    double-clicked => {
+        if (!root.renaming && root.can-rename && !root.reorder-dragging) {
+            root.skip-next-activated = true;
+            root.rename-requested();
+        }
+    }
+
+    // Swallow TouchArea clicked when a reorder drag happened (parent uses activated).
+    clicked => { }
+
+    callback activated();
+
+    pointer-event(event) => {
+        if (root.renaming) {
+            return;
+        }
+        if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.down) {
+            root.close-clicked();
+            return;
+        }
+        if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) {
+            root.ctx-menu-x = self.mouse-x;
+            root.ctx-menu-y = self.mouse-y;
+            chip-ctx.show();
+            return;
+        }
+        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+            root.press-tracking = true;
+            root.press-x = self.mouse-x / 1px;
+            root.press-y = self.mouse-y / 1px;
+            root.reorder-dragging = false;
+            return;
+        }
+        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+            if (root.reorder-dragging) {
+                root.reorder-drag-end();
+            } else if (root.press-tracking) {
+                if (root.skip-next-activated) {
+                    root.skip-next-activated = false;
+                } else {
+                    root.activated();
+                }
+            }
+            root.press-tracking = false;
+            root.reorder-dragging = false;
+            return;
+        }
+        if (event.kind == PointerEventKind.move && root.press-tracking) {
+            let dx = self.mouse-x / 1px - root.press-x;
+            let dy = self.mouse-y / 1px - root.press-y;
+            if (!root.reorder-dragging && root.can-reorder && (dx * dx + dy * dy) > 25) {
+                root.reorder-dragging = true;
+                root.reorder-drag-start(root.tab-index);
+            }
+            if (root.reorder-dragging) {
+                root.reorder-drag-move(self.absolute-position.x + self.mouse-x);
+            }
+        }
+    }
+
+    function finish-rename-accept(text: string) {
+        if (root.rename-closing || !root.renaming) {
+            return;
+        }
+        root.rename-closing = true;
+        root.rename-accepted(text);
+    }
+
+    function finish-rename-cancel() {
+        if (root.rename-closing || !root.renaming) {
+            return;
+        }
+        root.rename-closing = true;
+        root.rename-cancelled();
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 0px;
+        background: root.active ? Theme.bg-window : transparent;
+    }
+
+    // Reorder drop cue — muted only, never Theme.accent (no bright blue on tab strip).
+    // Hidden when drop target == source (no-op) so a stuck drag session cannot leave a stripe.
+    if root.show-drop-before: Rectangle {
+        x: 0px;
+        y: 4px;
+        width: 2px;
+        height: parent.height - 8px;
+        background: Theme.border;
+        z: 10;
+    }
+
+    // Same TextInput chrome recipe as TerminalRow: explicit width:100%, no absolute sizing.
+    // Match idle title: text centered in the chip (horizontal-alignment), field vertically centered.
+    if root.renaming: VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: 6px;
+        padding-right: 6px;
+        padding-top: 0px;
+        padding-bottom: 0px;
+        alignment: center;
+
+        Rectangle {
+            width: 100%;
+            height: Theme.rename-tab-height;
+            vertical-stretch: 0;
+            border-radius: Theme.rename-radius;
+            // Square muted outline — never Theme.accent / fluent focus chrome.
+            border-width: Theme.rename-border-width;
+            border-color: Theme.rename-border;
+            background: Theme.rename-bg;
+            clip: true;
+
+            HorizontalLayout {
+                width: 100%;
+                height: 100%;
+                padding-left: 6px;
+                padding-right: 6px;
+                alignment: center;
+
+                rename-edit := TextInput {
+                    width: 100%;
+                    height: 100%;
+                    min-width: 1px;
+                    font-size: 12px;
+                    color: Theme.rename-text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    selection-background-color: Theme.accent-soft;
+                    selection-foreground-color: Theme.rename-text;
+                    single-line: true;
+                    // Keep draft in sync so a stats/layout rebuild of the chip does not
+                    // re-init from a stale rename-text and wipe in-progress edits.
+                    edited => {
+                        root.rename-edited(self.text);
+                    }
+
+                    init => {
+                        root.rename-closing = false;
+                        root.rename-had-focus = false;
+                        self.text = root.rename-text;
+                        self.focus();
+                        self.select-all();
+                    }
+
+                    accepted => {
+                        root.finish-rename-accept(self.text);
+                    }
+
+                    // Real focus loss commits. Mouse leave must not blur (gated FocusScopes).
+                    changed has-focus => {
+                        if (self.has-focus) {
+                            root.rename-had-focus = true;
+                        } else if (root.rename-had-focus && root.renaming && !root.rename-closing) {
+                            root.finish-rename-accept(self.text);
+                        }
+                    }
+
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.finish-rename-cancel();
+                            accept
+                        } else {
+                            reject
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !root.renaming: HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 0px;
+        padding-left: 6px;
+        padding-right: 6px;
+        // Stretch so side columns fill chip height; VerticalLayout centers the close control.
+        alignment: stretch;
+
+        // Mirror the close control width so the title stays optically centered.
+        if root.show-close: VerticalLayout {
+            width: 18px;
+            alignment: center;
+
+            Rectangle {
+                width: 18px;
+                height: 18px;
+                background: transparent;
+            }
+        }
+
+        Text {
+            text: root.title;
+            color: root.active ? Theme.text-primary : Theme.text-secondary;
+            font-size: 12px;
+            font-weight: 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        if root.show-close: VerticalLayout {
+            width: 18px;
+            alignment: center;
+
+            TouchArea {
+                width: 18px;
+                height: 18px;
+                vertical-stretch: 0;
+                mouse-cursor: pointer;
+                clicked => { root.close-clicked(); }
+                // Nested TouchArea steals events — middle-click still closes via ×.
+                pointer-event(event) => {
+                    if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.down) {
+                        root.close-clicked();
+                    }
+                }
+                scroll-event(event) => {
+                    root.wheel(event.delta-y / 1px);
+                    accept
+                }
+
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "×";
+                    color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // Visual only — parent TouchArea still receives wheel over this strip.
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        height: 100%;
+        background: Theme.border;
+    }
+
+    chip-ctx := PopupWindow {
+        x: root.ctx-menu-x;
+        y: root.ctx-menu-y;
+        close-policy: close-on-click;
+
+        Rectangle {
+            background: Palette.background;
+            border-radius: 0px;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-color: Theme.shadow-menu;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-blur: 16px;
+
+            VerticalLayout {
+                padding: 4px;
+                min-width: 140px;
+
+                CtxAccelMenuItem {
+                    title: "Rename";
+                    accelerator: "";
+                    item-enabled: root.can-rename;
+                    activated => {
+                        chip-ctx.close();
+                        if (root.can-rename) {
+                            root.rename-requested();
+                        }
+                    }
+                }
+
+                CtxAccelMenuItem {
+                    title: "Close";
+                    accelerator: "";
+                    item-enabled: root.show-close;
+                    activated => {
+                        chip-ctx.close();
+                        root.close-clicked();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One IN/OUT filter row: toggle + badge + pattern + remove.
+export component FilterRow inherits Rectangle {
+    in property <string> filter-id;
+    in property <string> filter-type;
+    in property <string> pattern;
+    in property <bool> enabled;
+    in property <bool> use-regex: false;
+    callback toggled(enabled: bool);
+    callback remove-clicked();
+
+    height: 28px;
+    border-radius: 4px;
+    background: transparent;
+
+    property <bool> is-include: root.filter-type == "include";
+
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        spacing: 6px;
+        padding-left: 2px;
+        padding-right: 2px;
+        alignment: center;
+
+        // Checkbox (custom — avoid fluent CheckBox chrome clash).
+        TouchArea {
+            width: 18px;
+            height: 18px;
+            mouse-cursor: pointer;
+            vertical-stretch: 0;
+            clicked => { root.toggled(!root.enabled); }
+
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 3px;
+                border-width: 1px;
+                // Fill may use accent; border must not (no blue outline).
+                border-color: Theme.border;
+                background: root.enabled ? Theme.accent : Theme.bg-input;
+
+                if root.enabled: Text {
+                    width: 100%;
+                    height: 100%;
+                    text: "✓";
+                    color: Theme.text-primary;
+                    font-size: 10px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        // IN / OUT badge
+        Rectangle {
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.is-include ? Theme.include : Theme.exclude;
+            background: root.is-include ? Theme.include-fill : Theme.exclude-fill;
+            vertical-stretch: 0;
+            min-width: 28px;
+            height: 18px;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: root.is-include ? "IN" : "OUT";
+                color: root.is-include ? Theme.include : Theme.exclude;
+                font-size: 10px;
+                font-weight: 700;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.pattern;
+            color: Theme.text-primary;
+            font-size: 12px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+            opacity: root.enabled ? 1.0 : 0.55;
+        }
+
+        if root.use-regex: Text {
+            text: ".*";
+            color: Theme.text-muted;
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+            vertical-stretch: 0;
+            opacity: root.enabled ? 1.0 : 0.55;
+        }
+
+        TouchArea {
+            width: 18px;
+            height: 18px;
+            mouse-cursor: pointer;
+            vertical-stretch: 0;
+            clicked => { root.remove-clicked(); }
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "×";
+                color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
+// Root is TouchArea (like TabChip) so double-clicked can start rename without
+// destroying the gesture target mid-Released (a child `if !renaming: TouchArea`
+// was torn down inside double-clicked and the rename UI never stuck).
+export component TerminalRow inherits TouchArea {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> running;
+    in property <bool> active;
+    in property <bool> show-close;
+    in property <string> term-id: "";
+    in property <int> term-index: 0;
+    in property <bool> show-drop-before: false;
+    in property <bool> dim-as-drag-source: false;
+    in property <bool> renaming: false;
+    in property <string> rename-text: "";
+    // Parent wires activated (not TouchArea.clicked) so drag can suppress select.
+    callback activated();
+    callback close-clicked();
+    // Forward wheel so list scroll + docked bar stay in sync.
+    callback wheel(delta-y: float);
+    callback rename-requested();
+    callback rename-edited(text: string);
+    callback rename-accepted(text: string);
+    callback rename-cancelled();
+    callback reorder-drag-start(id: string, from-index: int);
+    callback reorder-drag-move(abs-y: length);
+    callback reorder-drag-end();
+
+    height: 44px;
+    mouse-cursor: pointer;
+    opacity: root.dim-as-drag-source ? 0.45 : 1.0;
+
+    property <bool> press-tracking: false;
+    property <float> press-x: 0;
+    property <float> press-y: 0;
+    property <bool> reorder-dragging: false;
+    property <bool> rename-closing: false;
+    // Ignore blur until TextInput has focused once (init focus can race has-focus).
+    property <bool> rename-had-focus: false;
+    // double_clicked runs before pointer Up — skip activated on that Up.
+    property <bool> skip-next-activated: false;
+
+    function finish-rename-accept(text: string) {
+        if (root.rename-closing || !root.renaming) {
+            return;
+        }
+        root.rename-closing = true;
+        root.rename-accepted(text);
+    }
+
+    function finish-rename-cancel() {
+        if (root.rename-closing || !root.renaming) {
+            return;
+        }
+        root.rename-closing = true;
+        root.rename-cancelled();
+    }
+
+    scroll-event(event) => {
+        root.wheel(event.delta-y / 1px);
+        accept
+    }
+
+    double-clicked => {
+        if (!root.renaming && !root.reorder-dragging) {
+            root.skip-next-activated = true;
+            root.rename-requested();
+        }
+    }
+
+    // Swallow built-in clicked — select goes through activated on pointer-up.
+    clicked => { }
+
+    pointer-event(event) => {
+        if (root.renaming) {
+            return;
+        }
+        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+            root.press-tracking = true;
+            root.press-x = self.mouse-x / 1px;
+            root.press-y = self.mouse-y / 1px;
+            root.reorder-dragging = false;
+            return;
+        }
+        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+            if (root.reorder-dragging) {
+                root.reorder-drag-end();
+            } else if (root.press-tracking) {
+                if (root.skip-next-activated) {
+                    root.skip-next-activated = false;
+                } else {
+                    root.activated();
+                }
+            }
+            root.press-tracking = false;
+            root.reorder-dragging = false;
+            return;
+        }
+        if (event.kind == PointerEventKind.move && root.press-tracking) {
+            let dx = self.mouse-x / 1px - root.press-x;
+            let dy = self.mouse-y / 1px - root.press-y;
+            if (!root.reorder-dragging && (dx * dx + dy * dy) > 25) {
+                root.reorder-dragging = true;
+                root.reorder-drag-start(root.term-id, root.term-index);
+            }
+            if (root.reorder-dragging) {
+                root.reorder-drag-move(self.absolute-position.y + self.mouse-y);
+            }
+        }
+    }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 0px;
+        background: root.active ? Theme.accent-soft : transparent;
+        // Selection = fill only — no Theme.accent border.
+        border-width: 0px;
+    }
+
+    // Reorder drop cue — muted only, never Theme.accent.
+    if root.show-drop-before: Rectangle {
+        x: 4px;
+        y: 0px;
+        width: parent.width - 8px;
+        height: 2px;
+        background: Theme.border;
+        z: 10;
+    }
+
+    // One row skeleton: [●][title-slot][×]. Title-slot Rectangle ALWAYS exists with
+    // stretch — conditional children live inside it (never swap the stretch item itself).
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: 8px;
+        // 6px content + 10px reserved for overlaid V-scrollbar slot.
+        padding-right: 16px;
+        spacing: 8px;
+        alignment: stretch;
+
+        Text {
+            text: "●";
+            color: root.running ? Theme.accent : Theme.text-muted;
+            font-size: 10px;
+            vertical-alignment: center;
+            width: 12px;
+            horizontal-stretch: 0;
+        }
+
+        title-slot := Rectangle {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            vertical-stretch: 1;
+            background: transparent;
+            clip: true;
+
+            if !root.renaming: VerticalLayout {
+                width: 100%;
+                height: 100%;
+                spacing: 1px;
+                alignment: center;
+
+                Text {
+                    text: root.title;
+                    color: root.active ? Theme.text-primary : Theme.text-secondary;
+                    font-size: 12px;
+                    font-weight: 400;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.subtitle;
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+            }
+
+            // Same two-line stack as idle so title baseline matches siblings.
+            if root.renaming: VerticalLayout {
+                width: 100%;
+                height: 100%;
+                spacing: 1px;
+                alignment: center;
+
+                Rectangle {
+                    width: 100%;
+                    // ~title line height — not a 28px pill centered in the row.
+                    height: Theme.rename-terminal-height;
+                    border-radius: Theme.rename-radius;
+                    // Square muted outline — never Theme.accent / fluent focus chrome.
+                    border-width: Theme.rename-border-width;
+                    border-color: Theme.rename-border;
+                    background: Theme.rename-bg;
+                    clip: true;
+
+                    HorizontalLayout {
+                        width: 100%;
+                        height: 100%;
+                        padding-left: 2px;
+                        padding-right: 2px;
+                        alignment: center;
+
+                        rename-edit := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            min-width: 1px;
+                            font-size: 12px;
+                            color: Theme.rename-text;
+                            selection-background-color: Theme.accent-soft;
+                            selection-foreground-color: Theme.rename-text;
+                            single-line: true;
+                            edited => {
+                                root.rename-edited(self.text);
+                            }
+
+                            init => {
+                                root.rename-closing = false;
+                                root.rename-had-focus = false;
+                                self.text = root.rename-text;
+                                self.focus();
+                                self.select-all();
+                            }
+
+                            accepted => {
+                                root.finish-rename-accept(self.text);
+                            }
+
+                            // Real focus loss (viewport/console *click*) commits.
+                            // Mouse leave / hover over viewport must not blur.
+                            changed has-focus => {
+                                if (self.has-focus) {
+                                    root.rename-had-focus = true;
+                                } else if (root.rename-had-focus && root.renaming && !root.rename-closing) {
+                                    root.finish-rename-accept(self.text);
+                                }
+                            }
+
+                            key-pressed(event) => {
+                                if (event.text == Key.Escape) {
+                                    root.finish-rename-cancel();
+                                    accept
+                                } else {
+                                    reject
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.subtitle;
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+            }
+        }
+
+        if root.show-close: TouchArea {
+            width: 20px;
+            height: 20px;
+            mouse-cursor: pointer;
+            vertical-stretch: 0;
+            horizontal-stretch: 0;
+            // Keep × hittable while idle; during rename reserve width only.
+            enabled: !root.renaming;
+            clicked => { root.close-clicked(); }
+            scroll-event(event) => {
+                root.wheel(event.delta-y / 1px);
+                accept
+            }
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "×";
+                color: !root.renaming && parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                opacity: root.renaming ? 0.0 : 1.0;
+            }
+        }
+    }
+}
+
+// Engine-synced scrollbar (std-widgets ScrollBar is not exported). Units match
+// engine scroll_y / scroll_x (device pixels). Thumb size uses page-size.
+// Thickness is 10px everywhere (tabs H bar is the reference).
+export component EngineScrollBar inherits Rectangle {
+    in property <bool> horizontal: false;
+    in-out property <float> value: 0.0;
+    in property <float> maximum: 0.0;
+    in property <float> page-size: 1.0;
+    in property <bool> enabled: true;
+    callback scrolled(value: float);
+
+    background: Theme.bg-input;
+    border-width: 0px;
+    // Layout parents must stretch us; default Rectangle preferred size is 0.
+    vertical-stretch: root.horizontal ? 0 : 1;
+    horizontal-stretch: root.horizontal ? 1 : 0;
+    preferred-width: root.horizontal ? 0px : 10px;
+    preferred-height: root.horizontal ? 10px : 0px;
+
+    property <float> range: max(0.001, root.maximum + max(1.0, root.page-size));
+    property <float> thumb-frac: root.maximum <= 0.5 ? 1.0 : min(1.0, max(1.0, root.page-size) / root.range);
+    property <float> thumb-travel: max(0.0, 1.0 - root.thumb-frac);
+    property <float> thumb-pos: root.maximum <= 0.5 ? 0.0 : (clamp(root.value, 0.0, root.maximum) / max(0.001, root.maximum)) * root.thumb-travel;
+
+    thumb := Rectangle {
+        width: root.horizontal ? max(24px, parent.width * root.thumb-frac) : parent.width - 4px;
+        height: root.horizontal ? parent.height - 4px : max(24px, parent.height * root.thumb-frac);
+        x: root.horizontal ? parent.width * root.thumb-pos : 2px;
+        y: root.horizontal ? 2px : parent.height * root.thumb-pos;
+        border-radius: 4px;
+        background: !root.enabled || root.maximum <= 0.5
+            ? Theme.border
+            : (touch.has-hover || touch.pressed ? Theme.text-secondary : Theme.text-muted);
+    }
+
+    touch := TouchArea {
+        property <float> press-value: 0.0;
+        property <float> press-mouse: 0.0;
+        property <bool> dragging: false;
+
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled && root.maximum > 0.5;
+        mouse-cursor: default;
+
+        pointer-event(event) => {
+            if (!root.enabled || root.maximum <= 0.5) {
+                return;
+            }
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                self.press-value = root.value;
+                self.press-mouse = root.horizontal ? self.mouse-x / 1px : self.mouse-y / 1px;
+                self.dragging = true;
+
+                // Click outside thumb: jump so thumb centers on click.
+                if (root.horizontal) {
+                    if (self.mouse-x < thumb.x || self.mouse-x > thumb.x + thumb.width) {
+                        root.apply-ratio((self.mouse-x - thumb.width / 2) / max(1px, parent.width - thumb.width));
+                        self.press-value = root.value;
+                    }
+                } else if (self.mouse-y < thumb.y || self.mouse-y > thumb.y + thumb.height) {
+                    root.apply-ratio((self.mouse-y - thumb.height / 2) / max(1px, parent.height - thumb.height));
+                    self.press-value = root.value;
+                }
+            } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                self.dragging = false;
+            }
+        }
+
+        moved => {
+            if (!self.dragging || !self.pressed || !root.enabled || root.maximum <= 0.5) {
+                return;
+            }
+            if (root.horizontal) {
+                root.drag-to(self.press-value, self.press-mouse, self.mouse-x / 1px, parent.width / 1px, thumb.width / 1px);
+            } else {
+                root.drag-to(self.press-value, self.press-mouse, self.mouse-y / 1px, parent.height / 1px, thumb.height / 1px);
+            }
+        }
+
+        scroll-event(event) => {
+            if (!root.enabled || root.maximum <= 0.5) {
+                return reject;
+            }
+            if (root.horizontal && event.delta-x / 1px != 0) {
+                root.nudge(event.delta-x / 1px > 0 ? -40.0 : 40.0);
+                return accept;
+            }
+            if (!root.horizontal && event.delta-y / 1px != 0) {
+                root.nudge(event.delta-y / 1px > 0 ? -40.0 : 40.0);
+                return accept;
+            }
+            reject
+        }
+    }
+
+    function apply-ratio(ratio: float) {
+        root.value = clamp(ratio, 0.0, 1.0) * root.maximum;
+        root.scrolled(root.value);
+    }
+
+    function drag-to(press-value: float, press-mouse: float, mouse: float, track: float, thumb-len: float) {
+        root.value = clamp(
+            press-value + (mouse - press-mouse) * (root.maximum / max(1.0, track - thumb-len)),
+            0.0,
+            root.maximum,
+        );
+        root.scrolled(root.value);
+    }
+
+    function nudge(delta: float) {
+        root.value = clamp(root.value + delta, 0.0, root.maximum);
+        root.scrolled(root.value);
+    }
+}

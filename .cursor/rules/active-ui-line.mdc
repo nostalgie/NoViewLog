@@ -1,0 +1,35 @@
+---
+description: Active UI — Slint on main; noviewlog-slint binary
+alwaysApply: true
+---
+
+# Active UI line (mandatory)
+
+**Default:** Slint on `main`. There is no second UI track in this product tree.
+
+| Branch | Role | Binary / run |
+|--------|------|----------------|
+| `main` | Active Slint UI | `bash scripts/run-slint.sh` → `noviewlog-slint` |
+
+## Session start (before any edit or branch)
+
+1. `git branch --show-current` and `git status -sb`
+2. Product UI work → stay on or use a feature branch off `main`
+3. **Do not** create/switch branches unless the user asked or the task clearly requires it
+4. Confirm which binary you will build before compiling (`noviewlog-slint`)
+
+## Hard rules
+
+- Feature branches → base off `main`
+- Do **not** implement desktop chrome outside `crates/noviewlog-slint/`
+
+## Slint paths
+
+| Task | Location |
+|------|----------|
+| Slint UI | `crates/noviewlog-slint/` |
+| Slint run helper | `scripts/run-slint.sh` |
+| Shared engine | `crates/noviewlog-core/` |
+
+After Slint/engine changes: build/run Slint (`run-slint.sh` or
+`cargo build --release -p noviewlog-slint`). See `slint-release-build.mdc`.

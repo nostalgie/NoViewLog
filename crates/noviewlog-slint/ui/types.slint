@@ -1,0 +1,25 @@
+// Shared Slint structs for AppWindow models (Rust VecModel bindings).
+
+export struct TabInfo {
+    index: int,
+    name: string,
+    is-console: bool,
+}
+
+export struct TerminalInfo {
+    index: int,
+    id: string,
+    label: string,
+    cwd: string,
+    running: bool,
+}
+
+// Per-tab IN/OUT filter rule (engine FilterRule via stats.filters).
+export struct FilterInfo {
+    id: string,
+    // "include" | "exclude"
+    filter-type: string,
+    pattern: string,
+    enabled: bool,
+    use-regex: bool,
+}

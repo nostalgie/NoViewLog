@@ -1,0 +1,397 @@
+use chrono::{DateTime, Utc};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+#[derive(Clone, Debug)]
+pub struct LogRecord {
+    pub id: u64,
+    pub lines: Vec<String>,
+    pub text: String,
+    pub received_at: DateTime<Utc>,
+    pub level: Option<LogLevel>,
+    /// Live spinner / `\r` overwrite — safe to replace in place; cleared when a real line arrives.
+    pub overwrite: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterType {
+    Include,
+    Exclude,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FilterRule {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub filter_type: FilterType,
+    pub pattern: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// When true, `pattern` is a regex; when false, literal (search-equivalent CI).
+    /// Omitted in legacy config → true (historical regex-first filters).
+    #[serde(default = "default_true")]
+    pub use_regex: bool,
+    #[serde(skip)]
+    pub regex: Option<Arc<Regex>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LogFormat {
+    pub id: String,
+    pub name: String,
+    pub start: String,
+    pub continuation: Vec<String>,
+    pub start_regex: Option<Arc<Regex>>,
+    pub continuation_regexes: Vec<Arc<Regex>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FormatPreset {
+    pub start: String,
+    #[serde(default)]
+    pub continuation: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct PresetConfig {
+    #[serde(default)]
+    pub filters: Vec<FilterRule>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TabConfig {
+    pub name: String,
+    #[serde(default)]
+    pub filters: Vec<FilterRule>,
+    #[serde(default)]
+    pub search_query: String,
+    #[serde(default)]
+    pub search_regex: bool,
+    #[serde(default)]
+    pub search_case_sensitive: bool,
+    #[serde(default)]
+    pub search_whole_word: bool,
+    #[serde(default = "default_true")]
+    pub auto_follow: bool,
+    #[serde(default = "default_true")]
+    pub wrap_lines: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct WorkspaceConfig {
+    #[serde(default)]
+    pub tabs: Vec<TabConfig>,
+    #[serde(default)]
+    pub active_tab: usize,
+}
+
+/// A launchable command within a project (e.g. "backend", "redis", "wsl-worker").
+/// Each program stores a full, self-contained launch definition — command, args,
+/// and cwd are independent per program (paths stored as-is for cross-platform).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProgramConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub launch: LaunchConfig,
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+}
+
+/// Groups related programs — abstract container; does **not** imply a shared cwd.
+/// Optional metadata (`default_cwd`, `path_hint`) is for UI/organization only;
+/// each `ProgramConfig.launch` is the authoritative per-program launch spec.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    pub id: String,
+    pub name: String,
+    /// Optional hint for new programs / display (not applied automatically).
+    #[serde(default)]
+    pub default_cwd: Option<String>,
+    /// Optional free-form path or notes (e.g. repo root); not used at runtime.
+    #[serde(default)]
+    pub path_hint: Option<String>,
+    #[serde(default)]
+    pub programs: Vec<ProgramConfig>,
+    #[serde(default)]
+    pub active_program: usize,
+}
+
+/// Top-level store persisted as `~/.config/noviewlog/projects.yaml`.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectsStore {
+    #[serde(default)]
+    pub projects: Vec<ProjectConfig>,
+    #[serde(default)]
+    pub active_project: usize,
+}
+
+pub fn next_project_id(projects: &[ProjectConfig]) -> String {
+    format!(
+        "project-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(projects.len() as u128)
+    )
+}
+
+pub fn next_program_id(programs: &[ProgramConfig]) -> String {
+    format!(
+        "program-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(programs.len() as u128)
+    )
+}
+
+pub fn program_display_name(launch: &LaunchConfig) -> String {
+    if let Some(file) = &launch.log_file {
+        return std::path::Path::new(file)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(file)
+            .to_string();
+    }
+    if let Some(cmd) = &launch.command {
+        let prefix = if launch.wsl { "wsl: " } else { "" };
+        if launch.args.is_empty() {
+            return format!("{prefix}{cmd}");
+        }
+        let joined = launch
+            .args
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let suffix = if launch.args.len() > 3 { " …" } else { "" };
+        return format!("{prefix}{cmd} {joined}{suffix}");
+    }
+    "program".to_string()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default = "default_format")]
+    pub default_format: String,
+    #[serde(default = "default_preset")]
+    pub default_preset: String,
+    /// Max retained log records (≈ lines) in the live scrollback buffer.
+    #[serde(default = "default_max_scrollback_lines")]
+    pub max_scrollback_lines: usize,
+    /// Bitmap viewport fontdue size in points (not UI chrome scale).
+    #[serde(default = "default_viewport_font_size")]
+    pub viewport_font_size: f32,
+    #[serde(default)]
+    pub formats: std::collections::HashMap<String, FormatPreset>,
+    #[serde(default)]
+    pub presets: std::collections::HashMap<String, PresetConfig>,
+    #[serde(default)]
+    pub workspaces: std::collections::HashMap<String, WorkspaceConfig>,
+}
+
+pub const DEFAULT_MAX_SCROLLBACK_LINES: usize = 10_000;
+pub const MIN_MAX_SCROLLBACK_LINES: usize = 100;
+pub const MAX_MAX_SCROLLBACK_LINES: usize = 30_000;
+
+pub const DEFAULT_VIEWPORT_FONT_SIZE: f32 = 13.0;
+pub const MIN_VIEWPORT_FONT_SIZE: f32 = 8.0;
+pub const MAX_VIEWPORT_FONT_SIZE: f32 = 32.0;
+
+pub fn clamp_max_scrollback_lines(value: usize) -> usize {
+    value.clamp(MIN_MAX_SCROLLBACK_LINES, MAX_MAX_SCROLLBACK_LINES)
+}
+
+pub fn clamp_viewport_font_size(value: f32) -> f32 {
+    if !value.is_finite() {
+        return DEFAULT_VIEWPORT_FONT_SIZE;
+    }
+    value.clamp(MIN_VIEWPORT_FONT_SIZE, MAX_VIEWPORT_FONT_SIZE)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TextSegment {
+    pub text: String,
+    pub style: Option<TextStyle>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextStyle {
+    pub fg: Option<(u8, u8, u8)>,
+    pub bg: Option<(u8, u8, u8)>,
+    pub bold: bool,
+    pub dim: bool,
+    pub underline: bool,
+    pub search: bool,
+    pub search_current: bool,
+    pub selected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub line_index: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct FlatLine {
+    pub record_id: u64,
+    pub line_index: usize,
+    pub segments: Vec<TextSegment>,
+    pub raw: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LaunchConfig {
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub preset: Option<String>,
+    pub config_path: Option<String>,
+    /// Open an existing log file instead of wrapping a process.
+    pub log_file: Option<String>,
+    /// Working directory for this program's process (optional, per-program).
+    /// Stored verbatim — Windows paths (e.g. `c:\bin`) are preserved for cross-platform configs.
+    /// In WSL mode (`wsl: true`) this is a **Linux** path passed to `wsl --cd`.
+    pub cwd: Option<String>,
+    /// When true, spawn via `wsl.exe` (Windows-only). Command/args run inside the distro;
+    /// `cwd` is the Linux working directory (`--cd`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wsl: bool,
+    /// Optional WSL distribution (`wsl -d`). Empty / omitted = default distro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl_distro: Option<String>,
+}
+
+impl LaunchConfig {
+    pub fn has_process_launch(&self) -> bool {
+        self.command.is_some() || self.log_file.is_some()
+    }
+}
+
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+fn default_format() -> String {
+    "node-default".to_string()
+}
+
+fn default_preset() -> String {
+    "node-dev".to_string()
+}
+
+fn default_max_scrollback_lines() -> usize {
+    DEFAULT_MAX_SCROLLBACK_LINES
+}
+
+fn default_viewport_font_size() -> f32 {
+    DEFAULT_VIEWPORT_FONT_SIZE
+}
+
+pub fn compile_regex(pattern: &str) -> Arc<Regex> {
+    match Regex::new(pattern) {
+        Ok(re) => Arc::new(re),
+        Err(_) => {
+            let escaped = regex::escape(pattern);
+            Arc::new(Regex::new(&escaped).expect("escaped pattern is valid"))
+        }
+    }
+}
+
+pub fn compile_filter(mut rule: FilterRule) -> FilterRule {
+    // Literal mode matches search's case-insensitive semantics; regex mode uses
+    // Regex::new with the historical escape fallback on invalid patterns.
+    rule.regex = Some(if rule.use_regex {
+        compile_regex(&rule.pattern)
+    } else {
+        let escaped = regex::escape(&rule.pattern);
+        Arc::new(
+            Regex::new(&format!("(?i){escaped}")).expect("escaped literal pattern is valid"),
+        )
+    });
+    rule
+}
+
+pub fn detect_level(text: &str) -> Option<LogLevel> {
+    use std::sync::OnceLock;
+    // Compile once; this runs per committed + per live line, so re-compiling
+    // on every call is a severe hot-path cost.
+    static LEVEL_RES: OnceLock<[Regex; 4]> = OnceLock::new();
+    let [error, warn, debug, info] = LEVEL_RES.get_or_init(|| {
+        [
+            Regex::new(r"(?i)\b(error|exception|fatal)\b").unwrap(),
+            Regex::new(r"(?i)\b(warn|warning)\b").unwrap(),
+            Regex::new(r"(?i)\b(debug|trace)\b").unwrap(),
+            Regex::new(r"(?i)\binfo\b").unwrap(),
+        ]
+    });
+
+    if error.is_match(text) {
+        Some(LogLevel::Error)
+    } else if warn.is_match(text) {
+        Some(LogLevel::Warn)
+    } else if debug.is_match(text) {
+        Some(LogLevel::Debug)
+    } else if info.is_match(text) {
+        Some(LogLevel::Info)
+    } else {
+        None
+    }
+}
+
+pub fn next_filter_id(filters: &[FilterRule], kind: &str) -> String {
+    format!(
+        "{}-{}-{}",
+        kind,
+        filters.len() + 1,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    )
+}
+
+pub fn style_from_name(style: &str) -> TextStyle {
+    let mut out = TextStyle::default();
+    for part in style.split('.') {
+        match part.trim() {
+            "red" => out.fg = Some((248, 81, 73)),
+            "green" => out.fg = Some((63, 185, 80)),
+            "yellow" => out.fg = Some((210, 153, 34)),
+            "blue" => out.fg = Some((88, 166, 255)),
+            "magenta" => out.fg = Some((210, 96, 230)),
+            "cyan" => out.fg = Some((57, 197, 207)),
+            "white" => out.fg = Some((230, 237, 243)),
+            "gray" => out.fg = Some((139, 148, 158)),
+            "bold" => out.bold = true,
+            "dim" => {
+                out.dim = true;
+                if out.fg.is_none() {
+                    out.fg = Some((139, 148, 158));
+                }
+            }
+            "underline" => out.underline = true,
+            _ => {}
+        }
+    }
+    out
+}

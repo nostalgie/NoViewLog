@@ -1,0 +1,67 @@
+# Architecture
+
+NoViewLog is a native desktop log viewer. **Slint** (`noviewlog-slint`) is the
+desktop UI. The shared engine lives in `noviewlog-core`. Primary development
+target is Ubuntu Linux; other platforms are best-effort.
+
+## Vocabulary
+
+| Term | Meaning |
+|------|---------|
+| **Terminal** | Independent session (PTY shell, process, or read-only log file) |
+| **Tab / View** | Filter view inside a terminal (`LogView`). JSON commands use `tab_*`; the type is `LogView` |
+| **Console** | Built-in first tab (index 0); not filter-editable; not renameable in Slint |
+| **Record** | Parsed log unit (may span multiple physical lines) |
+| **Viewport** | Fontdue-rendered RGBA bitmap of the visible slice |
+
+```
+TerminalState
+ ├── views: Vec<LogView>     # Console + filter tabs
+ ├── buffer: RecordBuffer
+ ├── ingest / parser
+ └── optional file session (file_load / file_backed)
+```
+
+## Data flow
+
+```
+Slint UI  --Command (typed or JSON)-->  Engine
+          <--stats / events JSON-----
+          <--RGBA pixels (render)----  ViewportRenderer
+PTY bytes --> Engine --> TerminalIngest --> RecordBuffer --> flat lines --> render
+```
+
+### Host API (Slint)
+
+Slint links `noviewlog-core` as an `rlib` and calls `Engine` directly:
+
+- `tick` / `needs_render` / `render`
+- Typed `Command` via `send_command` / `apply_command` (preferred)
+- `poll_event_json` + `parse_engine_event` → `StatsSnapshot` / `EngineEvent`
+- `handle_key`, `set_launch`, `selection_text`
+- JSON (`send_command_json`) remains for tests and tooling
+
+## Dual ANSI paths
+
+| Layer | Module | Role |
+|-------|--------|------|
+| Live VT | `core/terminal.rs` | `vte` screen + scrollback; re-emits SGR ANSI for records |
+| Line SGR | `core/ansi.rs` | Parse/strip/overlay ANSI on stored lines (non-VT) |
+
+When fixing coloring or escape handling, identify which layer owns the bug
+before changing code.
+
+## Key modules (engine)
+
+| Module | Responsibility |
+|--------|----------------|
+| `engine` | Session façade: commands, tick, stats, multi-terminal |
+| `terminal_state` / `TerminalState` | Per-terminal bag (views, buffer, file window) |
+| `log_view` | Per-tab filters + search + flat lines |
+| `pty` | Process I/O |
+| `viewport` + `viewport_layout` | Paint + soft-wrap / selection geometry |
+| `core/*` | Parser, filters, buffer, config, formats |
+
+## Agent docs
+
+See [`AGENTS.md`](../AGENTS.md) and [`.cursor/rules/`](../.cursor/rules/).

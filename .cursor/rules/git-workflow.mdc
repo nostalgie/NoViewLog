@@ -1,0 +1,41 @@
+---
+description: Git branch and PR workflow — feature branches only; never push main
+alwaysApply: true
+---
+
+# Git workflow (agents)
+
+## Branches
+
+1. Run `git branch --show-current` before creating or switching branches.
+2. Base feature work off `main`.
+3. Commit messages and PR titles/bodies: **English only**.
+4. Commit and push the feature branch before opening or updating a PR.
+
+## Protected main
+
+- **Never** `git push origin main` (or force-push to `main`).
+- All changes land via **pull request** into `main`.
+
+## After a successful PR merge
+
+**Always delete the merged feature branch** — local and remote:
+
+```bash
+git checkout main
+git pull origin main
+git branch -d <feature-branch>
+git push origin --delete <feature-branch>
+```
+
+Do this in the same turn as the merge, before finishing.
+
+If `git branch -d` refuses (branch not fully merged locally), use `git branch -D`
+only after confirming the PR is merged into `main`.
+
+## PR lifecycle
+
+1. Implement on a feature branch off `main`
+2. Commit, push, create/update PR
+3. Merge when asked (or when the task expects merge)
+4. Delete the merged branch (see above)

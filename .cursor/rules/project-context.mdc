@@ -1,0 +1,48 @@
+---
+description: NoViewLog stack and repo map — Rust engine + Slint UI
+alwaysApply: true
+---
+
+# NoViewLog — project context
+
+Native **desktop** log viewer: Rust engine + Slint UI. No WebView, no separate
+frontend. Log viewport is rendered by Rust (`fontdue` bitmap).
+
+Active UI: **Slint** on `main` (`crates/noviewlog-slint/`). See `active-ui-line.mdc`.
+
+`npm` / `node` in README are **commands noviewlog wraps** (via PTY), not this
+repo's tech stack.
+
+## Build
+
+After Slint or shared engine changes used by Slint →
+`bash scripts/run-slint.sh` or `cargo build --release -p noviewlog-slint`.
+Windows release staging → `bash scripts/publish-slint-windows.sh` (native
+MSVC). See `slint-release-build.mdc`.
+
+Do **not** ask the user to rebuild manually.
+
+## Not in this repo (do not search unless explicitly asked)
+
+- `package.json`, `node_modules`
+- `*.js`, `*.ts`, `*.tsx`, `*.css`, `*.html`
+- webpack, vite, react, or any web UI framework
+
+## Where to go first
+
+| Task | Location |
+|------|----------|
+| Slint UI | `crates/noviewlog-slint/` |
+| Shared Rust engine | `crates/noviewlog-core/` |
+| Parsing, filters, buffer | `crates/noviewlog-core/src/core/` |
+| Process spawn (PTY) | `crates/noviewlog-core/src/pty.rs` |
+| Bitmap viewport (fontdue) | `crates/noviewlog-core/src/viewport.rs` |
+| Bundled presets | `presets/*.yaml` |
+| User config (runtime) | `~/.config/noviewlog/config.yaml` |
+
+## Agent behavior
+
+- Do **not** run exploratory glob/grep for CSS, JS, `package.json`, or frontend components before starting a task.
+- UI work → `crates/noviewlog-slint/` on `main` / feature branch off `main`.
+- Logic and process handling → `crates/noviewlog-core/`.
+- English only in commits, PRs, and tracked docs/comments.

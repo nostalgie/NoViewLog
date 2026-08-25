@@ -1,0 +1,32 @@
+/target/
+/dist/
+.deps/
+.DS_Store
+*.log
+
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*credentials*
+secrets/
+*.keystore
+.npmrc
+nuget.config
+appsettings.*.local.json
+System\ Volume\ Information/
+sample
+
+# IDE / editor
+.vscode/
+.idea/
+*.code-workspace
+.fleet/
+*.swp
+*~

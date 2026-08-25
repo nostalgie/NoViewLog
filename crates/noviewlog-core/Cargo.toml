@@ -1,0 +1,27 @@
+[package]
+name = "noviewlog-core"
+version = "0.3.0"
+edition = "2021"
+description = "NoViewLog engine — PTY, parsing, filters, offscreen viewport"
+license = "MIT"
+repository = "https://github.com/nostalgie/NoViewLog"
+
+[lib]
+name = "noviewlog_core"
+crate-type = ["rlib"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6"
+fontdue = "0.9"
+png = "0.17"
+portable-pty = "0.8"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ttf-parser = "0.25"
+vte = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.10"

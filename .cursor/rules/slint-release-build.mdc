@@ -1,0 +1,40 @@
+---
+description: MANDATORY — build Slint after engine/UI changes
+alwaysApply: true
+---
+
+# MANDATORY: Slint build / run
+
+After changes to `crates/noviewlog-slint/`, `crates/noviewlog-core/` (when used
+by Slint), or Slint packaging scripts, build or run Slint yourself. Do **not**
+ask the user to rebuild.
+
+## What the user runs
+
+| Path | Role |
+|------|------|
+| `bash scripts/run-slint.sh` | Dev build + run `noviewlog-slint` (Linux) |
+| `cargo build --release -p noviewlog-slint` | Release binary |
+| `bash scripts/publish-slint-windows.sh` | Windows MSVC → `dist/noviewlog-slint-win-x64/NoViewLog.exe` |
+
+## Required commands (Linux)
+
+```bash
+bash scripts/run-slint.sh
+# or
+cargo build --release -p noviewlog-slint
+```
+
+## Windows release folder
+
+Run on a Windows host with the MSVC Rust toolchain (not Linux cross):
+
+```bash
+bash scripts/publish-slint-windows.sh
+```
+
+## Agent obligations
+
+1. Run the appropriate command(s) yourself — do **not** tell the user to rebuild.
+2. Do **not** claim Slint work is done until the build (or publish on Windows) succeeds when those surfaces changed.
+3. Linux fontconfig helper: `scripts/setup-slint-deps.sh` (used by `run-slint.sh`) — do not port to Windows.

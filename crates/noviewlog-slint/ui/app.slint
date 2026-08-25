@@ -1,0 +1,1982 @@
+// Slint chrome: single CSD title bar (logo + in-bar menus + drag gap + captions)
+// + terminals sidebar + tab strip + viewport.
+// Dark theme via Palette + fluent style; Theme holds app chrome colors.
+// Client-side decorations: no-frame, custom caption strip, deferred title-bar drag
+// (gap only), double-click maximize, thin winit resize-border.
+// Native MenuBar is not used — Slint forces it above Window body children.
+
+import { Palette, LineEdit, SpinBox, Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { TabInfo, TerminalInfo, FilterInfo } from "types.slint";
+import {
+    CtxAccelMenuItem,
+    ModeToggle,
+    CaptionButton,
+    TitleBarToggleChip,
+    TitleBarMenuButton,
+    ChromeMenuItem,
+    ChromeMenuSeparator,
+    ChromeMenuPopup,
+    ChromeSubmenu,
+} from "chrome-menus.slint";
+import {
+    TabChip,
+    FilterRow,
+    TerminalRow,
+    EngineScrollBar,
+} from "sidebar.slint";
+
+export { TabInfo, TerminalInfo, FilterInfo }
+
+export component AppWindow inherits Window {
+    title: "NoViewLog";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    min-width: 800px;
+    min-height: 500px;
+    // Client-side decorations (frameless window + custom caption strip).
+    no-frame: true;
+    // Edge/corner drag-resize. Keep thin so the top grip barely overlaps the 32px
+    // menu strip (5px was stealing clicks on File/View/Tab labels).
+    resize-border-width: root.maximized ? 0px : 2px;
+    background: Theme.bg-window;
+    forward-focus: viewport-host;
+
+    in-out property <image> viewport-image;
+    in-out property <string> status-text: "ready";
+    in-out property <[TabInfo]> tabs-model;
+    in-out property <int> active-tab-index: 0;
+    in-out property <bool> can-restore-tab: false;
+    in-out property <[TerminalInfo]> terminals-model;
+    in-out property <int> active-terminal-index: 0;
+
+    // Per-tab IN/OUT filters (hidden / no-op on Console; engine rejects Console filters).
+    in-out property <[FilterInfo]> filters-model;
+    in-out property <string> filter-draft: "";
+    // Draft regex mode for next Include/Exclude (default literal).
+    in-out property <bool> filter-draft-regex: false;
+    in-out property <bool> filters-editable: false;
+
+    // VS Code–style floating find bar (over log viewport).
+    in-out property <bool> find-open: false;
+    in-out property <string> find-query: "";
+    in-out property <bool> find-case-sensitive: false;
+    in-out property <bool> find-whole-word: false;
+    in-out property <bool> find-regex: false;
+    in-out property <string> find-status: "";
+    in-out property <string> find-error: "";
+    in-out property <bool> find-focus-request: false;
+
+    // Engine scroll chrome (device-pixel units from stats).
+    in-out property <float> scroll-y: 0.0;
+    in-out property <float> max-scroll-y: 0.0;
+    in-out property <float> scroll-x: 0.0;
+    in-out property <float> max-scroll-x: 0.0;
+    in-out property <float> viewport-page-h: 1.0;
+    in-out property <float> viewport-page-w: 1.0;
+    in-out property <bool> show-hscroll: false;
+
+    // Viewport context menu (Copy / Paste) enable flags — refreshed from Rust.
+    in-out property <bool> can-copy: false;
+    in-out property <bool> can-paste: false;
+    // PopupWindow forbids setting x/y from outside; bind position via these.
+    property <length> viewport-menu-x: 0px;
+    property <length> viewport-menu-y: 0px;
+
+    // Chrome list scroll (logical px); Flickable viewport-x/y are negative offsets.
+    in-out property <float> terminals-scroll-y: 0.0;
+    in-out property <float> tabs-scroll-x: 0.0;
+    // Bar visibility flags — set from Flickable `changed` callbacks only.
+    // Never bind `if *-scroll-max()` into a layout that feeds that same max
+    // (layoutinfo cycle via flick width/height).
+    property <bool> terminals-bar-visible: false;
+    property <bool> tabs-bar-visible: false;
+
+    // Drag-reorder session (terminals sidebar / filter tabs).
+    property <bool> term-dragging: false;
+    property <string> term-drag-id: "";
+    property <int> term-drag-from: -1;
+    property <int> term-drop-to: -1;
+    property <bool> tab-dragging: false;
+    property <int> tab-drag-from: -1;
+    property <int> tab-drop-to: -1;
+
+    callback viewport-resized(width: length, height: length);
+    callback viewport-focused(focused: bool);
+    callback key-event(text: string, control: bool, meta: bool, alt: bool, shift: bool) -> bool;
+    callback viewport-scrolled(delta-y: float);
+    callback viewport-scrolled-x(delta-x: float);
+    callback viewport-scroll-y-changed(value: float);
+    callback viewport-scroll-x-changed(value: float);
+    // Pointer over the log bitmap: button 0=left, 1=middle, 2=right; kind 0=down, 1=up, 2=move.
+    callback viewport-pointer(x: float, y: float, button: int, kind: int);
+    // Right-click menu: refresh enable flags, then Copy / Paste actions.
+    callback viewport-context-opening();
+    callback viewport-copy();
+    callback viewport-paste();
+
+    callback tab-switch(index: int);
+    callback tab-add();
+    callback tab-close(index: int);
+    callback tab-restore();
+    callback tab-rename(index: int, name: string);
+    callback tab-move(from-index: int, to-index: int);
+
+    callback terminal-switch(id: string);
+    callback terminal-add();
+    callback terminal-close(id: string);
+    callback terminal-move(id: string, to-index: int);
+    callback terminal-rename(id: string, name: string);
+
+    // IN/OUT filters → engine filter_add / filter_toggle / filter_remove / filter_clear.
+    // filter-type is "include" or "exclude"; use-regex is the draft `.*` toggle.
+    callback filter-add(filter-type: string, pattern: string, use-regex: bool);
+    callback filter-toggle(id: string, enabled: bool);
+    callback filter-remove(id: string);
+    callback filter-clear();
+
+    // Find panel → engine search_set / search_goto (debounced in Rust).
+    callback find-query-changed(query: string, regex: bool, case-sensitive: bool, whole-word: bool);
+    callback find-goto(delta: int);
+    // Flush pending search_set (focus left the Find field / toggles).
+    callback find-commit();
+    callback find-closed();
+
+    // View menu → engine commands (bitmap font zoom + wrap + follow).
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-reset();
+    callback set-wrap-lines(wrap: bool);
+    callback set-follow(follow: bool);
+    // Ctrl/Meta + wheel over the log viewport → zoom (delta-y > 0 zooms in).
+    callback viewport-zoom-wheel(delta-y: float);
+
+    // File → Open log file… / Settings… (engine load_file / set_settings).
+    callback open-log-file();
+    callback settings-apply(max-scrollback-lines: int);
+
+    // Title-strip drag → Rust calls winit::Window::drag_window.
+    // Only the empty stretch between menus and caption buttons invokes this.
+    callback title-bar-drag();
+
+    // Synced from engine stats (View → Follow / Wrap / Horizontal scroll checkmarks).
+    // Callback set-follow → engine SetFollow / stats auto_follow / property auto-follow.
+    // Engine default auto_follow / wrap_lines: true — init checked; stats overwrite on first flush.
+    in-out property <bool> auto-follow: true;
+    in-out property <bool> wrap-lines: true;
+    // Max retained log lines (engine max_scrollback_lines); Settings edits a draft.
+    in-out property <int> max-scrollback-lines: 10000;
+    property <int> settings-draft: 10000;
+    // Tab menu enablement (console + last-tab guards).
+    in-out property <bool> can-close-tab: false;
+    in-out property <bool> can-rename-tab: true;
+    // Inline rename session (-1 = idle). Draft lives here so chips stay in sync.
+    in-out property <int> renaming-tab-index: -1;
+    in-out property <string> rename-draft: "";
+    // Terminal row rename (empty id = idle); shares rename-draft while active.
+    in-out property <string> renaming-terminal-id: "";
+
+    pure function is-renaming() -> bool {
+        root.renaming-tab-index >= 0 || root.renaming-terminal-id != ""
+    }
+
+    // In-panel ChromeSubmenu mutual exclusion per L1 menu (-1 = none).
+    // Lives on AppWindow: PopupWindow properties are not accessible from outside.
+    property <int> file-active-submenu: -1;
+    property <int> view-active-submenu: -1;
+    property <int> tab-active-submenu: -1;
+
+    // Menubar "armed": any top-level chrome menu is open → hover switches via
+    // menu-bar-pointer-moved (winit), not TouchArea has-hover (blocked by Popup).
+    out property <bool> menu-bar-active: file-menu.is-open || view-menu.is-open || tab-menu.is-open || help-menu.is-open;
+
+    pure function terminals-scroll-max() -> float {
+        max(0.0, (term-flick.viewport-height - term-flick.height) / 1px)
+    }
+
+    pure function tabs-scroll-max() -> float {
+        max(0.0, (tab-flick.viewport-width - tab-flick.width) / 1px)
+    }
+
+    pure function hit-title-menu-btn(btn-x: length, btn-y: length, btn-w: length, btn-h: length, px: length, py: length) -> bool {
+        px >= btn-x && px < btn-x + btn-w && py >= btn-y && py < btn-y + btn-h
+    }
+
+    // Invoked from Rust on CursorMoved while a chrome menu may be open.
+    public function menu-bar-pointer-moved(x: float, y: float) {
+        if (!root.menu-bar-active) {
+            return;
+        }
+        let px = x * 1px;
+        let py = y * 1px;
+        let fa = file-btn.absolute-position;
+        if (root.hit-title-menu-btn(fa.x, fa.y, file-btn.width, file-btn.height, px, py)) {
+            if (!file-menu.is-open) {
+                root.open-file-menu();
+            }
+            return;
+        }
+        let va = view-btn.absolute-position;
+        if (root.hit-title-menu-btn(va.x, va.y, view-btn.width, view-btn.height, px, py)) {
+            if (!view-menu.is-open) {
+                root.open-view-menu();
+            }
+            return;
+        }
+        let tba = tab-btn.absolute-position;
+        if (root.hit-title-menu-btn(tba.x, tba.y, tab-btn.width, tab-btn.height, px, py)) {
+            if (!tab-menu.is-open) {
+                root.open-tab-menu();
+            }
+            return;
+        }
+        let ha = help-btn.absolute-position;
+        if (root.hit-title-menu-btn(ha.x, ha.y, help-btn.width, help-btn.height, px, py)) {
+            if (!help-menu.is-open) {
+                root.open-help-menu();
+            }
+        }
+    }
+
+    // PopupWindow blocks press on the title-bar drag TouchArea. Rust calls this on
+    // MouseInput while a chrome menu is open; returns true if the press hit the
+    // drag gap (menus closed — same gesture can then start window drag after slop).
+    public function title-bar-chrome-press(x: float, y: float) -> bool {
+        if (!root.menu-bar-active) {
+            return false;
+        }
+        let px = x * 1px;
+        let py = y * 1px;
+        let a = title-drag.absolute-position;
+        if (!root.hit-title-menu-btn(a.x, a.y, title-drag.width, title-drag.height, px, py)) {
+            return false;
+        }
+        root.close-chrome-menus();
+        return true;
+    }
+
+    function sync-terminals-bar-visible() {
+        root.terminals-bar-visible = root.terminals-scroll-max() > 0.5;
+    }
+
+    function sync-tabs-bar-visible() {
+        root.tabs-bar-visible = root.tabs-scroll-max() > 0.5;
+    }
+
+    function scroll-tabs-by(delta-y: float) {
+        // Wheel up (positive delta-y) → reveal tabs on the left.
+        // Always set both the model property and Flickable — assigning viewport-x
+        // breaks a one-way binding from tabs-scroll-x.
+        root.tabs-scroll-x = clamp(root.tabs-scroll-x - delta-y, 0.0, root.tabs-scroll-max());
+        tab-flick.viewport-x = -root.tabs-scroll-x * 1px;
+        root.sync-tabs-bar-visible();
+    }
+
+    function scroll-terminals-by(delta-y: float) {
+        // Wheel up (positive delta-y) → scroll content up / reveal upper rows.
+        root.terminals-scroll-y = clamp(root.terminals-scroll-y - delta-y, 0.0, root.terminals-scroll-max());
+        term-flick.viewport-y = -root.terminals-scroll-y * 1px;
+        root.sync-terminals-bar-visible();
+    }
+
+    // Row pitch: TerminalRow height 44px + terms-col spacing 3px.
+    function update-term-drop(abs-y: length) {
+        let n = root.terminals-model.length;
+        if (n < 2 || !root.term-dragging) {
+            return;
+        }
+        let origin = terms-col.absolute-position.y;
+        let y_px = (abs-y - origin) / 1px + root.terminals-scroll-y;
+        let raw = floor(y_px / 47.0);
+        root.term-drop-to = max(0, min(n - 1, raw));
+    }
+
+    function finish-term-drag() {
+        if (root.term-dragging && root.term-drag-from >= 0 && root.term-drop-to >= 0
+            && root.term-drop-to != root.term-drag-from && root.term-drag-id != "") {
+            root.terminal-move(root.term-drag-id, root.term-drop-to);
+        }
+        root.term-dragging = false;
+        root.term-drag-id = "";
+        root.term-drag-from = -1;
+        root.term-drop-to = -1;
+    }
+
+    function update-tab-drop(abs-x: length) {
+        let n = root.tabs-model.length;
+        if (n < 2 || !root.tab-dragging || root.tab-drag-from < 1) {
+            return;
+        }
+        let origin = tabs-row.absolute-position.x;
+        let x_px = (abs-x - origin) / 1px + root.tabs-scroll-x;
+        let avg_px = (tabs-row.preferred-width / 1px) / n;
+        let raw = avg_px > 0.0 ? floor(x_px / avg_px) : 1;
+        // Console stays at 0 — filter drops clamp to [1, n-1].
+        root.tab-drop-to = max(1, min(n - 1, raw));
+    }
+
+    function finish-tab-drag() {
+        if (root.tab-dragging && root.tab-drag-from >= 1 && root.tab-drop-to >= 1
+            && root.tab-drop-to != root.tab-drag-from) {
+            root.tab-move(root.tab-drag-from, root.tab-drop-to);
+        }
+        root.tab-dragging = false;
+        root.tab-drag-from = -1;
+        root.tab-drop-to = -1;
+    }
+
+    init => {
+        Palette.color-scheme = ColorScheme.dark;
+    }
+
+    function close-chrome-menus() {
+        // In-panel ChromeSubmenu flyouts close with their L1 PopupWindow.
+        root.file-active-submenu = -1;
+        root.view-active-submenu = -1;
+        root.tab-active-submenu = -1;
+        file-menu.close();
+        view-menu.close();
+        tab-menu.close();
+        help-menu.close();
+    }
+
+    function start-tab-rename(index: int) {
+        if (index < 0 || index >= root.tabs-model.length) {
+            return;
+        }
+        // Console is a fixed system tab — never enter inline rename.
+        if (root.tabs-model[index].is-console) {
+            return;
+        }
+        // Abort any stuck reorder so drop markers cannot linger during rename.
+        root.finish-tab-drag();
+        root.end-terminal-rename();
+        root.renaming-tab-index = index;
+        root.rename-draft = root.tabs-model[index].name;
+    }
+
+    function end-tab-rename() {
+        root.renaming-tab-index = -1;
+        if (root.renaming-terminal-id == "") {
+            root.rename-draft = "";
+        }
+    }
+
+    // Click-away from viewport/find while rename re-focuses would leave stuck editors.
+    function dismiss-tab-rename-if-any() {
+        if (root.renaming-tab-index < 0) {
+            return;
+        }
+        root.commit-tab-rename(root.renaming-tab-index, root.rename-draft);
+    }
+
+    function dismiss-terminal-rename-if-any() {
+        if (root.renaming-terminal-id == "") {
+            return;
+        }
+        root.commit-terminal-rename(root.renaming-terminal-id, root.rename-draft);
+    }
+
+    function dismiss-any-rename-if-any() {
+        root.dismiss-tab-rename-if-any();
+        root.dismiss-terminal-rename-if-any();
+    }
+
+    // Empty-strip double-click → new tab. Must not be blocked by stuck TERMINALS rename
+    // (`is-renaming()` ORs both). Dismiss any rename, then tab-add.
+    function gutter-request-tab-add() {
+        root.dismiss-any-rename-if-any();
+        root.tab-add();
+    }
+
+    function commit-tab-rename(index: int, name: string) {
+        if (index < 0) {
+            root.end-tab-rename();
+            return;
+        }
+        root.tab-rename(index, name);
+        root.end-tab-rename();
+    }
+
+    function start-terminal-rename(id: string, label: string) {
+        if (id == "") {
+            return;
+        }
+        root.finish-term-drag();
+        root.end-tab-rename();
+        root.renaming-terminal-id = id;
+        root.rename-draft = label;
+    }
+
+    function end-terminal-rename() {
+        root.renaming-terminal-id = "";
+        if (root.renaming-tab-index < 0) {
+            root.rename-draft = "";
+        }
+    }
+
+    function commit-terminal-rename(id: string, name: string) {
+        if (id == "") {
+            root.end-terminal-rename();
+            return;
+        }
+        root.terminal-rename(id, name);
+        root.end-terminal-rename();
+    }
+
+    // Open one top-level menu; closes the others (hover switch / click open).
+    function open-file-menu() {
+        root.view-active-submenu = -1;
+        root.tab-active-submenu = -1;
+        view-menu.close();
+        tab-menu.close();
+        help-menu.close();
+        root.file-active-submenu = -1;
+        file-menu.show();
+    }
+
+    function open-view-menu() {
+        root.file-active-submenu = -1;
+        root.tab-active-submenu = -1;
+        file-menu.close();
+        tab-menu.close();
+        help-menu.close();
+        root.view-active-submenu = -1;
+        view-menu.show();
+    }
+
+    function open-tab-menu() {
+        root.file-active-submenu = -1;
+        root.view-active-submenu = -1;
+        file-menu.close();
+        view-menu.close();
+        help-menu.close();
+        root.tab-active-submenu = -1;
+        tab-menu.show();
+    }
+
+    function open-help-menu() {
+        root.file-active-submenu = -1;
+        root.view-active-submenu = -1;
+        root.tab-active-submenu = -1;
+        file-menu.close();
+        view-menu.close();
+        tab-menu.close();
+        help-menu.show();
+    }
+
+    function open-settings() {
+        root.close-chrome-menus();
+        root.settings-draft = root.max-scrollback-lines;
+        settings-dlg.show();
+    }
+
+    function close-settings() {
+        settings-dlg.close();
+    }
+
+    function confirm-settings() {
+        root.settings-apply(root.settings-draft);
+        settings-dlg.close();
+    }
+
+    function open-about() {
+        root.close-chrome-menus();
+        about-dlg.show();
+    }
+
+    function close-about() {
+        about-dlg.close();
+    }
+
+    // 1px CSD outline (Theme.window-border) — keeps frameless window distinct from neighbors.
+    // Hidden when maximized so the edge sits flush with the screen.
+    Rectangle {
+        border-width: root.maximized ? 0px : 1px;
+        border-color: Theme.window-border;
+        background: Theme.bg-window;
+
+    VerticalLayout {
+        spacing: 0px;
+        // Inset content so the 1px border isn't painted over (Slint draws border inside).
+        padding: root.maximized ? 0px : 1px;
+
+        // Single CSD strip: [Logo] [File] [View] [Tab] [Help] .... [min] [max] [close]
+        // Native MenuBar omitted — it cannot sit inside this strip.
+        Rectangle {
+            height: 32px;
+            background: Theme.bg-panel;
+
+            // Default stretch alignment (NOT center): center ignores horizontal-stretch
+            // and packs logo/menus/captions into the middle with empty sides.
+            // Layout: [logo+menus stretch:0] [drag gap stretch:1] [captions stretch:0]
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 4px;
+                // File / View / Tab stay tight; logo→File gap is padding-right on the logo.
+                spacing: 2px;
+
+                // Full strip height + VerticalLayout center — same as TitleBarMenuButton.
+                // Bare 16px Image top-packs under HorizontalLayout stretch alignment.
+                VerticalLayout {
+                    horizontal-stretch: 0;
+                    height: 32px;
+                    alignment: center;
+                    // Match left window edge→logo: padding-left (10) + CSD inset (0/1).
+                    // Total logo→File = padding-right + spacing(2).
+                    padding-right: root.maximized ? 8px : 9px;
+
+                    Image {
+                        source: @image-url("assets/icon.png");
+                        width: 16px;
+                        height: 16px;
+                        image-fit: contain;
+                    }
+                }
+
+                // File menu — Open log / Settings / Exit.
+                file-btn := TitleBarMenuButton {
+                    horizontal-stretch: 0;
+                    label: "File";
+                    open: file-menu.is-open;
+                    clicked => {
+                        if (file-menu.is-open) {
+                            root.close-chrome-menus();
+                        } else {
+                            root.open-file-menu();
+                        }
+                    }
+
+                    file-menu := PopupWindow {
+                        x: 0px;
+                        // Flush under menubar button (square panel via ChromeMenuPopup).
+                        y: parent.height + 1px;
+                        close-policy: close-on-click-outside;
+
+                        ChromeMenuPopup {
+                            ChromeMenuItem {
+                                title: "Open log file…";
+                                activated => {
+                                    root.close-chrome-menus();
+                                    root.open-log-file();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Settings…";
+                                activated => {
+                                    root.open-settings();
+                                }
+                            }
+                            ChromeMenuSeparator {}
+                            ChromeMenuItem {
+                                title: "Exit";
+                                activated => {
+                                    root.close-chrome-menus();
+                                    root.close();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // View menu — Follow + wrap modes + Zoom (wired).
+                view-btn := TitleBarMenuButton {
+                    horizontal-stretch: 0;
+                    label: "View";
+                    open: view-menu.is-open;
+                    clicked => {
+                        if (view-menu.is-open) {
+                            root.close-chrome-menus();
+                        } else {
+                            root.open-view-menu();
+                        }
+                    }
+
+                    view-menu := PopupWindow {
+                        x: 0px;
+                        // Flush under menubar button (square panel via ChromeMenuPopup).
+                        y: parent.height + 1px;
+                        close-policy: close-on-click-outside;
+
+                        ChromeMenuPopup {
+                            // Zoom flyout: 3 items → 8+96
+                            cascade-open: root.view-active-submenu >= 0;
+                            cascade-panel-height: 8px + 32px * 3;
+                            ChromeMenuItem {
+                                title: "Follow";
+                                checkable: true;
+                                checked: root.auto-follow;
+                                activated => {
+                                    // Follow: auto-scroll to newest lines.
+                                    root.set-follow(!root.auto-follow);
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Wrap lines";
+                                checkable: true;
+                                checked: root.wrap-lines;
+                                activated => {
+                                    // Wrap toggles; Horizontal scroll forces wrap off.
+                                    root.set-wrap-lines(!root.wrap-lines);
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Horizontal scroll";
+                                checkable: true;
+                                checked: !root.wrap-lines;
+                                activated => {
+                                    root.set-wrap-lines(false);
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuSeparator {}
+                            ChromeSubmenu {
+                                title: "Zoom";
+                                submenu-id: 0;
+                                item-count: 3;
+                                active-submenu-id <=> root.view-active-submenu;
+
+                                ChromeMenuItem {
+                                    title: "Zoom In";
+                                    activated => {
+                                        root.zoom-in();
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Zoom Out";
+                                    activated => {
+                                        root.zoom-out();
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Reset Zoom";
+                                    activated => {
+                                        root.zoom-reset();
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Tab menu opener + dropdown (Close / Restore / Rename).
+                tab-btn := TitleBarMenuButton {
+                    horizontal-stretch: 0;
+                    label: "Tab";
+                    open: tab-menu.is-open;
+                    clicked => {
+                        if (tab-menu.is-open) {
+                            root.close-chrome-menus();
+                        } else {
+                            root.open-tab-menu();
+                        }
+                    }
+
+                    tab-menu := PopupWindow {
+                        x: 0px;
+                        // Flush under menubar button (square panel via ChromeMenuPopup).
+                        y: parent.height + 1px;
+                        close-policy: close-on-click-outside;
+
+                        ChromeMenuPopup {
+                            ChromeMenuItem {
+                                title: "Close tab";
+                                item-enabled: root.can-close-tab;
+                                activated => {
+                                    root.tab-close(root.active-tab-index);
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Restore closed tab";
+                                item-enabled: root.can-restore-tab;
+                                activated => {
+                                    root.tab-restore();
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Rename tab…";
+                                item-enabled: root.can-rename-tab;
+                                activated => {
+                                    root.close-chrome-menus();
+                                    root.start-tab-rename(root.active-tab-index);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Help menu — About (Slint Royalty-free attribution).
+                help-btn := TitleBarMenuButton {
+                    horizontal-stretch: 0;
+                    label: "Help";
+                    open: help-menu.is-open;
+                    clicked => {
+                        if (help-menu.is-open) {
+                            root.close-chrome-menus();
+                        } else {
+                            root.open-help-menu();
+                        }
+                    }
+
+                    help-menu := PopupWindow {
+                        x: 0px;
+                        y: parent.height + 1px;
+                        close-policy: close-on-click-outside;
+
+                        ChromeMenuPopup {
+                            ChromeMenuItem {
+                                title: "About NoViewLog…";
+                                activated => {
+                                    root.open-about();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Drag ONLY this stretch gap (not logo, menus, or caption buttons).
+                // Deferred drag after slop so double-click maximize still works.
+                // After winit drag_window(), Rust clears stuck grab via PointerExited
+                // (compositor consumes the real button-up).
+                // While a chrome Popup is open, this TouchArea never sees press — Rust
+                // hit-tests via title-bar-chrome-press + CursorMoved slop instead.
+                title-drag := TouchArea {
+                    horizontal-stretch: 1;
+                    mouse-cursor: default;
+                    property <bool> drag-started: false;
+
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left
+                            && event.kind == PointerEventKind.down) {
+                            self.drag-started = false;
+                        }
+                        // Release after a completed window drag: clear local flag if
+                        // Slint does see the up (X11 sometimes still delivers it).
+                        if (event.button == PointerEventButton.left
+                            && event.kind == PointerEventKind.up) {
+                            self.drag-started = false;
+                        }
+                    }
+
+                    moved => {
+                        if (!self.pressed || self.drag-started) {
+                            return;
+                        }
+                        if (abs(self.mouse-x - self.pressed-x) < 4px
+                            && abs(self.mouse-y - self.pressed-y) < 4px) {
+                            return;
+                        }
+                        self.drag-started = true;
+                        root.title-bar-drag();
+                    }
+
+                    double-clicked => {
+                        root.maximized = !root.maximized;
+                    }
+                }
+
+                // Follow / WRAP — caption cluster, outside title-drag (no window drag).
+                TitleBarToggleChip {
+                    horizontal-stretch: 0;
+                    label: "Follow";
+                    active: root.auto-follow;
+                    clicked => {
+                        root.set-follow(!root.auto-follow);
+                        root.close-chrome-menus();
+                    }
+                }
+                TitleBarToggleChip {
+                    horizontal-stretch: 0;
+                    label: "WRAP";
+                    active: root.wrap-lines;
+                    clicked => {
+                        root.set-wrap-lines(!root.wrap-lines);
+                        root.close-chrome-menus();
+                    }
+                }
+
+                CaptionButton {
+                    horizontal-stretch: 0;
+                    kind: "minimize";
+                    clicked => { root.minimized = true; }
+                }
+                CaptionButton {
+                    horizontal-stretch: 0;
+                    kind: root.maximized ? "restore" : "maximize";
+                    clicked => { root.maximized = !root.maximized; }
+                }
+                CaptionButton {
+                    horizontal-stretch: 0;
+                    kind: "close";
+                    clicked => { root.close(); }
+                }
+            }
+
+            // Bottom border under the title strip.
+            Rectangle {
+                height: 1px;
+                y: parent.height - 1px;
+                width: 100%;
+                background: Theme.border-subtle;
+            }
+        }
+
+    HorizontalLayout {
+        spacing: 0px;
+        padding: 0px;
+        vertical-stretch: 1;
+
+        // Left terminals sidebar — FocusScope so clicks steal focus from the viewport
+        // (stops caret blink / keeps idle timer slow when interacting with chrome).
+        HorizontalLayout {
+            spacing: 0px;
+
+            FocusScope {
+                width: 260px;
+                // While a tab/terminal rename TextInput is focused, do not steal focus on
+                // press/interaction in the sidebar (would blur and fight rename retention).
+                focus-on-click: !root.is-renaming();
+
+                key-pressed(_event) => { reject }
+
+                Rectangle {
+                    background: Theme.bg-panel;
+
+                    // Pad T/B; TERMINALS header + FILTERS keep 12px L/R. term-list is flush
+                    // left so selection reaches the panel edge (row content keeps its own pad).
+                    VerticalLayout {
+                        padding-left: 0px;
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        padding-right: 0px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            height: 24px;
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: "TERMINALS";
+                                color: Theme.text-muted;
+                                font-size: 11px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+
+                            TouchArea {
+                                width: 24px;
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                // Sidebar focus-on-click is off while renaming — + would
+                                // leave TextInput focused and a stuck/corrupt rename row.
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    root.terminal-add();
+                                }
+
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 4px;
+                                    background: parent.has-hover ? Theme.bg-input : transparent;
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "+";
+                                        color: Theme.text-primary;
+                                        font-size: 16px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Full-width rows: Flickable fills term-list; V-bar overlays on the right
+                        // when scrollable. TerminalRow padding-right reserves the 10px slot so ×
+                        // does not jump when the bar appears.
+                        term-list := Rectangle {
+                            // Cap terminals so FILTERS stay visible below.
+                            vertical-stretch: 1;
+                            min-height: 80px;
+                            background: transparent;
+
+                            term-flick := Flickable {
+                                width: 100%;
+                                height: 100%;
+                                viewport-width: self.width;
+                                viewport-height: max(self.height, terms-col.preferred-height);
+                                viewport-y: -root.terminals-scroll-y * 1px;
+                                interactive: true;
+
+                                changed viewport-y => {
+                                    root.terminals-scroll-y = clamp(-self.viewport-y / 1px, 0.0, root.terminals-scroll-max());
+                                }
+                                changed height => { root.sync-terminals-bar-visible(); }
+                                changed viewport-height => { root.sync-terminals-bar-visible(); }
+
+                                terms-col := VerticalLayout {
+                                    spacing: 3px;
+                                    alignment: start;
+                                    width: 100%;
+
+                                    for term in root.terminals-model: TerminalRow {
+                                        title: term.label;
+                                        subtitle: term.cwd == "" ? "." : term.cwd;
+                                        running: term.running;
+                                        active: term.index == root.active-terminal-index;
+                                        show-close: term.index != 0 && root.terminals-model.length > 1;
+                                        term-id: term.id;
+                                        term-index: term.index;
+                                        show-drop-before: root.term-dragging
+                                            && root.term-drop-to == term.index
+                                            && root.term-drop-to != root.term-drag-from;
+                                        dim-as-drag-source: root.term-dragging && root.term-drag-id == term.id;
+                                        // Idle is empty id — must not match the pre-stats
+                                        // placeholder row (also id "") or first paint opens rename.
+                                        renaming: root.renaming-terminal-id != "" && root.renaming-terminal-id == term.id;
+                                        rename-text: root.rename-draft;
+                                        // activated (not clicked): drag-reorder suppresses select; double-click
+                                        // rename runs before pointer-up and skips activated while renaming.
+                                        activated => {
+                                            // Other row click does not blur rename (focus-on-click gated).
+                                            if (root.renaming-terminal-id != "" && root.renaming-terminal-id != term.id) {
+                                                root.dismiss-terminal-rename-if-any();
+                                            }
+                                            root.terminal-switch(term.id);
+                                        }
+                                        close-clicked => {
+                                            root.dismiss-any-rename-if-any();
+                                            root.terminal-close(term.id);
+                                        }
+                                        wheel(dy) => { root.scroll-terminals-by(dy); }
+                                        rename-requested => {
+                                            root.terminal-switch(term.id);
+                                            root.start-terminal-rename(term.id, term.label);
+                                        }
+                                        rename-edited(text) => {
+                                            root.rename-draft = text;
+                                        }
+                                        rename-accepted(text) => {
+                                            root.commit-terminal-rename(term.id, text);
+                                        }
+                                        rename-cancelled => {
+                                            root.end-terminal-rename();
+                                        }
+                                        reorder-drag-start(id, from-index) => {
+                                            root.term-dragging = true;
+                                            root.term-drag-id = id;
+                                            root.term-drag-from = from-index;
+                                            root.term-drop-to = from-index;
+                                        }
+                                        reorder-drag-move(abs-y) => { root.update-term-drop(abs-y); }
+                                        reorder-drag-end => { root.finish-term-drag(); }
+                                    }
+                                }
+                            }
+
+                            if root.terminals-bar-visible: EngineScrollBar {
+                                x: parent.width - 10px;
+                                width: 10px;
+                                height: 100%;
+                                z: 20;
+                                horizontal: false;
+                                value <=> root.terminals-scroll-y;
+                                maximum: root.terminals-scroll-max();
+                                page-size: max(1.0, term-flick.height / 1px);
+                                scrolled(v) => {
+                                    term-flick.viewport-y = -v * 1px;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border-subtle;
+                            vertical-stretch: 0;
+                        }
+
+                        // FILTERS — IN/OUT panel (per non-Console tab).
+                        VerticalLayout {
+                            spacing: 6px;
+                            vertical-stretch: 0;
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            Text {
+                                text: "FILTERS";
+                                color: Theme.text-muted;
+                                font-size: 11px;
+                                font-weight: 700;
+                                vertical-stretch: 0;
+                            }
+
+                            if !root.filters-editable: Text {
+                                text: "Filters apply on other tabs";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                                vertical-stretch: 0;
+                            }
+
+                            if root.filters-editable: VerticalLayout {
+                                spacing: 2px;
+                                vertical-stretch: 0;
+
+                                for filt in root.filters-model: FilterRow {
+                                    filter-id: filt.id;
+                                    filter-type: filt.filter-type;
+                                    pattern: filt.pattern;
+                                    enabled: filt.enabled;
+                                    use-regex: filt.use-regex;
+                                    toggled(on) => { root.filter-toggle(filt.id, on); }
+                                    remove-clicked => { root.filter-remove(filt.id); }
+                                }
+                            }
+
+                            if root.filters-editable: HorizontalLayout {
+                                spacing: 4px;
+                                vertical-stretch: 0;
+                                alignment: center;
+
+                                LineEdit {
+                                    placeholder-text: "add pattern…";
+                                    text <=> root.filter-draft;
+                                    // Disable during tab/terminal rename so this field cannot steal
+                                    // focus from the rename TextInput.
+                                    enabled: root.filters-editable && !root.is-renaming();
+                                    horizontal-stretch: 1;
+                                    // Enter → Include (convenient default).
+                                    accepted(_t) => {
+                                        if (root.filter-draft != "") {
+                                            root.filter-add("include", root.filter-draft, root.filter-draft-regex);
+                                            root.filter-draft = "";
+                                        }
+                                    }
+                                }
+
+                                ModeToggle {
+                                    label: ".*";
+                                    tip: "Regex mode";
+                                    active <=> root.filter-draft-regex;
+                                    chip-width: 26px;
+                                }
+                            }
+
+                            if root.filters-editable: HorizontalLayout {
+                                spacing: 6px;
+                                vertical-stretch: 0;
+                                height: 28px;
+
+                                TouchArea {
+                                    horizontal-stretch: 1;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.filter-draft != "") {
+                                            root.filter-add("include", root.filter-draft, root.filter-draft-regex);
+                                            root.filter-draft = "";
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: 100%;
+                                        height: 100%;
+                                        border-radius: 4px;
+                                        background: parent.has-hover ? Theme.bg-input-hover : Theme.bg-input;
+                                        border-width: 1px;
+                                        border-color: Theme.border;
+
+                                        Text {
+                                            width: 100%;
+                                            height: 100%;
+                                            text: "＋ Include";
+                                            color: Theme.include;
+                                            font-size: 12px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                TouchArea {
+                                    horizontal-stretch: 1;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        if (root.filter-draft != "") {
+                                            root.filter-add("exclude", root.filter-draft, root.filter-draft-regex);
+                                            root.filter-draft = "";
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: 100%;
+                                        height: 100%;
+                                        border-radius: 4px;
+                                        background: parent.has-hover ? Theme.bg-input-hover : Theme.bg-input;
+                                        border-width: 1px;
+                                        border-color: Theme.border;
+
+                                        Text {
+                                            width: 100%;
+                                            height: 100%;
+                                            text: "－ Exclude";
+                                            color: Theme.exclude;
+                                            font-size: 12px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.filters-editable: TouchArea {
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                vertical-stretch: 0;
+                                clicked => { root.filter-clear(); }
+
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "Clear all filters";
+                                    color: parent.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 1px;
+                background: Theme.border;
+            }
+        }
+
+        // Main column: tabs + viewport + status
+        VerticalLayout {
+            spacing: 0px;
+            padding: 0px;
+            horizontal-stretch: 1;
+
+            FocusScope {
+                // Height follows children (~36px without H bar, ~46px with). Do not bind
+                // FocusScope.height to tabs-scroll-max() — that layoutinfo-cycles with flick width.
+                // H bar is `if` below tabs so preferred height collapses when unused.
+                // Keep focus on the rename TextInput; strip presses must not blur it.
+                focus-on-click: !root.is-renaming();
+                vertical-stretch: 0;
+
+                key-pressed(_event) => { reject }
+
+                Rectangle {
+                    background: Theme.bg-bar;
+                    clip: true;
+
+                    VerticalLayout {
+                        spacing: 0px;
+                        padding-top: 2px;
+                        padding-left: 4px;
+                        padding-right: 6px;
+
+                        // [Flickable (full stretch slot) | | + | restore] — buttons outside flick.
+                        // Do NOT use alignment: center/start on the outer row: that ignores
+                        // horizontal-stretch and collapses the flick.
+                        //
+                        // Empty gutter double-click → tab-add: overlay TouchArea *on top of* the
+                        // flick's empty region (right of chips). Sibling max-width layout
+                        // reintroduced binding loops with tabs-strip-slot.width.
+                        HorizontalLayout {
+                            spacing: 3px;
+                            height: 34px;
+
+                            tabs-strip-slot := Rectangle {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                height: 34px;
+                                clip: true;
+
+                                tab-flick := Flickable {
+                                    width: 100%;
+                                    height: 100%;
+                                    viewport-height: 34px;
+                                    // Chips-only — do not pad viewport to flick width (that would make
+                                    // tabs-row fill the slot and zero the overlay gutter).
+                                    viewport-width: max(tabs-row.preferred-width, 1px);
+                                    viewport-x: -root.tabs-scroll-x * 1px;
+                                    // Disable flick drag-scroll only during *tab* rename.
+                                    interactive: root.renaming-tab-index < 0;
+
+                                    changed viewport-x => {
+                                        root.tabs-scroll-x = clamp(-self.viewport-x / 1px, 0.0, root.tabs-scroll-max());
+                                    }
+                                    changed width => { root.sync-tabs-bar-visible(); }
+                                    changed viewport-width => { root.sync-tabs-bar-visible(); }
+
+                                    tabs-row := HorizontalLayout {
+                                        spacing: 0px;
+                                        alignment: start;
+                                        height: 34px;
+
+                                        for tab in root.tabs-model: TabChip {
+                                            title: tab.name;
+                                            active: tab.index == root.active-tab-index;
+                                            show-close: !tab.is-console && root.tabs-model.length > 1;
+                                            can-rename: !tab.is-console;
+                                            tab-index: tab.index;
+                                            can-reorder: !tab.is-console;
+                                            show-drop-before: root.tab-dragging
+                                                && root.tab-drop-to == tab.index
+                                                && root.tab-drop-to != root.tab-drag-from;
+                                            dim-as-drag-source: root.tab-dragging && root.tab-drag-from == tab.index;
+                                            renaming: root.renaming-tab-index == tab.index;
+                                            rename-text: root.rename-draft;
+                                            activated => {
+                                                if (root.renaming-tab-index != tab.index) {
+                                                    root.tab-switch(tab.index);
+                                                }
+                                            }
+                                            close-clicked => { root.tab-close(tab.index); }
+                                            wheel(dy) => { root.scroll-tabs-by(dy); }
+                                            rename-requested => {
+                                                root.tab-switch(tab.index);
+                                                root.start-tab-rename(tab.index);
+                                            }
+                                            rename-edited(text) => {
+                                                root.rename-draft = text;
+                                            }
+                                            rename-accepted(text) => {
+                                                root.commit-tab-rename(tab.index, text);
+                                            }
+                                            rename-cancelled => {
+                                                root.end-tab-rename();
+                                            }
+                                            reorder-drag-start(index) => {
+                                                root.tab-dragging = true;
+                                                root.tab-drag-from = index;
+                                                root.tab-drop-to = index;
+                                            }
+                                            reorder-drag-move(abs-x) => { root.update-tab-drop(abs-x); }
+                                            reorder-drag-end => { root.finish-tab-drag(); }
+                                        }
+                                    }
+                                }
+
+                                // Overlay empty gutter (right of chips). Later sibling + high z → on top for hits.
+                                TouchArea {
+                                    x: min(tabs-row.preferred-width, tab-flick.width);
+                                    width: max(0px, tab-flick.width - min(tabs-row.preferred-width, tab-flick.width));
+                                    height: 100%;
+                                    z: 20;
+                                    mouse-cursor: default;
+                                    scroll-event(event) => {
+                                        root.scroll-tabs-by(event.delta-y / 1px);
+                                        accept
+                                    }
+                                    double-clicked => {
+                                        root.gutter-request-tab-add();
+                                    }
+                                }
+                            }
+
+                            // Same look as TabChip’s right-edge divider — separates strip from actions.
+                            Rectangle {
+                                width: 1px;
+                                height: 100%;
+                                horizontal-stretch: 0;
+                                background: Theme.border;
+                            }
+
+                            // Fixed actions — outside Flickable, docked at the right edge.
+                            TouchArea {
+                                width: 28px;
+                                height: 28px;
+                                horizontal-stretch: 0;
+                                mouse-cursor: pointer;
+                                clicked => { root.tab-add(); }
+                                scroll-event(event) => {
+                                    root.scroll-tabs-by(event.delta-y / 1px);
+                                    accept
+                                }
+
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 0px;
+                                    background: parent.has-hover ? Theme.bg-input : transparent;
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "+";
+                                        color: Theme.text-primary;
+                                        font-size: 16px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            TouchArea {
+                                width: 28px;
+                                height: 28px;
+                                horizontal-stretch: 0;
+                                mouse-cursor: pointer;
+                                enabled: root.can-restore-tab;
+                                clicked => { root.tab-restore(); }
+                                scroll-event(event) => {
+                                    root.scroll-tabs-by(event.delta-y / 1px);
+                                    accept
+                                }
+
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 0px;
+                                    background: parent.has-hover && root.can-restore-tab ? Theme.bg-input : transparent;
+                                    opacity: root.can-restore-tab ? 1.0 : 0.35;
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "↩";
+                                        color: Theme.text-secondary;
+                                        font-size: 14px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Below tabs (not overlay). `if` collapses preferred height when unused.
+                        // Visibility comes from sync-tabs-bar-visible() — not tabs-scroll-max()
+                        // inline — so layoutinfo does not cycle through tab-flick.width.
+                        if root.tabs-bar-visible: EngineScrollBar {
+                            height: 10px;
+                            horizontal: true;
+                            horizontal-stretch: 1;
+                            // Two-way so scroll-tabs-by / Flickable keep the thumb in sync.
+                            value <=> root.tabs-scroll-x;
+                            maximum: root.tabs-scroll-max();
+                            page-size: max(1.0, tab-flick.width / 1px);
+                            scrolled(v) => {
+                                tab-flick.viewport-x = -v * 1px;
+                            }
+                        }
+                    }
+                }
+            }
+
+            viewport-host := FocusScope {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                focus-on-click: true;
+
+                changed has-focus => {
+                    if (self.has-focus) {
+                        // Console/viewport took keyboard focus — close any stuck rename chrome.
+                        root.dismiss-any-rename-if-any();
+                    }
+                    root.viewport-focused(self.has-focus);
+                }
+
+                key-pressed(event) => {
+                    if (root.key-event(
+                        event.text,
+                        event.modifiers.control,
+                        event.modifiers.meta,
+                        event.modifiers.alt,
+                        event.modifiers.shift,
+                    )) {
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+
+                VerticalLayout {
+                    spacing: 0px;
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+
+                    HorizontalLayout {
+                        spacing: 0px;
+                        vertical-stretch: 1;
+                        horizontal-stretch: 1;
+
+                        image-cell := Rectangle {
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
+                            background: Theme.bg-window;
+                            clip: true;
+
+                            Image {
+                                width: 100%;
+                                height: 100%;
+                                source: root.viewport-image;
+                                image-fit: fill;
+                            }
+
+                            // Custom popup: MenuItem.shortcut is MenuBar-only in Slint 1.17,
+                            // so accelerators use a fluent-like title + muted secondary text row.
+                            viewport-ctx := PopupWindow {
+                                x: root.viewport-menu-x;
+                                y: root.viewport-menu-y;
+                                close-policy: close-on-click;
+
+                                Rectangle {
+                                    background: Theme.bg-panel;
+                                    border-radius: 0px;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    drop-shadow-color: Theme.shadow-menu;
+                                    drop-shadow-offset-y: 8px;
+                                    drop-shadow-blur: 16px;
+
+                                    VerticalLayout {
+                                        // Menu popup chrome padding (all sides) — tweak here
+                                        // (mirrors ChromeMenuPopup; viewport RMB uses CtxAccelMenuItem)
+                                        padding: 4px;
+                                        min-width: 200px;
+
+                                        CtxAccelMenuItem {
+                                            title: "Copy";
+                                            accelerator: "Shift+Ctrl+C";
+                                            item-enabled: root.can-copy;
+                                            activated => { root.viewport-copy(); }
+                                        }
+
+                                        CtxAccelMenuItem {
+                                            title: "Paste";
+                                            accelerator: "Shift+Ctrl+V";
+                                            item-enabled: root.can-paste;
+                                            activated => { root.viewport-paste(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                // Always I-beam over the log bitmap.
+                                mouse-cursor: text;
+
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    viewport-host.focus();
+                                }
+
+                                pointer-event(event) => {
+                                    // Only pointer-*down* takes console focus / dismisses rename.
+                                    // Hover/move over the viewport must NOT steal rename focus.
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.dismiss-any-rename-if-any();
+                                        viewport-host.focus();
+                                    }
+                                    if (event.button == PointerEventButton.right) {
+                                        // Right-click: open menu near cursor; do not start selection.
+                                        if (event.kind == PointerEventKind.down) {
+                                            root.viewport-context-opening();
+                                            root.viewport-menu-x = self.mouse-x;
+                                            root.viewport-menu-y = self.mouse-y;
+                                            viewport-ctx.show();
+                                        }
+                                        return;
+                                    }
+                                    if (event.button != PointerEventButton.left
+                                        && event.button != PointerEventButton.middle) {
+                                        return;
+                                    }
+                                    if (event.kind == PointerEventKind.down) {
+                                        root.viewport-pointer(
+                                            self.mouse-x / 1px,
+                                            self.mouse-y / 1px,
+                                            event.button == PointerEventButton.middle ? 1 : 0,
+                                            0,
+                                        );
+                                    } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                                        root.viewport-pointer(
+                                            self.mouse-x / 1px,
+                                            self.mouse-y / 1px,
+                                            event.button == PointerEventButton.middle ? 1 : 0,
+                                            1,
+                                        );
+                                    }
+                                }
+
+                                moved => {
+                                    // `pressed` is left-button only — right-click won't drag-select.
+                                    if (self.pressed) {
+                                        root.viewport-pointer(self.mouse-x / 1px, self.mouse-y / 1px, 0, 2);
+                                    }
+                                }
+
+                                scroll-event(event) => {
+                                    if (event.modifiers.control || event.modifiers.meta) {
+                                        root.viewport-zoom-wheel(event.delta-y / 1px);
+                                        accept
+                                    } else if (abs(event.delta-x) > abs(event.delta-y)) {
+                                        // Prefer horizontal when delta-x dominates (trackpad / shift-wheel).
+                                        root.viewport-scrolled-x(event.delta-x / 1px);
+                                        accept
+                                    } else {
+                                        root.viewport-scrolled(event.delta-y / 1px);
+                                        accept
+                                    }
+                                }
+                            }
+
+                            // VS Code–style find bar (after TouchArea so it receives clicks).
+                            // Use visible (not `if`) so the TextInput is not recreated on open/close.
+                            // FocusScope keeps clicks on toggles/buttons from bouncing focus solely
+                            // through the viewport FocusScope in a way that drops TextInput edits.
+                            find-bar := FocusScope {
+                                x: parent.width - self.width - 10px;
+                                y: 8px;
+                                width: min(420px, parent.width - 20px);
+                                height: 34px;
+                                visible: root.find-open;
+                                enabled: root.find-open;
+                                focus-on-click: true;
+
+                                // Mirror root flag so Ctrl+F can re-focus while already open.
+                                property <bool> want-focus: root.find-focus-request;
+                                changed want-focus => {
+                                    if (self.want-focus && root.find-open) {
+                                        find-input.focus();
+                                        root.find-focus-request = false;
+                                    }
+                                }
+                                changed visible => {
+                                    if (self.visible) {
+                                        find-input.focus();
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 0px;
+                                    background: Theme.bg-panel;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    drop-shadow-color: Theme.shadow-panel;
+                                    drop-shadow-offset-y: 4px;
+                                    drop-shadow-blur: 12px;
+
+                                    HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 4px;
+                                        spacing: 4px;
+                                        alignment: center;
+
+                                        Rectangle {
+                                            horizontal-stretch: 1;
+                                            height: 26px;
+                                            border-radius: 0px;
+                                            background: Theme.bg-input;
+                                            border-width: 1px;
+                                            border-color: Theme.border;
+
+                                            HorizontalLayout {
+                                                padding-left: 6px;
+                                                padding-right: 2px;
+                                                spacing: 2px;
+                                                alignment: center;
+
+                                                input-slot := Rectangle {
+                                                    horizontal-stretch: 1;
+                                                    min-width: 80px;
+                                                    height: 100%;
+                                                    background: transparent;
+                                                    clip: true;
+
+                                                    // TextInput has no placeholder-text — paint hint when empty.
+                                                    if root.find-query == "": Text {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        text: "Find (Enter to next)";
+                                                        color: Theme.text-muted;
+                                                        font-size: 12px;
+                                                        vertical-alignment: center;
+                                                        overflow: elide;
+                                                    }
+
+                                                    find-input := TextInput {
+                                                        width: 100%;
+                                                        height: 100%;
+                                                        text <=> root.find-query;
+                                                        font-size: 12px;
+                                                        color: Theme.text-primary;
+                                                        selection-background-color: Theme.accent-soft;
+                                                        selection-foreground-color: Theme.text-primary;
+                                                        single-line: true;
+                                                        edited => {
+                                                            root.find-query = self.text;
+                                                            root.find-query-changed(
+                                                                root.find-query,
+                                                                root.find-regex,
+                                                                root.find-case-sensitive,
+                                                                root.find-whole-word,
+                                                            );
+                                                        }
+                                                        // Commit pending search when leaving the field
+                                                        // (click toggle / viewport) so stats cannot
+                                                        // overwrite typed text with a stale empty query.
+                                                        changed has-focus => {
+                                                            if (!self.has-focus && root.find-open) {
+                                                                root.find-commit();
+                                                            }
+                                                        }
+                                                        accepted => {
+                                                            root.find-goto(1);
+                                                        }
+                                                        key-pressed(event) => {
+                                                            if (event.text == "\u{1b}") {
+                                                                root.find-commit();
+                                                                root.find-open = false;
+                                                                root.find-closed();
+                                                                viewport-host.focus();
+                                                                accept
+                                                            } else if (event.text == "\n" && event.modifiers.shift) {
+                                                                // Shift+Enter → previous match (VS Code).
+                                                                root.find-goto(-1);
+                                                                accept
+                                                            } else {
+                                                                reject
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                ModeToggle {
+                                                    label: "Aa";
+                                                    tip: "Match Case";
+                                                    active <=> root.find-case-sensitive;
+                                                    toggled(_) => {
+                                                        root.find-query-changed(
+                                                            root.find-query,
+                                                            root.find-regex,
+                                                            root.find-case-sensitive,
+                                                            root.find-whole-word,
+                                                        );
+                                                    }
+                                                }
+                                                ModeToggle {
+                                                    label: "ab";
+                                                    tip: "Match Whole Word";
+                                                    active <=> root.find-whole-word;
+                                                    toggled(_) => {
+                                                        root.find-query-changed(
+                                                            root.find-query,
+                                                            root.find-regex,
+                                                            root.find-case-sensitive,
+                                                            root.find-whole-word,
+                                                        );
+                                                    }
+                                                }
+                                                ModeToggle {
+                                                    label: ".*";
+                                                    tip: "Use Regular Expression";
+                                                    active <=> root.find-regex;
+                                                    toggled(_) => {
+                                                        root.find-query-changed(
+                                                            root.find-query,
+                                                            root.find-regex,
+                                                            root.find-case-sensitive,
+                                                            root.find-whole-word,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: root.find-error != "" ? root.find-error : root.find-status;
+                                            color: root.find-error != "" ? Theme.danger : Theme.text-secondary;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                            min-width: 56px;
+                                            horizontal-alignment: right;
+                                            overflow: elide;
+                                        }
+
+                                        TouchArea {
+                                            width: 22px;
+                                            height: 22px;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.find-goto(-1); }
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: "↑";
+                                                color: parent.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                                font-size: 13px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        TouchArea {
+                                            width: 22px;
+                                            height: 22px;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.find-goto(1); }
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: "↓";
+                                                color: parent.has-hover ? Theme.text-primary : Theme.text-secondary;
+                                                font-size: 13px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                        TouchArea {
+                                            width: 22px;
+                                            height: 22px;
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.find-commit();
+                                                root.find-open = false;
+                                                root.find-closed();
+                                                viewport-host.focus();
+                                            }
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: "×";
+                                                color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                                                font-size: 14px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            changed width => {
+                                root.viewport-resized(self.width, self.height);
+                            }
+                            changed height => {
+                                root.viewport-resized(self.width, self.height);
+                            }
+                        }
+
+                        if root.max-scroll-y > 0.5: EngineScrollBar {
+                            horizontal: false;
+                            width: 10px;
+                            vertical-stretch: 1;
+                            value <=> root.scroll-y;
+                            maximum: root.max-scroll-y;
+                            page-size: root.viewport-page-h;
+                            scrolled(v) => { root.viewport-scroll-y-changed(v); }
+                        }
+                    }
+
+                    if root.show-hscroll && root.max-scroll-x > 0.5: HorizontalLayout {
+                        height: 10px;
+                        spacing: 0px;
+
+                        EngineScrollBar {
+                            horizontal: true;
+                            height: 10px;
+                            horizontal-stretch: 1;
+                            value <=> root.scroll-x;
+                            maximum: root.max-scroll-x;
+                            page-size: root.viewport-page-w;
+                            scrolled(v) => { root.viewport-scroll-x-changed(v); }
+                        }
+
+                        if root.max-scroll-y > 0.5: Rectangle {
+                            width: 10px;
+                            background: Theme.bg-input;
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 22px;
+                background: Theme.bg-bar;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+
+                    Text {
+                        text: root.status-text;
+                        color: Theme.text-secondary;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+            }
+        }
+    }
+    }
+    }
+
+    // Settings dialog — max scrollback lines.
+    settings-dlg := PopupWindow {
+        x: max(16px, (root.width - 400px) / 2);
+        y: max(48px, (root.height - 220px) / 2);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.bg-window;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 0px;
+            drop-shadow-color: Theme.shadow-panel;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-blur: 20px;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                min-width: 360px;
+                max-width: 480px;
+
+                Text {
+                    text: "Settings";
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                }
+
+                Text {
+                    text: "Max scrollback lines";
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    font-weight: 700;
+                }
+
+                SpinBox {
+                    minimum: 100;
+                    maximum: 30000;
+                    step-size: 1000;
+                    value <=> root.settings-draft;
+                }
+
+                Text {
+                    text: "Oldest lines are dropped when the limit is exceeded (100–30000).";
+                    color: Theme.text-secondary;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    padding-top: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.close-settings(); }
+                    }
+                    Button {
+                        text: "OK";
+                        primary: true;
+                        clicked => { root.confirm-settings(); }
+                    }
+                }
+            }
+        }
+    }
+
+    // About dialog — product info + Slint Royalty-free attribution.
+    about-dlg := PopupWindow {
+        x: max(16px, (root.width - 420px) / 2);
+        y: max(48px, (root.height - 240px) / 2);
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Theme.bg-window;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: 0px;
+            drop-shadow-color: Theme.shadow-panel;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-blur: 20px;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                min-width: 360px;
+                max-width: 480px;
+
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+
+                    Image {
+                        source: @image-url("assets/icon.png");
+                        width: 32px;
+                        height: 32px;
+                        image-fit: contain;
+                    }
+
+                    VerticalLayout {
+                        spacing: 4px;
+                        alignment: center;
+                        Text {
+                            text: "NoViewLog";
+                            color: Theme.text-primary;
+                            font-size: 16px;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: "Native desktop log viewer";
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Rust engine with a Slint UI. The log viewport is rendered by Rust (fontdue bitmap).";
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "UI built with Slint — see https://slint.dev";
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    padding-top: 8px;
+
+                    Button {
+                        text: "OK";
+                        primary: true;
+                        clicked => { root.close-about(); }
+                    }
+                }
+            }
+        }
+    }
+}

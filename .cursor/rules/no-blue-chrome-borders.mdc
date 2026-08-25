@@ -1,0 +1,44 @@
+---
+description: Never use Theme.accent / bright blue as chrome borders, focus rings, left strips, or tab drop markers
+alwaysApply: true
+---
+
+# No blue chrome borders (mandatory)
+
+**Never** use `Theme.accent` (or any bright blue / fluent accent) as:
+
+- `border-color` on tabs, TERMINALS rows, menus, rename fields, splitters, or other chrome
+- Focus rings / focus bars (including fluent `LineEdit` focus-border)
+- Permanent left accent strips on tab chips or sidebar rows
+- **Tab / TERMINALS reorder drop indicators** (`show-drop-before` Rectangles) — these painted the bright vertical blue line between tabs users reject
+
+## Allowed selection chrome
+
+- Selection MAY use a **background tint only** (`Theme.accent-soft` is OK if it is **not** a border)
+- Borders MUST be `Theme.border`, transparent, or `border-width: 0`
+- **NEVER** an accent blue outline or accent vertical strip between tabs
+
+## Drop markers
+
+- If a reorder drop cue exists, it MUST use `Theme.border` / `Theme.text-muted` (muted), never `Theme.accent`
+- MUST show only while an active drag targets a **different** index than the source (`drop-to != drag-from`)
+- MUST NOT remain visible when idle; clear drag state on pointer-up / rename start
+
+## Rename focus (do not conflate)
+
+- **Mouse leave / `has-hover` false** while renaming → MUST NOT end rename; keep typing
+- **Real focus loss** (`has-focus` false because viewport/console/another widget took focus) → MUST dismiss rename (commit/cancel per policy)
+- Do **NOT** `self.focus()` on every blur — that traps the editor when the console intentionally takes focus
+- Gate sidebar/tab `FocusScope.focus-on-click` and tab `Flickable.interactive` while renaming so mouse leave does not steal focus
+- Wire viewport click / viewport focus to dismiss tab **and** terminal rename
+
+## Rename / text fields
+
+- Do **not** use fluent `LineEdit` for tab or terminal inline rename — it paints a bright accent focus bar (`FluentPalette.accent-background`)
+- Prefer square `TextInput` inside a `Rectangle` with `border-radius: 0`, `border-color: Theme.border` (or width 0), never accent
+
+## Agent obligations
+
+- When polishing Slint chrome, **do not reintroduce** accent borders or accent drop strips “for clarity”
+- After chrome border changes: rebuild `noviewlog-slint` and treat source + running UI as the check — do not mark done on grep alone
+- The classic false positive: blaming rename focus while the real bug is `TabChip` `show-drop-before` with `background: Theme.accent`

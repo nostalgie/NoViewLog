@@ -1,0 +1,22 @@
+[package]
+name = "noviewlog-slint"
+version = "0.1.0"
+edition = "2021"
+description = "NoViewLog Slint desktop UI (viewport + PTY shell)"
+license = "MIT"
+repository = "https://github.com/nostalgie/NoViewLog"
+
+[[bin]]
+name = "noviewlog-slint"
+path = "src/main.rs"
+
+[dependencies]
+noviewlog-core = { path = "../noviewlog-core" }
+arboard = "3"
+# Native file picker for File → Open log file…
+rfd = "0.15"
+# unstable-winit-030: Occluded / minimize events (Wayland often leaves Window::is_minimized stuck).
+slint = { version = "~1.17", features = ["unstable-winit-030"] }
+
+[build-dependencies]
+slint-build = "1.17"
