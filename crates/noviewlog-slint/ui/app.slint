@@ -1950,11 +1950,11 @@ export component AppWindow inherits Window {
     }
 
     // About dialog — product info + Slint Royalty-free attribution.
-    // Width lives on PopupWindow: inner Rectangle width is ignored, and a
-    // too-large x (as if 840px) parks a content-sized popup on the left.
+    // PopupWindow is lowered into its own component, so `root.width` here is the
+    // popup (x ≈ 16px, stuck left). `parent` is AppWindow — center on that.
     about-dlg := PopupWindow {
-        x: max(16px, (root.width - 720px) / 2);
-        y: max(48px, (root.height - 200px) / 2);
+        x: (parent.width - 720px) / 2;
+        y: max(48px, (parent.height - 200px) / 2);
         width: 720px;
         close-policy: close-on-click-outside;
 
