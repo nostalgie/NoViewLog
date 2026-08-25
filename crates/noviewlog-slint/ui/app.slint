@@ -1005,14 +1005,15 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        Rectangle {
+                        // FILTERS — IN/OUT panel. Console never has filters; hide the
+                        // whole section instead of a dead "applies on other tabs" stub.
+                        if root.filters-editable: Rectangle {
                             height: 1px;
                             background: Theme.border-subtle;
                             vertical-stretch: 0;
                         }
 
-                        // FILTERS — IN/OUT panel (per non-Console tab).
-                        VerticalLayout {
+                        if root.filters-editable: VerticalLayout {
                             spacing: 6px;
                             vertical-stretch: 0;
                             padding-left: 12px;
@@ -1026,15 +1027,7 @@ export component AppWindow inherits Window {
                                 vertical-stretch: 0;
                             }
 
-                            if !root.filters-editable: Text {
-                                text: "Filters apply on other tabs";
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                wrap: word-wrap;
-                                vertical-stretch: 0;
-                            }
-
-                            if root.filters-editable: VerticalLayout {
+                            VerticalLayout {
                                 spacing: 2px;
                                 vertical-stretch: 0;
 
