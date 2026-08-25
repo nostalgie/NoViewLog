@@ -1472,7 +1472,9 @@ export component AppWindow inherits Window {
                             background: Theme.bg-window;
                             clip: true;
 
-                            Image {
+                            // Empty Image writes alpha 0 over this fill (transparent
+                            // winit swapchain → terminal/VRAM shows through).
+                            if root.viewport-image.width > 0 && root.viewport-image.height > 0: Image {
                                 width: 100%;
                                 height: 100%;
                                 source: root.viewport-image;
