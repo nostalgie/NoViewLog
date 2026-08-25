@@ -8,12 +8,6 @@ There is no WebView or separate frontend. The log viewport is rendered by Rust
 Linux**. Other operating systems (including Windows) are best-effort — they may
 work, but they are not the main development focus yet.
 
-<p align="center">
-  <a href="https://slint.dev" target="_blank">
-    <img src="https://github.com/slint-ui/slint/raw/master/logo/MadeWithSlint-logo-dark.png" alt="Made with Slint" />
-  </a>
-</p>
-
 ## Features
 
 - Launch commands through a PTY or open existing log files
@@ -115,3 +109,9 @@ NoViewLog is licensed under the [MIT License](LICENSE).
 The UI toolkit is [Slint](https://slint.dev), used under the
 [Slint Royalty-free License 2.0](https://github.com/slint-ui/slint/blob/master/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md).
 Bundled Noto fonts are under the SIL Open Font License (see [`assets/OFL.txt`](assets/OFL.txt)).
+
+<p align="center">
+  <a href="https://slint.dev" target="_blank">
+    <img src="https://github.com/slint-ui/slint/raw/master/logo/MadeWithSlint-logo-dark.png" alt="Made with Slint" />
+  </a>
+</p>
