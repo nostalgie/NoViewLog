@@ -1953,9 +1953,9 @@ export component AppWindow inherits Window {
     // PopupWindow is lowered into its own component, so `root.width` here is the
     // popup (x ≈ 16px, stuck left). `parent` is AppWindow — center on that.
     about-dlg := PopupWindow {
-        x: (parent.width - 720px) / 2;
+        x: (parent.width - 420px) / 2;
         y: max(48px, (parent.height - 200px) / 2);
-        width: 720px;
+        width: 420px;
         close-policy: close-on-click-outside;
 
         Rectangle {
@@ -2010,10 +2010,12 @@ export component AppWindow inherits Window {
                         text: "UI built with Slint — see ";
                         color: Theme.text-muted;
                         font-size: 11px;
+                        wrap: no-wrap;
                     }
 
                     slint-link := TouchArea {
                         mouse-cursor: pointer;
+                        horizontal-stretch: 0;
                         clicked => {
                             root.open-url("https://slint.dev");
                         }
@@ -2024,6 +2026,7 @@ export component AppWindow inherits Window {
                                 text: "slint.dev";
                                 color: slint-link.has-hover ? Theme.text-primary : Theme.text-secondary;
                                 font-size: 11px;
+                                wrap: no-wrap;
                             }
                             Rectangle {
                                 height: 1px;
