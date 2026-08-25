@@ -29,6 +29,7 @@ use crate::viewport_layout::{
     build_visual_lines, content_width, max_cols, max_scroll_x, pos_at_pixel, selection_plain_text,
     record_selection_at, word_selection_at, TextSelection,
 };
+use crate::core::visible::SearchPattern;
 use portable_pty::PtySize;
 
 /// Default / legacy alias for the scrollback retention cap (records ≈ lines).
@@ -87,6 +88,10 @@ pub struct Engine {
     pub(crate) caret_blink_at: Instant,
     /// Host viewport has keyboard focus — caret only blinks when true.
     pub(crate) viewport_focused: bool,
+    /// FILTERS draft preview (UI-global): pattern text + compiled highlight.
+    pub(crate) filter_draft_query: String,
+    pub(crate) filter_draft_regex: bool,
+    pub(crate) filter_draft_pattern: Option<SearchPattern>,
 }
 
 impl Engine {
@@ -143,6 +148,9 @@ impl Engine {
             caret_blink_on: true,
             caret_blink_at: Instant::now(),
             viewport_focused: false,
+            filter_draft_query: String::new(),
+            filter_draft_regex: false,
+            filter_draft_pattern: None,
         };
         // Boot with an interactive shell for the first terminal (skip in unit tests).
         #[cfg(not(test))]
@@ -203,6 +211,7 @@ impl Engine {
                 | Command::SetSettings { .. }
                 | Command::SetViewportFontSize { .. }
                 | Command::SetViewportFocus { .. }
+                | Command::FilterDraftSet { .. }
         )
     }
 
@@ -398,6 +407,7 @@ impl Engine {
                 terminal.selection,
             )
         };
+        let filter_draft_pattern = self.filter_draft_pattern.clone();
 
         let mut scroll_offset_y = scroll_offset_y;
         if auto_follow {
@@ -453,6 +463,7 @@ impl Engine {
             wrap_lines,
             selection.as_ref(),
             search_pattern.as_ref(),
+            filter_draft_pattern.as_ref(),
             active_match,
             caret,
         )?;
@@ -744,6 +755,17 @@ impl Engine {
         view.mark_search_changed();
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+    }
+
+    pub(crate) fn filter_draft_set(&mut self, pattern: &str, use_regex: bool) {
+        if self.filter_draft_query == pattern && self.filter_draft_regex == use_regex {
+            return;
+        }
+        self.filter_draft_query = pattern.to_string();
+        self.filter_draft_regex = use_regex;
+        self.filter_draft_pattern =
+            crate::core::visible::compile_filter_draft_pattern(pattern, use_regex);
+        self.mark_viewport_dirty();
     }
 
     pub(crate) fn search_goto(&mut self, delta: i32) {

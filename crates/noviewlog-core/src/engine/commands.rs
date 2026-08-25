@@ -122,6 +122,12 @@ pub enum Command {
         #[serde(default)]
         whole_word: bool,
     },
+    /// Live FILTERS draft preview (highlight only; does not change visibility).
+    FilterDraftSet {
+        pattern: String,
+        #[serde(default)]
+        use_regex: bool,
+    },
     SearchGoto {
         delta: i32,
     },
@@ -291,6 +297,10 @@ impl Engine {
                 case_sensitive,
                 whole_word,
             } => self.search_set(&query, regex, case_sensitive, whole_word),
+            Command::FilterDraftSet {
+                pattern,
+                use_regex,
+            } => self.filter_draft_set(&pattern, use_regex),
             Command::SearchGoto { delta } => self.search_goto(delta),
             Command::SetWrapLines { wrap } => self.set_wrap_lines(wrap),
             Command::ScrollHorizontal { delta } => self.scroll_horizontal(delta),

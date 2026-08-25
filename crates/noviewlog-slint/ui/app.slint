@@ -5,7 +5,7 @@
 // (gap only), double-click maximize, thin winit resize-border.
 // Native MenuBar is not used — Slint forces it above Window body children.
 
-import { Palette, LineEdit, SpinBox, Button } from "std-widgets.slint";
+import { Palette, SpinBox, Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { TabInfo, TerminalInfo, FilterInfo } from "types.slint";
 import {
@@ -134,6 +134,8 @@ export component AppWindow inherits Window {
     callback filter-toggle(id: string, enabled: bool);
     callback filter-remove(id: string);
     callback filter-clear();
+    // FILTERS draft preview → engine filter_draft_set (debounced in Rust).
+    callback filter-draft-changed(pattern: string, use-regex: bool);
 
     // Find panel → engine search_set / search_goto (debounced in Rust).
     callback find-query-changed(query: string, regex: bool, case-sensitive: bool, whole-word: bool);
@@ -1048,20 +1050,58 @@ export component AppWindow inherits Window {
                             if root.filters-editable: HorizontalLayout {
                                 spacing: 4px;
                                 vertical-stretch: 0;
-                                alignment: center;
+                                height: 28px;
 
-                                LineEdit {
-                                    placeholder-text: "add pattern…";
-                                    text <=> root.filter-draft;
-                                    // Disable during tab/terminal rename so this field cannot steal
-                                    // focus from the rename TextInput.
-                                    enabled: root.filters-editable && !root.is-renaming();
+                                // Square TextInput chrome (not fluent LineEdit) so the left edge
+                                // lines up with Include/Exclude below — no fluent inset.
+                                Rectangle {
                                     horizontal-stretch: 1;
-                                    // Enter → Include (convenient default).
-                                    accepted(_t) => {
-                                        if (root.filter-draft != "") {
-                                            root.filter-add("include", root.filter-draft, root.filter-draft-regex);
-                                            root.filter-draft = "";
+                                    height: 100%;
+                                    border-radius: 4px;
+                                    background: Theme.bg-input;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    clip: true;
+
+                                    // Same overlay recipe as Find: fill the chrome, text left-aligned.
+                                    if root.filter-draft == "": Text {
+                                        x: 8px;
+                                        width: parent.width - 12px;
+                                        height: 100%;
+                                        text: "add pattern…";
+                                        color: Theme.text-muted;
+                                        font-size: 12px;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+
+                                    TextInput {
+                                        x: 8px;
+                                        width: parent.width - 12px;
+                                        height: 100%;
+                                        min-width: 1px;
+                                        text <=> root.filter-draft;
+                                        font-size: 12px;
+                                        color: Theme.text-primary;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
+                                        selection-background-color: Theme.accent-soft;
+                                        selection-foreground-color: Theme.text-primary;
+                                        single-line: true;
+                                        // Disable during tab/terminal rename so this field cannot steal
+                                        // focus from the rename TextInput.
+                                        enabled: root.filters-editable && !root.is-renaming();
+                                        edited => {
+                                            root.filter-draft-changed(self.text, root.filter-draft-regex);
+                                        }
+                                        // Enter → Include (convenient default).
+                                        accepted => {
+                                            if (root.filter-draft != "") {
+                                                root.filter-add("include", root.filter-draft, root.filter-draft-regex);
+                                                root.filter-draft = "";
+                                                root.filter-draft-changed("", root.filter-draft-regex);
+                                            }
                                         }
                                     }
                                 }
@@ -1071,6 +1111,9 @@ export component AppWindow inherits Window {
                                     tip: "Regex mode";
                                     active <=> root.filter-draft-regex;
                                     chip-width: 26px;
+                                    toggled(_) => {
+                                        root.filter-draft-changed(root.filter-draft, root.filter-draft-regex);
+                                    }
                                 }
                             }
 
@@ -1086,6 +1129,7 @@ export component AppWindow inherits Window {
                                         if (root.filter-draft != "") {
                                             root.filter-add("include", root.filter-draft, root.filter-draft-regex);
                                             root.filter-draft = "";
+                                            root.filter-draft-changed("", root.filter-draft-regex);
                                         }
                                     }
 
@@ -1116,6 +1160,7 @@ export component AppWindow inherits Window {
                                         if (root.filter-draft != "") {
                                             root.filter-add("exclude", root.filter-draft, root.filter-draft-regex);
                                             root.filter-draft = "";
+                                            root.filter-draft-changed("", root.filter-draft-regex);
                                         }
                                     }
 
