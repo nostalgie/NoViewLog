@@ -54,7 +54,9 @@ After upgrading the global CLI: `openspec update` in the repo root.
 - Ship changes via **feature branch → pull request → merge**.
 - **Never** push (or force-push) directly to `main`.
 - Do not create or switch branches unless the task needs it.
-- After a PR merges, delete the feature branch locally and on the remote.
+- After a PR merges (including when the user merged it on GitHub), switch back
+  to `main` and pull **without being asked** — at session start and before new
+  work. See [`.cursor/rules/git-workflow.mdc`](.cursor/rules/git-workflow.mdc).
 - Commit messages, PR titles/bodies, and tracked docs/comments: **English only**
   (no Cyrillic in the tree).
 
