@@ -596,7 +596,7 @@ pub fn format_spawn_cmdline(command: &str, args: &[String], cwd: Option<&str>) -
         }
     }
     if let Some(c) = cwd.map(str::trim).filter(|s| !s.is_empty()) {
-        line.push_str("  [windows cwd: ");
+        line.push_str("  [cwd: ");
         line.push_str(c);
         line.push(']');
     }
