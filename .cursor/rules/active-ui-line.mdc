@@ -14,9 +14,10 @@ alwaysApply: true
 ## Session start (before any edit or branch)
 
 1. `git branch --show-current` and `git status -sb`
-2. Product UI work → stay on or use a feature branch off `main`
-3. **Do not** create/switch branches unless the user asked or the task clearly requires it
-4. Confirm which binary you will build before compiling (`noviewlog-slint`)
+2. Auto-resync per `git-workflow.mdc`: if on `main` and behind, ff-pull; if on a merged PR branch, `git checkout -B main origin/main` and delete the feature branch. Do not wait to be asked.
+3. Product UI work → stay on or use a feature branch off `main`
+4. **Do not** create/switch branches unless the user asked or the task clearly requires it
+5. Confirm which binary you will build before compiling (`noviewlog-slint`)
 
 ## Hard rules
 
