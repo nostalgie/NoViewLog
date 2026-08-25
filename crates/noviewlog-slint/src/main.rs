@@ -37,6 +37,17 @@ use crate::ui::*;
 const FIND_DEBOUNCE: Duration = Duration::from_millis(150);
 /// Debounce for FILTERS draft highlight preview.
 const FILTER_DRAFT_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Placeholder fill matching `Theme.bg-window` (`#0d1117`) so the first `Image`
+/// is opaque on a transparent winit swapchain.
+const VIEWPORT_PLACEHOLDER_RGBA: [u8; 4] = [0x0d, 0x11, 0x17, 0xff];
+
+fn seed_opaque_viewport(ui: &AppWindow) {
+    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(8, 8);
+    for px in buffer.make_mut_bytes().chunks_exact_mut(4) {
+        px.copy_from_slice(&VIEWPORT_PLACEHOLDER_RGBA);
+    }
+    ui.set_viewport_image(Image::from_rgba8(buffer));
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui = AppWindow::new()?;
@@ -73,6 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_find_status(SharedString::default());
     ui.set_find_error(SharedString::default());
     ui.set_max_scrollback_lines(DEFAULT_MAX_SCROLLBACK_LINES as i32);
+    // Opaque placeholder before `ui.run()` — empty Image punches a see-through hole.
+    seed_opaque_viewport(&ui);
 
     let mut engine = Engine::new();
     let cli: Vec<String> = std::env::args().skip(1).collect();
@@ -108,6 +121,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_occluded = Rc::new(Cell::new(false));
     // Last tick saw an occluded window; used to force one paint on restore.
     let was_occluded = Rc::new(Cell::new(false));
+    // At least one Engine::render bitmap has been uploaded this process.
+    let viewport_presented = Rc::new(Cell::new(false));
 
     window_chrome::install(
         &ui,
@@ -115,6 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         force_render.clone(),
         timer.clone(),
         timer_fast.clone(),
+        viewport_presented.clone(),
     );
 
     {
@@ -123,12 +139,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         let window_occluded = window_occluded.clone();
+        let viewport_presented = viewport_presented.clone();
         ui.on_viewport_resized(move |width, height| {
             if width > 1.0 && height > 1.0 {
                 *logical_size.borrow_mut() = (width, height);
                 force_render.set(true);
-                // Don't re-arm 33ms while the compositor says we're occluded.
-                if !window_occluded.get() {
+                // Don't re-arm 33ms while occluded — unless we still owe the first present.
+                if !window_occluded.get() || !viewport_presented.get() {
                     bump_fast_timer(&timer, &timer_fast);
                 }
             }
@@ -1158,6 +1175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let timer_fast_tick = timer_fast.clone();
     let window_occluded_tick = window_occluded.clone();
     let was_occluded_tick = was_occluded.clone();
+    let presented_tick = viewport_presented.clone();
     let syncing_scroll_tick = syncing_scroll.clone();
     let syncing_follow_tick = syncing_follow.clone();
     let has_selection_tick = has_selection.clone();
@@ -1175,8 +1193,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
 
-            let occluded =
-                window_should_pause_paint(ui.window(), window_occluded_tick.get());
+            let occluded = window_should_pause_paint(
+                ui.window(),
+                window_occluded_tick.get(),
+                presented_tick.get(),
+            );
 
             let became_occluded = occluded && !was_occluded_tick.get();
             if was_occluded_tick.get() && !occluded {
@@ -1265,6 +1286,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             ui.set_viewport_image(Image::from_rgba8(buffer));
+            if !presented_tick.get() {
+                presented_tick.set(true);
+                ui.window().request_redraw();
+            }
         },
     );
 

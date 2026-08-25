@@ -32,7 +32,18 @@ pub(crate) fn set_occluded_timer(timer: &Timer, timer_fast: &Cell<bool>) {
 /// On Wayland, Slint's `Window::is_minimized()` often never flips (winit returns
 /// `None`), and `is_visible()` only means the component is shown — not compositor
 /// occlusion. Prefer the `window_occluded` flag fed by `WindowEvent::Occluded`.
-pub(crate) fn window_should_pause_paint(window: &slint::Window, occluded_flag: bool) -> bool {
+///
+/// Until one viewport frame has been uploaded, never pause: launch-from-terminal
+/// often maps the window occluded/unfocused, and skipping that first present
+/// leaves an empty Image hole in a transparent swapchain.
+pub(crate) fn window_should_pause_paint(
+    window: &slint::Window,
+    occluded_flag: bool,
+    presented_once: bool,
+) -> bool {
+    if !presented_once {
+        return false;
+    }
     if occluded_flag || window.is_minimized() {
         return true;
     }

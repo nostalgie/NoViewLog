@@ -75,9 +75,11 @@ pub(crate) fn install(
     force_render: Rc<Cell<bool>>,
     timer: Rc<Timer>,
     timer_fast: Rc<Cell<bool>>,
+    viewport_presented: Rc<Cell<bool>>,
 ) {
     let window_occluded = window_occluded.clone();
     let force_render = force_render.clone();
+    let viewport_presented = viewport_presented.clone();
     let timer = timer.clone();
     let timer_fast = timer_fast.clone();
     let ui_weak = ui.as_weak();
@@ -177,7 +179,10 @@ pub(crate) fn install(
                 window_occluded.set(*occluded);
                 if *occluded {
                     // Drop to slow cadence immediately — don't wait for the next 33ms tick.
-                    set_occluded_timer(&timer, &timer_fast);
+                    // Keep 33ms until the first viewport present (launch-from-terminal).
+                    if viewport_presented.get() {
+                        set_occluded_timer(&timer, &timer_fast);
+                    }
                 } else if was {
                     force_render.set(true);
                     bump_fast_timer(&timer, &timer_fast);
@@ -187,7 +192,9 @@ pub(crate) fn install(
                 if size.width == 0 || size.height == 0 {
                     // Windows / some compositors signal minimize via zero size.
                     window_occluded.set(true);
-                    set_occluded_timer(&timer, &timer_fast);
+                    if viewport_presented.get() {
+                        set_occluded_timer(&timer, &timer_fast);
+                    }
                 }
             }
             winit::event::WindowEvent::ActivationTokenDone { serial, token } => {
