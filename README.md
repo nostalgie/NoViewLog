@@ -9,9 +9,10 @@ Linux**. Other operating systems (including Windows) are best-effort — they ma
 work, but they are not the main development focus yet.
 
 <p align="center">
-  <a href="[https://example.com](https://slint.dev)">
+  <a href="https://slint.dev" target="_blank">
     <img src="https://github.com/slint-ui/slint/raw/master/logo/MadeWithSlint-logo-dark.png" alt="Made with Slint" />
   </a>
+</p>
 
 ## Features
 
