@@ -14,6 +14,27 @@ repository’s tech stack.
 | [`docs/architecture.md`](docs/architecture.md) | Engine ↔ UI boundary |
 | [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs model |
 | [`.cursor/rules/`](.cursor/rules/) | Enforced agent details (UI chrome, build) |
+| [`openspec/specs/`](openspec/specs/) | Living behavior specs (grow via archived changes) |
+| [`openspec/changes/`](openspec/changes/) | Active change proposals and artifacts |
+
+## OpenSpec workflow
+
+Use OpenSpec for non-trivial features and behavior changes — not one-line fixes.
+
+| Step | Cursor command | Purpose |
+|------|----------------|---------|
+| Explore (optional) | `/opsx-explore` | Read the area before proposing |
+| Propose | `/opsx-propose <slug>` | Create proposal, delta specs, design, tasks |
+| Implement | `/opsx-apply` | Build against agreed `tasks.md` |
+| Archive | `/opsx-archive` | Merge deltas into `openspec/specs/` |
+
+**Relationship to other docs:** [`.cursor/rules/`](.cursor/rules/) are permanent
+constraints injected on every session. `openspec/` holds per-change agreement
+(proposal, design, tasks, spec deltas). Do not backfill specs for the whole
+codebase — let them grow one archived change at a time.
+
+Project context and artifact rules live in [`openspec/config.yaml`](openspec/config.yaml).
+After upgrading the global CLI: `openspec update` in the repo root.
 
 ## Layout
 

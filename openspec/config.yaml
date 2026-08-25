@@ -1,0 +1,66 @@
+schema: spec-driven
+
+context: |
+  Product: NoViewLog — native desktop log viewer (Rust engine + Slint UI).
+  No WebView, no separate frontend. Log viewport is a fontdue bitmap rendered in Rust.
+
+  Tech stack:
+  - Rust workspace: noviewlog-core (engine) + noviewlog-slint (desktop UI)
+  - Slint UI, fontdue viewport, PTY for process I/O
+  - npm/node in README are commands the app wraps via PTY, not this repo's stack
+
+  Domain vocabulary (see docs/architecture.md):
+  - Terminal: independent PTY shell, process, or read-only log file session
+  - Tab / View: filter view inside a terminal (LogView); JSON commands use tab_*
+  - Console: built-in first tab (index 0); not filter-editable
+  - Record: parsed log unit (may span multiple physical lines)
+  - Viewport: fontdue-rendered RGBA bitmap of the visible slice
+
+  Where to edit:
+  - Slint chrome and UI → crates/noviewlog-slint/ only
+  - Engine, PTY, viewport, parsing → crates/noviewlog-core/
+
+  Engine ↔ UI boundary:
+  - Slint calls Engine via typed Command (preferred) or JSON for tests
+  - Key modules: engine/, terminal_state, log_view, pty, viewport, core/*
+
+  Verify gates (run after implementation):
+  - Slint or shared engine changes: bash scripts/run-slint.sh
+    or cargo build --release -p noviewlog-slint
+  - Engine / parser / filters: cargo test -p noviewlog-core --lib
+
+  Git workflow:
+  - Feature branch off main; ship via PR; never push to main
+  - Commits, PRs, and tracked docs: English only
+
+  Always-on agent constraints (see .cursor/rules/):
+  - UI chrome: no Theme.accent borders or accent drop markers
+  - Inline rename: square TextInput, not fluent LineEdit
+  - Do not add GitHub Actions unless explicitly requested
+
+  Spec domain folders (create on first change in that area):
+  - openspec/specs/ui/ — Slint chrome, tabs, sidebar, rename
+  - openspec/specs/engine/ — commands, viewport, parsing, PTY
+  - openspec/specs/terminals/ — multi-terminal model
+
+rules:
+  proposal:
+    - State affected crate(s): noviewlog-slint vs noviewlog-core
+    - Include verify commands from AGENTS.md
+    - Reference existing docs (docs/architecture.md, docs/terminals.md) when relevant
+  specs:
+    - Use SHALL requirements with Given/When/Then scenarios
+    - Use project vocabulary: Terminal, Tab/View, Console, Record, Viewport
+  design:
+    - Identify engine ↔ Slint boundary and cite key modules
+    - Note dual ANSI paths (terminal.rs vs ansi.rs) when touching coloring
+  tasks:
+    - Split Slint vs engine tasks
+    - End with build/test verification steps
+
+operations:
+  apply:
+    guidance:
+      - Run bash scripts/run-slint.sh after Slint or shared engine changes
+      - Run cargo test -p noviewlog-core --lib when touching engine/parser
+      - Do not commit unless the user asks
