@@ -890,6 +890,29 @@ impl Engine {
         self.active_view_mut().filters_mut().retain(|f| f.id != id);
     }
 
+    pub(crate) fn filter_update(&mut self, id: &str, pattern: &str) {
+        if pattern.is_empty() || self.active_terminal().active_view == 0 {
+            return;
+        }
+        let Some(existing) = self.active_view().filters().iter().find(|f| f.id == id) else {
+            return;
+        };
+        if existing.pattern == pattern {
+            return;
+        }
+        let mut rule = existing.clone();
+        rule.pattern = pattern.to_string();
+        rule.regex = None;
+        if let Some(slot) = self
+            .active_view_mut()
+            .filters_mut()
+            .iter_mut()
+            .find(|f| f.id == id)
+        {
+            *slot = compile_filter(rule);
+        }
+    }
+
     pub(crate) fn restart(&mut self) {
         let (has_command, log_file) = {
             let launch = &self.active_terminal().launch;

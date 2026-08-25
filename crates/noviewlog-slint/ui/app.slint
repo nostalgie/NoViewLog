@@ -128,11 +128,12 @@ export component AppWindow inherits Window {
     callback terminal-move(id: string, to-index: int);
     callback terminal-rename(id: string, name: string);
 
-    // IN/OUT filters → engine filter_add / filter_toggle / filter_remove / filter_clear.
+    // IN/OUT filters → engine filter_add / filter_toggle / filter_remove / filter_update / filter_clear.
     // filter-type is "include" or "exclude"; use-regex is the draft `.*` toggle.
     callback filter-add(filter-type: string, pattern: string, use-regex: bool);
     callback filter-toggle(id: string, enabled: bool);
     callback filter-remove(id: string);
+    callback filter-update(id: string, pattern: string);
     callback filter-clear();
     // FILTERS draft preview → engine filter_draft_set (debounced in Rust).
     callback filter-draft-changed(pattern: string, use-regex: bool);
@@ -1037,8 +1038,20 @@ export component AppWindow inherits Window {
                                     pattern: filt.pattern;
                                     enabled: filt.enabled;
                                     use-regex: filt.use-regex;
+                                    can-edit: !root.is-renaming();
                                     toggled(on) => { root.filter-toggle(filt.id, on); }
                                     remove-clicked => { root.filter-remove(filt.id); }
+                                    pattern-committed(text) => { root.filter-update(filt.id, text); }
+                                    pattern-editing-changed(text, active) => {
+                                        if (active) {
+                                            root.filter-draft-changed(text, filt.use-regex);
+                                        } else {
+                                            root.filter-draft-changed(root.filter-draft, root.filter-draft-regex);
+                                        }
+                                    }
+                                    pattern-edit-finished => {
+                                        viewport-host.focus();
+                                    }
                                 }
                             }
 

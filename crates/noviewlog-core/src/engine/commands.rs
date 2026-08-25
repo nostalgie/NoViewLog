@@ -43,6 +43,10 @@ pub enum Command {
     FilterRemove {
         id: String,
     },
+    FilterUpdate {
+        id: String,
+        pattern: String,
+    },
     FilterSet {
         filters: Vec<FilterRule>,
     },
@@ -236,6 +240,7 @@ impl Engine {
             }
             Command::FilterToggle { id, enabled } => self.filter_toggle(&id, enabled),
             Command::FilterRemove { id } => self.filter_remove(&id),
+            Command::FilterUpdate { id, pattern } => self.filter_update(&id, &pattern),
             Command::FilterSet { filters } => {
                 if self.active_terminal().active_view == 0 {
                     // Console tab has no filters.
