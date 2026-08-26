@@ -36,6 +36,7 @@ pub mod viewport_layout;
 
 pub use engine::{
     parse_engine_event, Command, Engine, EngineEvent, StatsSnapshot, StatsTab, StatsTerminal,
+    CARET_BLINK_PERIOD,
 };
 
 #[cfg(test)]

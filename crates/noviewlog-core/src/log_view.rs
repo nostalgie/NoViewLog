@@ -349,6 +349,66 @@ impl LogView {
         self.search_match_scan_end = 0;
     }
 
+    /// Replace the volatile VT tail in `flat_lines` without a full scrollback rebuild.
+    ///
+    /// Returns `false` when the view must fall back to a full dirty rebuild
+    /// (filters, search, severity, or inconsistent cursors).
+    pub fn try_patch_volatile_tail(
+        &mut self,
+        buffer: &RecordBuffer,
+        old_volatile: usize,
+        old_total: usize,
+        new_volatile: usize,
+        new_total: usize,
+    ) -> bool {
+        if self.flat_lines_dirty {
+            return false;
+        }
+        if !self.filter_engine.filters().is_empty()
+            || self.severity_filter != SeverityFilter::All
+            || !self.search_query.is_empty()
+        {
+            return false;
+        }
+        if self.flat_lines_record_cursor != old_total {
+            return false;
+        }
+        let stable_before = old_total.saturating_sub(old_volatile);
+        let stable_after = new_total.saturating_sub(new_volatile);
+        if stable_after < stable_before || new_total < new_volatile {
+            return false;
+        }
+
+        let lines = Arc::make_mut(&mut self.flat_lines);
+        if lines.len() < old_volatile {
+            return false;
+        }
+        // Volatile records are single-line → one flat line each.
+        lines.truncate(lines.len() - old_volatile);
+
+        let records = buffer.records();
+        if stable_after > stable_before {
+            let appended = rebuild_flat_lines_for_records(
+                &records[stable_before..stable_after],
+                &self.filter_engine,
+                self.severity_filter,
+                &self.expanded_record_ids,
+            );
+            lines.extend(appended);
+        }
+        if new_volatile > 0 {
+            let vol = rebuild_flat_lines_for_records(
+                &records[stable_after..new_total],
+                &self.filter_engine,
+                self.severity_filter,
+                &self.expanded_record_ids,
+            );
+            lines.extend(vol);
+        }
+        self.flat_lines_record_cursor = new_total;
+        true
+    }
+
     #[cfg(test)]
     pub fn search_match_scan_end_for_test(&self) -> usize {
         self.search_match_scan_end

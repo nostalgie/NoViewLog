@@ -7,6 +7,9 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// Optional host wake after PTY I/O is posted (Slint event loop, etc.).
+pub type PtyActivityWake = Arc<dyn Fn() + Send + Sync>;
+
 /// Raw PTY output. Terminal emulation (cursor/erase/scrollback) happens in the
 /// consumer via [`crate::core::terminal::TerminalIngest`], not here — the read
 /// loop only frames raw bytes so nothing is lost to premature line splitting.
@@ -85,6 +88,7 @@ impl PtyManager {
         args: Vec<String>,
         cwd: Option<String>,
         generation: u64,
+        activity_wake: Option<PtyActivityWake>,
     ) -> Result<(), String> {
         self.stop();
         self.generation = generation;
@@ -143,6 +147,11 @@ impl PtyManager {
 
         thread::spawn(move || {
             let mut chunk = [0u8; 4096];
+            let wake = || {
+                if let Some(w) = &activity_wake {
+                    w();
+                }
+            };
 
             loop {
                 if !running.load(Ordering::SeqCst) {
@@ -161,6 +170,7 @@ impl PtyManager {
                             running.store(false, Ordering::SeqCst);
                             break;
                         }
+                        wake();
                     }
                     Err(_) => break,
                 }
@@ -174,6 +184,7 @@ impl PtyManager {
                 code,
                 generation: session_generation,
             });
+            wake();
             running.store(false, Ordering::SeqCst);
         });
 

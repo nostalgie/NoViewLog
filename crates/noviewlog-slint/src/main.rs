@@ -10,16 +10,23 @@ mod window_chrome;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use noviewlog_core::core::types::{
     clamp_max_scrollback_lines, FilterType, DEFAULT_MAX_SCROLLBACK_LINES,
 };
-use noviewlog_core::{parse_engine_event, Command, Engine, EngineEvent};
+use noviewlog_core::{parse_engine_event, Command, Engine, EngineEvent, CARET_BLINK_PERIOD};
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
     TimerMode, VecModel,
 };
+
+// UI-thread tick body; PTY wake uses `invoke_from_event_loop` → this TLS (Send-safe).
+thread_local! {
+    static HOST_TICK: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+}
 
 use crate::app_state::ClickTracker;
 use crate::engine_bridge::{
@@ -47,6 +54,24 @@ fn seed_opaque_viewport(ui: &AppWindow) {
         px.copy_from_slice(&VIEWPORT_PLACEHOLDER_RGBA);
     }
     ui.set_viewport_image(Image::from_rgba8(buffer));
+}
+
+/// Sync Slint caret overlay from engine geometry (device px → logical).
+fn sync_console_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, scale: f32) {
+    if !eng.console_caret_active() {
+        ui.set_caret_visible(false);
+        return;
+    }
+    let Some((x, y, w, h)) = eng.console_caret_rect(width, height) else {
+        ui.set_caret_visible(false);
+        return;
+    };
+    let scale = scale.max(0.5);
+    ui.set_caret_x(x / scale);
+    ui.set_caret_y(y / scale);
+    ui.set_caret_w(w / scale);
+    ui.set_caret_h(h / scale);
+    ui.set_caret_visible(true);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -164,14 +189,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let viewport_focused = viewport_focused.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
+        let force_render = force_render.clone();
+        let ui_focus = ui.as_weak();
+        let logical_size = logical_size.clone();
         ui.on_viewport_focused(move |focused| {
             viewport_focused.set(focused);
-            let _ = engine
-                .borrow_mut()
-                .send_command(Command::SetViewportFocus { focused });
-            // Focused console needs timely caret ticks; unfocused will idle on next adapt.
+            let mut eng = engine.borrow_mut();
+            let _ = eng.send_command(Command::SetViewportFocus { focused });
             if focused {
+                eng.reset_caret_blink();
+                force_render.set(true);
                 bump_fast_timer(&timer, &timer_fast);
+                if let Some(ui) = ui_focus.upgrade() {
+                    ui.set_caret_blink_on(true);
+                    let (lw, lh) = *logical_size.borrow();
+                    let scale = ui.window().scale_factor().max(0.5) as f32;
+                    let width = (lw * scale).ceil().max(1.0) as u32;
+                    let height = (lh * scale).ceil().max(1.0) as u32;
+                    sync_console_caret(&ui, &eng, width, height, scale);
+                }
+            } else if let Some(ui) = ui_focus.upgrade() {
+                ui.set_caret_visible(false);
             }
         });
     }
@@ -645,8 +683,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 return true;
             }
-            force_render.set(true);
+            // Do not force_render before echo — paint when PTY content dirties.
             bump_fast_timer(&timer, &timer_fast);
+            if let Some(ui) = ui_find_key.upgrade() {
+                ui.set_caret_blink_on(true);
+            }
             handle_key_event(&mut engine.borrow_mut(), &text, ctrl)
         });
     }
@@ -671,6 +712,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
+            if index != 0 {
+                if let Some(ui) = ui_tabs.upgrade() {
+                    ui.set_caret_visible(false);
+                }
+            } else if let Some(ui) = ui_tabs.upgrade() {
+                ui.set_caret_blink_on(true);
+            }
         });
     }
 
@@ -1242,7 +1290,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let terminals_tick = terminals_model.clone();
     let filters_tick = filters_model.clone();
     let console_tick = console_active.clone();
-    let focused_tick = viewport_focused.clone();
     let timer_tick = timer.clone();
     let timer_fast_tick = timer_fast.clone();
     let window_occluded_tick = window_occluded.clone();
@@ -1257,116 +1304,216 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let find_pending_tick = find_pending.clone();
     let find_debounce_tick = find_debounce.clone();
     let find_stats_tab_tick = find_stats_tab.clone();
-    timer.start(
-        TimerMode::Repeated,
-        TICK_FAST,
-        move || {
-            let Some(ui) = ui_weak.upgrade() else {
-                return;
-            };
 
-            let occluded = window_should_pause_paint(
-                ui.window(),
-                window_occluded_tick.get(),
-                presented_tick.get(),
-            );
+    // Shared tick body so the PTY reader can wake the UI without waiting for TICK_FAST.
+    let ticking = Arc::new(AtomicBool::new(false));
+    let needs_retick = Arc::new(AtomicBool::new(false));
 
-            let became_occluded = occluded && !was_occluded_tick.get();
-            if was_occluded_tick.get() && !occluded {
-                // Restored: force one paint so the viewport catches up.
-                force_tick.set(true);
-            }
-            was_occluded_tick.set(occluded);
+    {
+        let ticking = ticking.clone();
+        let needs_retick = needs_retick.clone();
+        let ui_weak = ui_weak.clone();
+        let engine_tick = engine_tick.clone();
+        let logical_tick = logical_tick.clone();
+        let force_tick = force_tick.clone();
+        let tabs_tick = tabs_tick.clone();
+        let terminals_tick = terminals_tick.clone();
+        let filters_tick = filters_tick.clone();
+        let console_tick = console_tick.clone();
+        let timer_tick = timer_tick.clone();
+        let timer_fast_tick = timer_fast_tick.clone();
+        let window_occluded_tick = window_occluded_tick.clone();
+        let was_occluded_tick = was_occluded_tick.clone();
+        let presented_tick = presented_tick.clone();
+        let syncing_scroll_tick = syncing_scroll_tick.clone();
+        let syncing_follow_tick = syncing_follow_tick.clone();
+        let has_selection_tick = has_selection_tick.clone();
+        let pty_running_tick = pty_running_tick.clone();
+        let viewport_font_size_tick = viewport_font_size_tick.clone();
+        let find_resync_tick = find_resync_tick.clone();
+        let find_pending_tick = find_pending_tick.clone();
+        let find_debounce_tick = find_debounce_tick.clone();
+        let find_stats_tab_tick = find_stats_tab_tick.clone();
 
-            let mut eng = engine_tick.borrow_mut();
-            // Always tick so PTY buffers keep filling while minimized (at slow cadence).
-            eng.tick();
-
-            if occluded {
-                // Drain engine events without Slint model / property churn.
-                while eng.poll_event_json().is_some() {}
-                if became_occluded || timer_fast_tick.get() {
-                    set_occluded_timer(&timer_tick, &timer_fast_tick);
+        HOST_TICK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                if ticking.swap(true, Ordering::AcqRel) {
+                    needs_retick.store(true, Ordering::Release);
+                    return;
                 }
-                return;
-            }
+                loop {
+                    needs_retick.store(false, Ordering::Release);
 
-            while let Some(ev) = eng.poll_event_json() {
-                match parse_engine_event(&ev) {
-                    Some(EngineEvent::Stats(stats)) => {
-                        if apply_stats(
-                            &stats,
-                            &tabs_tick,
-                            &terminals_tick,
-                            &filters_tick,
-                            &ui,
-                            &console_tick,
-                            &syncing_scroll_tick,
-                            &has_selection_tick,
-                            &pty_running_tick,
-                            &viewport_font_size_tick,
-                            &syncing_follow_tick,
-                            &find_resync_tick,
-                            &find_stats_tab_tick,
-                            &find_pending_tick,
-                            &find_debounce_tick,
-                        ) {
-                            force_tick.set(true);
+                    let Some(ui) = ui_weak.upgrade() else {
+                        break;
+                    };
+
+                    let occluded = window_should_pause_paint(
+                        ui.window(),
+                        window_occluded_tick.get(),
+                        presented_tick.get(),
+                    );
+
+                    let became_occluded = occluded && !was_occluded_tick.get();
+                    if was_occluded_tick.get() && !occluded {
+                        force_tick.set(true);
+                    }
+                    was_occluded_tick.set(occluded);
+
+                    let mut eng = engine_tick.borrow_mut();
+                    eng.tick();
+
+                    if occluded {
+                        while eng.poll_event_json().is_some() {}
+                        if became_occluded || timer_fast_tick.get() {
+                            set_occluded_timer(&timer_tick, &timer_fast_tick);
+                        }
+                        drop(eng);
+                        if !needs_retick.load(Ordering::Acquire) {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    while let Some(ev) = eng.poll_event_json() {
+                        match parse_engine_event(&ev) {
+                            Some(EngineEvent::Stats(stats)) => {
+                                if apply_stats(
+                                    &stats,
+                                    &tabs_tick,
+                                    &terminals_tick,
+                                    &filters_tick,
+                                    &ui,
+                                    &console_tick,
+                                    &syncing_scroll_tick,
+                                    &has_selection_tick,
+                                    &pty_running_tick,
+                                    &viewport_font_size_tick,
+                                    &syncing_follow_tick,
+                                    &find_resync_tick,
+                                    &find_stats_tab_tick,
+                                    &find_pending_tick,
+                                    &find_debounce_tick,
+                                ) {
+                                    force_tick.set(true);
+                                }
+                            }
+                            Some(EngineEvent::Status { message }) => {
+                                ui.set_status_text(SharedString::from(message));
+                            }
+                            Some(EngineEvent::Exit { code, .. }) => {
+                                ui.set_status_text(SharedString::from(format!("exit {code}")));
+                            }
+                            _ => {}
                         }
                     }
-                    Some(EngineEvent::Status { message }) => {
-                        ui.set_status_text(SharedString::from(message));
+
+                    let dirty = eng.needs_render() || force_tick.get();
+                    if dirty {
+                        bump_fast_timer(&timer_tick, &timer_fast_tick);
+                    } else if timer_fast_tick.get() {
+                        timer_tick.set_interval(TICK_IDLE);
+                        timer_fast_tick.set(false);
                     }
-                    Some(EngineEvent::Exit { code, .. }) => {
-                        ui.set_status_text(SharedString::from(format!("exit {code}")));
+
+                    let (lw, lh) = *logical_tick.borrow();
+                    if lw <= 1.0 || lh <= 1.0 {
+                        drop(eng);
+                        if !needs_retick.load(Ordering::Acquire) {
+                            break;
+                        }
+                        continue;
                     }
-                    _ => {}
+                    let scale = ui.window().scale_factor().max(0.5) as f32;
+                    let width = (lw * scale).ceil().max(1.0) as u32;
+                    let height = (lh * scale).ceil().max(1.0) as u32;
+                    ui.set_viewport_page_w(width as f32);
+                    ui.set_viewport_page_h(height as f32);
+
+                    // Caret overlay tracks focus/tab/running even when the Image is idle.
+                    sync_console_caret(&ui, &eng, width, height, scale);
+
+                    if !dirty {
+                        drop(eng);
+                        if !needs_retick.load(Ordering::Acquire) {
+                            break;
+                        }
+                        continue;
+                    }
+                    force_tick.set(false);
+
+                    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+                    if let Err(err) = eng.render(width, height, buffer.make_mut_bytes()) {
+                        ui.set_status_text(SharedString::from(format!("render: {err}")));
+                        drop(eng);
+                        break;
+                    }
+                    // Position may change with scroll/follow after paint.
+                    sync_console_caret(&ui, &eng, width, height, scale);
+                    drop(eng);
+                    ui.set_viewport_image(Image::from_rgba8(buffer));
+                    if !presented_tick.get() {
+                        presented_tick.set(true);
+                        ui.window().request_redraw();
+                    }
+
+                    if !needs_retick.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                ticking.store(false, Ordering::Release);
+            }));
+        });
+    }
+
+    {
+        let ticking = ticking.clone();
+        let needs_retick = needs_retick.clone();
+        let pending = Arc::new(AtomicBool::new(false));
+        engine.borrow_mut().set_pty_activity_wake(Arc::new(move || {
+            if ticking.load(Ordering::Acquire) {
+                needs_retick.store(true, Ordering::Release);
+                return;
+            }
+            if pending.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let pending = pending.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                pending.store(false, Ordering::Release);
+                HOST_TICK.with(|slot| {
+                    if let Some(f) = slot.borrow_mut().as_mut() {
+                        f();
+                    }
+                });
+            });
+        }));
+    }
+
+    timer.start(TimerMode::Repeated, TICK_FAST, move || {
+        HOST_TICK.with(|slot| {
+            if let Some(f) = slot.borrow_mut().as_mut() {
+                f();
+            }
+        });
+    });
+
+    // Blink only flips overlay opacity — never re-rasters the log Image.
+    let caret_blink_timer = Rc::new(Timer::default());
+    {
+        let ui_blink = ui.as_weak();
+        caret_blink_timer.start(TimerMode::Repeated, CARET_BLINK_PERIOD, move || {
+            if let Some(ui) = ui_blink.upgrade() {
+                if ui.get_caret_visible() {
+                    ui.set_caret_blink_on(!ui.get_caret_blink_on());
                 }
             }
-
-            let dirty = eng.needs_render() || force_tick.get();
-            // Approximate console_caret_active: focused console needs blink ticks (~530ms period).
-            let caret_urgency = focused_tick.get() && console_tick.get();
-            let want_fast = dirty || caret_urgency;
-            if want_fast {
-                bump_fast_timer(&timer_tick, &timer_fast_tick);
-            } else if timer_fast_tick.get() {
-                timer_tick.set_interval(TICK_IDLE);
-                timer_fast_tick.set(false);
-            }
-
-            let (lw, lh) = *logical_tick.borrow();
-            if lw <= 1.0 || lh <= 1.0 {
-                return;
-            }
-            let scale = ui.window().scale_factor().max(0.5) as f32;
-            let width = (lw * scale).ceil().max(1.0) as u32;
-            let height = (lh * scale).ceil().max(1.0) as u32;
-            // Thumb page-size matches rendered viewport (device pixels).
-            ui.set_viewport_page_w(width as f32);
-            ui.set_viewport_page_h(height as f32);
-
-            if !dirty {
-                return;
-            }
-            force_tick.set(false);
-
-            // Paint into SharedPixelBuffer bytes (single alloc, no clone_from_slice copy).
-            let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-            if let Err(err) = eng.render(width, height, buffer.make_mut_bytes()) {
-                ui.set_status_text(SharedString::from(format!("render: {err}")));
-                return;
-            }
-            ui.set_viewport_image(Image::from_rgba8(buffer));
-            if !presented_tick.get() {
-                presented_tick.set(true);
-                ui.window().request_redraw();
-            }
-        },
-    );
+        });
+    }
 
     // Keep Rc<Timer> alive for the UI lifetime (Drop stops the timer).
     let _tick_timer = timer;
+    let _caret_blink_timer = caret_blink_timer;
     let _find_debounce = find_debounce;
     let _filter_draft_debounce = filter_draft_debounce;
 

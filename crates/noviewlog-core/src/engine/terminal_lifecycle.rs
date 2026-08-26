@@ -29,30 +29,86 @@ impl Engine {
     }
 
     pub(crate) fn poll_pty(&mut self) {
-        let mut changed = false;
+        enum Coalesced {
+            Bytes { id: String, data: Vec<u8> },
+            Exit {
+                id: String,
+                code: i32,
+                generation: u64,
+            },
+        }
+
+        let mut coalesced: Vec<Coalesced> = Vec::new();
+        while let Ok(event) = self.pty_rx.try_recv() {
+            match event {
+                PtyEvent::Bytes { id, data } => {
+                    if let Some(Coalesced::Bytes {
+                        id: last_id,
+                        data: buf,
+                    }) = coalesced.last_mut()
+                    {
+                        if *last_id == id {
+                            buf.extend_from_slice(&data);
+                            continue;
+                        }
+                    }
+                    coalesced.push(Coalesced::Bytes { id, data });
+                }
+                PtyEvent::Exit {
+                    id,
+                    code,
+                    generation,
+                } => coalesced.push(Coalesced::Exit {
+                    id,
+                    code,
+                    generation,
+                }),
+            }
+        }
+
         let mut active_changed = false;
+        let mut chrome_changed = false;
         let mut respawn_shell_ids: Vec<String> = Vec::new();
         let active_id = self
             .terminals
             .get(self.active_terminal)
             .map(|t| t.id.clone());
-        while let Ok(event) = self.pty_rx.try_recv() {
+
+        for event in coalesced {
             match event {
-                PtyEvent::Bytes { id, data } => {
-                    let Some(term) = self.terminals.iter_mut().find(|t| t.id == id) else {
+                Coalesced::Bytes { id, data } => {
+                    let Some(term_idx) = self.terminals.iter().position(|t| t.id == id) else {
                         continue;
                     };
-                    term.ingest.feed(&data, &mut term.buffer, &mut term.parser);
-                    if let Some(cwd) = term.ingest.take_cwd_update() {
-                        term.cwd = cwd;
+                    let is_active = active_id.as_ref() == Some(&id);
+                    let old_volatile = self.terminals[term_idx].ingest.volatile_count();
+                    let old_total = self.terminals[term_idx].buffer.records().len();
+
+                    {
+                        let term = &mut self.terminals[term_idx];
+                        term.ingest
+                            .feed(&data, &mut term.buffer, &mut term.parser);
+                        if let Some(cwd) = term.ingest.take_cwd_update() {
+                            term.cwd = cwd;
+                            chrome_changed = true;
+                        }
+                        term.last_line_at = Some(Instant::now());
                     }
-                    term.last_line_at = Some(Instant::now());
-                    changed = true;
-                    if active_id.as_ref() == Some(&id) {
+
+                    if is_active {
                         active_changed = true;
+                        let new_volatile = self.terminals[term_idx].ingest.volatile_count();
+                        let new_total = self.terminals[term_idx].buffer.records().len();
+                        self.apply_active_pty_bytes_to_views(
+                            term_idx,
+                            old_volatile,
+                            old_total,
+                            new_volatile,
+                            new_total,
+                        );
                     }
                 }
-                PtyEvent::Exit {
+                Coalesced::Exit {
                     id,
                     code,
                     generation,
@@ -73,36 +129,67 @@ impl Engine {
                     term.ingest.finish(&mut term.buffer, &mut term.parser);
                     term.running = false;
                     term.exit_code = Some(code);
-                    // File viewers are not interactive sessions — do not spawn a shell.
                     let file_session = term.is_file_session();
                     self.ptys.remove(&id);
                     let message = format_process_exit_message(code);
+                    chrome_changed = true;
                     if active_id.as_ref() == Some(&id) {
                         self.status_message = message.clone();
                         active_changed = true;
+                        self.mark_all_views_dirty();
+                        self.mark_viewport_dirty();
                         self.push_event(json!({"type":"exit","code": code, "message": message}));
                     }
                     if !file_session {
                         respawn_shell_ids.push(id);
                     }
-                    changed = true;
                 }
             }
         }
-        if changed {
-            // Rebuild only the active terminal's views for display; inactive
-            // buffers still receive bytes for when the user switches back.
-            if active_changed {
-                self.mark_all_views_dirty();
-                self.mark_viewport_dirty();
-            }
+
+        if chrome_changed {
+            // Cwd / exit / running — refresh sidebar chrome promptly.
             self.last_stats_at = None;
         }
-        // Keep a live session: when the PTY exits, respawn the default interactive shell.
+        if active_changed {
+            self.mark_viewport_dirty();
+        }
+
         for id in respawn_shell_ids {
             self.start_interactive_shell_for(&id);
         }
         self.flush_idle_pending();
+    }
+
+    /// Patch Console flat lines for a volatile VT update; dirty other views.
+    fn apply_active_pty_bytes_to_views(
+        &mut self,
+        term_idx: usize,
+        old_volatile: usize,
+        old_total: usize,
+        new_volatile: usize,
+        new_total: usize,
+    ) {
+        let terminal = &mut self.terminals[term_idx];
+        // Non-console views catch up on switch.
+        for (i, view) in terminal.views.iter_mut().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            view.mark_flat_lines_dirty();
+        }
+        let Some(console) = terminal.views.get_mut(0) else {
+            return;
+        };
+        if !console.try_patch_volatile_tail(
+            &terminal.buffer,
+            old_volatile,
+            old_total,
+            new_volatile,
+            new_total,
+        ) {
+            console.mark_flat_lines_dirty();
+        }
     }
 
     pub(crate) fn start_launch_process(&mut self) {
@@ -140,6 +227,7 @@ impl Engine {
                 args,
                 cwd,
                 generation,
+                self.pty_activity_wake.clone(),
             )
         };
         if let Err(err) = start_result {
@@ -214,6 +302,7 @@ impl Engine {
                 args,
                 cwd,
                 generation,
+                self.pty_activity_wake.clone(),
             )
         };
         if let Err(err) = start_result {

@@ -1,4 +1,6 @@
-use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
+use std::collections::HashMap;
+
+use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSettings, TextStyle};
 use fontdue::Font;
 
 use crate::color_emoji::{
@@ -68,12 +70,48 @@ impl FontStack {
     }
 }
 
+struct CachedGlyph {
+    width: usize,
+    height: usize,
+    bitmap: Vec<u8>,
+}
+
+/// Fontdue raster cache for the current font size (cleared on size change).
+struct GlyphCache {
+    entries: HashMap<(usize, u16, u32), CachedGlyph>,
+}
+
+impl GlyphCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn rasterize(&mut self, font: &Font, key: GlyphRasterConfig) -> &CachedGlyph {
+        let cache_key = (key.font_hash, key.glyph_index, key.px.to_bits());
+        self.entries.entry(cache_key).or_insert_with(|| {
+            let (metrics, bitmap) = font.rasterize_config(key);
+            CachedGlyph {
+                width: metrics.width,
+                height: metrics.height,
+                bitmap,
+            }
+        })
+    }
+}
+
 pub struct ViewportRenderer {
     fonts: FontStack,
     /// System Noto Color Emoji (CBDT); optional — mono Symbols2 remains the fallback.
     color_emoji: Option<ColorEmojiAtlas>,
     metrics: ViewportMetrics,
     font_size: f32,
+    glyph_cache: GlyphCache,
 }
 
 impl ViewportRenderer {
@@ -92,6 +130,7 @@ impl ViewportRenderer {
             color_emoji,
             metrics,
             font_size,
+            glyph_cache: GlyphCache::new(),
         }
     }
 
@@ -107,6 +146,7 @@ impl ViewportRenderer {
         }
         self.font_size = font_size;
         self.metrics = compute_metrics(&self.fonts.primary, font_size);
+        self.glyph_cache.clear();
     }
 
     pub fn metrics(&self) -> &ViewportMetrics {
@@ -114,7 +154,7 @@ impl ViewportRenderer {
     }
 
     pub fn render_center_message(
-        &self,
+        &mut self,
         out: &mut [u8],
         width: u32,
         height: u32,
@@ -131,6 +171,7 @@ impl ViewportRenderer {
         draw_text(
             &self.fonts,
             self.color_emoji.as_ref(),
+            &mut self.glyph_cache,
             out,
             width,
             height,
@@ -148,7 +189,7 @@ impl ViewportRenderer {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         out: &mut [u8],
         width: u32,
         height: u32,
@@ -194,6 +235,7 @@ impl ViewportRenderer {
             draw_visual_line(
                 &self.fonts,
                 self.color_emoji.as_ref(),
+                &mut self.glyph_cache,
                 out,
                 width,
                 height,
@@ -242,7 +284,8 @@ impl ViewportRenderer {
     }
 }
 
-fn caret_pixel_pos(
+/// Pixel position (x, row_top) of a block caret within the viewport.
+pub fn caret_pixel_pos(
     lines: &[FlatLine],
     visual_lines: &[crate::viewport_layout::VisualLine],
     caret: ViewportCaret,
@@ -498,6 +541,7 @@ fn severity_cue_color(level: LogLevel) -> [u8; 4] {
 fn draw_visual_line(
     fonts: &FontStack,
     color_emoji: Option<&ColorEmojiAtlas>,
+    glyph_cache: &mut GlyphCache,
     out: &mut [u8],
     width: u32,
     height: u32,
@@ -610,6 +654,7 @@ fn draw_visual_line(
     let drew_any = draw_segments(
         fonts,
         color_emoji,
+        glyph_cache,
         out,
         width,
         height,
@@ -627,6 +672,7 @@ fn draw_visual_line(
             draw_text(
                 fonts,
                 color_emoji,
+                glyph_cache,
                 out,
                 width,
                 height,
@@ -700,6 +746,7 @@ fn highlight_selection_in_segments(
 fn draw_segments(
     fonts: &FontStack,
     color_emoji: Option<&ColorEmojiAtlas>,
+    glyph_cache: &mut GlyphCache,
     out: &mut [u8],
     width: u32,
     height: u32,
@@ -740,6 +787,7 @@ fn draw_segments(
         draw_text(
             fonts,
             color_emoji,
+            glyph_cache,
             out,
             width,
             height,
@@ -796,6 +844,7 @@ fn text_width(text: &str, cell_width: u32) -> u32 {
 fn draw_text(
     fonts: &FontStack,
     color_emoji: Option<&ColorEmojiAtlas>,
+    glyph_cache: &mut GlyphCache,
     out: &mut [u8],
     width: u32,
     height: u32,
@@ -859,16 +908,16 @@ fn draw_text(
         for glyph in layout.glyphs() {
             let metrics = font.metrics(glyph.parent, font_size);
             let glyph_x = cell_x + metrics.xmin;
-            let (raster_metrics, bitmap) = font.rasterize_config(glyph.key);
+            let cached = glyph_cache.rasterize(font, glyph.key);
             blit_glyph(
                 out,
                 width,
                 height,
                 glyph_x,
                 glyph.y as i32,
-                &bitmap,
-                raster_metrics.width,
-                raster_metrics.height,
+                &cached.bitmap,
+                cached.width,
+                cached.height,
                 color,
                 bold,
                 clip,
@@ -969,7 +1018,7 @@ mod tests {
 
     #[test]
     fn text_width_ignores_ansi_bytes() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let cell = renderer.metrics.cell_width;
         let plain = text_width("http://localhost:1337", cell);
         let with_ansi = text_width(
@@ -997,7 +1046,7 @@ mod tests {
 
     #[test]
     fn render_search_match_on_url() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let line = FlatLine {
             record_id: 1,
             line_index: 0,
@@ -1033,7 +1082,7 @@ mod tests {
     fn render_nowrap_scroll_x_reveals_line_tail() {
         use crate::viewport_layout::max_scroll_x;
 
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let cell = renderer.metrics.cell_width;
         let text = "START__http://localhost:1337/admin/dashboard__END";
         let line = FlatLine {
@@ -1132,7 +1181,7 @@ mod tests {
 
     #[test]
     fn render_emoji_and_symbol_chars() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let cases = [
             ("To access the server ⚡, go to:", '⚡'),
             ("✔ Cleaning dist dir (6ms)", '✔'),
@@ -1170,7 +1219,7 @@ mod tests {
 
     #[test]
     fn render_color_rocket_emoji_when_noto_available() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         if renderer.color_emoji.is_none() {
             eprintln!("skip: Noto Color Emoji not installed");
             return;
@@ -1213,7 +1262,7 @@ mod tests {
 
     #[test]
     fn render_color_stopwatch_when_noto_available() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         if renderer.color_emoji.is_none() {
             eprintln!("skip: Noto Color Emoji not installed");
             return;
@@ -1257,7 +1306,7 @@ mod tests {
 
     #[test]
     fn variation_selector_16_does_not_draw_tofu_cell() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let cell = renderer.metrics.cell_width;
         // Sample: console.time(`⏱️ …`) → U+23F1 + U+FE0F
         assert_eq!(
@@ -1400,7 +1449,7 @@ mod tests {
 
     #[test]
     fn render_multiple_lines_have_vertical_glyph_spread() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let lines: Vec<FlatLine> = (0..5)
             .map(|i| {
                 let i = i as usize;
@@ -1447,7 +1496,7 @@ mod tests {
 
     #[test]
     fn render_search_match_shows_text_not_only_background() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let line = FlatLine {
             record_id: 1,
             line_index: 0,
@@ -1496,7 +1545,7 @@ mod tests {
 
     #[test]
     fn render_box_drawing_vertical_bars_align_across_rows() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let width = 800u32;
         let height = 80u32;
         let row_stride = renderer.metrics.row_stride;
@@ -1611,7 +1660,7 @@ mod tests {
         use crate::core::ansi::{parse_ansi_line, strip_ansi};
         use crate::core::types::FlatLine;
 
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let colored = "\u{1b}[90m│\u{1b}[39m \u{1b}[34mTime\u{1b}[39m               \u{1b}[90m│\u{1b}[39m Fri Jul 10 2026 12:07:46 GMT+0300 \u{1b}[90m│\u{1b}[39m";
         let plain = strip_ansi(colored);
         let segments = parse_ansi_line(colored);
@@ -1711,7 +1760,7 @@ mod tests {
 
     #[test]
     fn render_draws_block_caret_past_line_end() {
-        let renderer = ViewportRenderer::new();
+        let mut renderer = ViewportRenderer::new();
         let line = FlatLine {
             record_id: 1,
             line_index: 0,
