@@ -19,6 +19,28 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn process_started_for_test(&self) -> bool {
+        self.has_active_terminal() && self.active_terminal().process_started
+    }
+
+    #[cfg(test)]
+    pub fn pty_generation_for_test(&self) -> u64 {
+        if !self.has_active_terminal() {
+            return 0;
+        }
+        self.active_terminal().pty_generation
+    }
+
+    #[cfg(test)]
+    pub fn inject_pty_exit_for_test(&self, id: &str, code: i32, generation: u64) {
+        let _ = self.pty_tx.send(crate::pty::PtyEvent::Exit {
+            id: id.to_string(),
+            code,
+            generation,
+        });
+    }
+
+    #[cfg(test)]
     pub fn status_message_for_test(&self) -> String {
         self.status_message.clone()
     }

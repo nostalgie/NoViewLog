@@ -97,4 +97,12 @@ mod tests {
         let cfg = parse(&args);
         assert_eq!(cfg.command.as_deref(), Some("bash"));
     }
+
+    #[test]
+    fn parses_node_sample_app() {
+        let args = vec!["--".into(), "node".into(), "sample/app.js".into()];
+        let cfg = parse(&args);
+        assert_eq!(cfg.command.as_deref(), Some("node"));
+        assert_eq!(cfg.args, vec!["sample/app.js"]);
+    }
 }

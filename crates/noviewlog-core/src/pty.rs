@@ -14,7 +14,9 @@ use std::thread;
 pub enum PtyEvent {
     /// A raw chunk of PTY output bytes for a specific terminal session.
     Bytes { id: String, data: Vec<u8> },
-    Exit { id: String, code: i32 },
+    /// Child exited. `generation` matches the [`PtyManager::start`] call that
+    /// spawned this child — leftover `Exit` from a previous session must be ignored.
+    Exit { id: String, code: i32, generation: u64 },
 }
 
 pub struct PtyManager {
@@ -27,6 +29,8 @@ pub struct PtyManager {
     master: Option<Box<dyn MasterPty + Send>>,
     /// Last size applied to the live PTY (or the size used for the next open).
     size: PtySize,
+    /// Session token from the last successful [`Self::start`] (0 = never started).
+    generation: u64,
 }
 
 impl PtyManager {
@@ -42,7 +46,12 @@ impl PtyManager {
                 pixel_width: 0,
                 pixel_height: 0,
             },
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Remember geometry for the next `start`, and resize a live PTY if any.
@@ -75,8 +84,10 @@ impl PtyManager {
         command: String,
         args: Vec<String>,
         cwd: Option<String>,
+        generation: u64,
     ) -> Result<(), String> {
         self.stop();
+        self.generation = generation;
 
         // Always set cwd: portable-pty may not inherit the parent process cwd.
         // On Windows, prepare_spawn rewrites UNC / WSL cwd (never pass UNC to CreateProcess).
@@ -128,6 +139,7 @@ impl PtyManager {
 
         let running = self.running.clone();
         let session_id = id;
+        let session_generation = generation;
 
         thread::spawn(move || {
             let mut chunk = [0u8; 4096];
@@ -160,6 +172,7 @@ impl PtyManager {
             let _ = tx.send(PtyEvent::Exit {
                 id: session_id,
                 code,
+                generation: session_generation,
             });
             running.store(false, Ordering::SeqCst);
         });

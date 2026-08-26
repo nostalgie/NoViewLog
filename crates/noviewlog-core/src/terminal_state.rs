@@ -46,6 +46,8 @@ pub struct TerminalState {
     pub running: bool,
     pub exit_code: Option<i32>,
     pub process_started: bool,
+    /// Monotonic PTY session token for this terminal. Compared to [`crate::pty::PtyEvent::Exit`].
+    pub pty_generation: u64,
     pub last_line_at: Option<Instant>,
     pub scroll_offset_y: f32,
     pub scroll_x: f32,
@@ -85,6 +87,7 @@ impl TerminalState {
             running: false,
             exit_code: None,
             process_started: false,
+            pty_generation: 0,
             last_line_at: None,
             scroll_offset_y: 0.0,
             scroll_x: 0.0,
