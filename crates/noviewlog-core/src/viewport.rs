@@ -7,7 +7,7 @@ use crate::color_emoji::{
 };
 use crate::core::ansi::strip_ansi;
 use crate::core::types::{
-    clamp_viewport_font_size, FlatLine, SearchMatch, TextSegment, TextStyle as LineStyle,
+    clamp_viewport_font_size, FlatLine, LogLevel, SearchMatch, TextSegment, TextStyle as LineStyle,
     DEFAULT_VIEWPORT_FONT_SIZE,
 };
 use crate::core::visible::{highlight_search_in_segments, SearchPattern};
@@ -23,6 +23,14 @@ const SEARCH_BG: [u8; 4] = [58, 100, 150, 255];
 const SEARCH_CURRENT_BG: [u8; 4] = [184, 134, 11, 255];
 const SELECTION_BG: [u8; 4] = [45, 70, 110, 255];
 const CARET_FG: [u8; 4] = [230, 237, 243, 255];
+/// Muted severity gutter cues (not Theme.accent / bright fluent blue).
+const SEVERITY_ERROR: [u8; 4] = [180, 80, 80, 255];
+const SEVERITY_WARN: [u8; 4] = [180, 145, 70, 255];
+const SEVERITY_INFO: [u8; 4] = [100, 140, 165, 255];
+const SEVERITY_DEBUG: [u8; 4] = [130, 120, 150, 255];
+/// Disclosure cues (muted; not Theme.accent).
+const DISCLOSURE_COLLAPSED: [u8; 4] = [120, 130, 145, 255];
+const DISCLOSURE_EXPANDED: [u8; 4] = [90, 100, 115, 255];
 /// Probe size when checking whether a fallback font has ink for a glyph.
 const FONT_PROBE_SIZE: f32 = DEFAULT_VIEWPORT_FONT_SIZE;
 
@@ -478,6 +486,15 @@ fn drawable_text(text: &str) -> String {
     strip_ansi(text)
 }
 
+fn severity_cue_color(level: LogLevel) -> [u8; 4] {
+    match level {
+        LogLevel::Error => SEVERITY_ERROR,
+        LogLevel::Warn => SEVERITY_WARN,
+        LogLevel::Info => SEVERITY_INFO,
+        LogLevel::Debug => SEVERITY_DEBUG,
+    }
+}
+
 fn draw_visual_line(
     fonts: &FontStack,
     color_emoji: Option<&ColorEmojiAtlas>,
@@ -516,6 +533,77 @@ fn draw_visual_line(
     if let Some(sel) = selection {
         segments =
             highlight_selection_in_segments(&segments, sel, flat_index, slice_start, slice_end);
+    }
+
+    // Non-selectable muted gutter on the first visual row of a leveled Record.
+    // Does not insert characters into `raw` / selection / copy text.
+    // Sit in LEFT_PAD with a few pixels of gap so the bar does not glue to glyphs.
+    const SEVERITY_TEXT_GAP: i32 = 3;
+    if slice_start == 0 {
+        if let Some(level) = line.level {
+            let color = severity_cue_color(level);
+            let gutter_w = ((cell_width / 3).max(2).min(4)) as usize;
+            let y = row_top.floor() as i32;
+            let h = row_height.ceil().max(1.0) as usize;
+            let gutter_x = x_base - SEVERITY_TEXT_GAP - gutter_w as i32;
+            fill_rect(
+                out,
+                width,
+                height,
+                gutter_x,
+                y,
+                gutter_w,
+                h,
+                color,
+                Some(clip),
+            );
+        }
+        // Disclosure cue for multiline Records (collapsed vs expanded).
+        if line.collapsible && line.line_index == 0 {
+            let color = if line.collapsed {
+                DISCLOSURE_COLLAPSED
+            } else {
+                DISCLOSURE_EXPANDED
+            };
+            let cue_w = ((cell_width / 2).max(3).min(5)) as usize;
+            let y = row_top.floor() as i32;
+            let h = row_height.ceil().max(1.0) as usize;
+            // Keep disclosure in the pad, left of text (and left of severity when both exist).
+            let gutter_w = ((cell_width / 3).max(2).min(4)) as i32;
+            let cue_x = if line.level.is_some() {
+                x_base - SEVERITY_TEXT_GAP - gutter_w - 1 - cue_w as i32
+            } else {
+                x_base - SEVERITY_TEXT_GAP - cue_w as i32
+            };
+            fill_rect(
+                out,
+                width,
+                height,
+                cue_x,
+                y,
+                cue_w,
+                h,
+                color,
+                Some(clip),
+            );
+            // Collapsed preview: muted "+N" suffix via small right-side hash marks.
+            if line.collapsed && line.hidden_line_count > 0 {
+                let mark_x = x_base + (width as i32).saturating_sub(cell_width as i32 * 4);
+                if mark_x > x_base {
+                    fill_rect(
+                        out,
+                        width,
+                        height,
+                        mark_x,
+                        y + (h as i32 / 3),
+                        (cell_width as usize).saturating_mul(2).min(16),
+                        (h / 3).max(2),
+                        DISCLOSURE_COLLAPSED,
+                        Some(clip),
+                    );
+                }
+            }
+        }
     }
 
     let mut cursor_x = x_base;
@@ -918,6 +1006,10 @@ mod tests {
                 style: None,
             }],
             raw: "http://localhost:1337".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let re = compile_search_pattern("http", false, false, false).unwrap();
         let active = SearchMatch {
@@ -952,6 +1044,10 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let width = 160u32;
         let height = 40u32;
@@ -1051,7 +1147,11 @@ mod tests {
                     style: None,
                 }],
                 raw: text.to_string(),
-            };
+                        level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
             let mut buf = vec![0u8; 600 * 40 * 4];
             renderer
                 .render(&mut buf, 600, 40, &[line], 0.0, 0.0, false, None, None, None, None, None)
@@ -1084,6 +1184,10 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let width = 200u32;
         let height = 40u32;
@@ -1125,6 +1229,10 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let width = 200u32;
         let height = 40u32;
@@ -1167,6 +1275,10 @@ mod tests {
                 style: None,
             }],
             raw: "\u{FE0F}".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let width = 120u32;
         let height = 40u32;
@@ -1202,6 +1314,10 @@ mod tests {
                 style: None,
             }],
             raw: "\u{23F1}\u{FE0F}#".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let bare = FlatLine {
             record_id: 2,
@@ -1211,6 +1327,10 @@ mod tests {
                 style: None,
             }],
             raw: "\u{23F1}#".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let mut buf_vs = vec![0u8; (width * height * 4) as usize];
         let mut buf_bare = vec![0u8; (width * height * 4) as usize];
@@ -1292,7 +1412,11 @@ mod tests {
                         style: None,
                     }],
                     raw: format!("log line {i}: hello world"),
-                }
+                            level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        }
             })
             .collect();
         let width = 400u32;
@@ -1332,6 +1456,10 @@ mod tests {
                 style: None,
             }],
             raw: "http://localhost:1337".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let re = compile_search_pattern("http", false, false, false).unwrap();
         let active = SearchMatch {
@@ -1391,7 +1519,11 @@ mod tests {
                     style: None,
                 }],
                 raw: text.to_string(),
-            })
+                        level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        })
             .collect();
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
@@ -1488,6 +1620,10 @@ mod tests {
             line_index: 0,
             segments,
             raw: plain.clone(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
 
         let width = 800u32;
@@ -1513,6 +1649,10 @@ mod tests {
                 style: None,
             }],
             raw: "╭────────────────────┬──────────────────────────────────────────────────╮".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let mut buf2 = vec![0u8; (width * height * 4) as usize];
         renderer
@@ -1580,6 +1720,10 @@ mod tests {
                 style: None,
             }],
             raw: "$ ".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         };
         let width = 200u32;
         let height = 40u32;

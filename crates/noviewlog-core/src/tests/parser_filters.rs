@@ -311,4 +311,200 @@ fn set_format_reparses_entire_buffer() {
     );
 }
 
+#[test]
+fn severity_filter_errors_and_unleveled() {
+    use crate::core::filter::FilterEngine;
+    use crate::core::types::SeverityFilter;
+    use crate::core::visible::rebuild_flat_lines_for_records;
+    use chrono::Utc;
+
+    let mut records = sample_records();
+    records.push(LogRecord {
+        id: 4,
+        lines: vec!["plain output".to_string()],
+        text: "plain output".to_string(),
+        received_at: Utc::now(),
+        level: None,
+        overwrite: false,
+    });
+
+    let engine = FilterEngine::default();
+    let empty = std::collections::HashSet::new();
+    let errors = rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::Error, &empty);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].raw.contains("Error: boom"));
+    assert_eq!(errors[0].level, Some(LogLevel::Error));
+
+    let unleveled =
+        rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::Unleveled, &empty);
+    assert_eq!(unleveled.len(), 1);
+    assert_eq!(unleveled[0].raw, "plain output");
+    assert!(unleveled[0].level.is_none());
+}
+
+#[test]
+fn severity_applies_after_include_exclude() {
+    use crate::core::filter::FilterEngine;
+    use crate::core::types::{compile_filter, FilterRule, FilterType, SeverityFilter};
+    use crate::core::visible::rebuild_flat_lines_for_records;
+
+    let records = sample_records();
+    // Exclude hides the warn record; include keeps Error|info; severity Errors narrows further.
+    let filter = FilterEngine::new(vec![
+        compile_filter(FilterRule {
+            id: "i".into(),
+            name: None,
+            filter_type: FilterType::Include,
+            pattern: "Error|info".into(),
+            enabled: true,
+            use_regex: true,
+            regex: None,
+        }),
+        compile_filter(FilterRule {
+            id: "e".into(),
+            name: None,
+            filter_type: FilterType::Exclude,
+            pattern: "deprecated".into(),
+            enabled: true,
+            use_regex: true,
+            regex: None,
+        }),
+    ]);
+    let empty = std::collections::HashSet::new();
+    let all_sev = rebuild_flat_lines_for_records(&records, &filter, SeverityFilter::All, &empty);
+    assert_eq!(all_sev.len(), 2); // Error + info
+    let only_err =
+        rebuild_flat_lines_for_records(&records, &filter, SeverityFilter::Error, &empty);
+    assert_eq!(only_err.len(), 1);
+    assert!(only_err[0].raw.contains("Error"));
+}
+
+#[test]
+fn severity_set_command_updates_view() {
+    use crate::Command;
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine
+        .send_command(Command::SeveritySet {
+            mode: "error".into(),
+        })
+        .expect("severity set");
+    assert_eq!(
+        engine.active_view_severity_for_test(),
+        "error"
+    );
+    engine
+        .send_command_json(r#"{"cmd":"severity_set","mode":"unleveled"}"#)
+        .expect("json severity");
+    assert_eq!(
+        engine.active_view_severity_for_test(),
+        "unleveled"
+    );
+}
+
+#[test]
+fn multiline_records_default_collapsed_and_toggle() {
+    use crate::core::filter::FilterEngine;
+    use crate::core::types::SeverityFilter;
+    use crate::core::visible::rebuild_flat_lines_for_records;
+    use chrono::Utc;
+    use std::collections::HashSet;
+
+    let records = vec![LogRecord {
+        id: 10,
+        lines: vec![
+            "Error: boom".into(),
+            "    at foo.js:1:1".into(),
+            "    at bar.js:2:2".into(),
+        ],
+        text: "Error: boom\n    at foo.js:1:1\n    at bar.js:2:2".into(),
+        received_at: Utc::now(),
+        level: Some(LogLevel::Error),
+        overwrite: false,
+    }];
+    let engine = FilterEngine::default();
+    let empty = HashSet::new();
+    let collapsed =
+        rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::All, &empty);
+    assert_eq!(collapsed.len(), 1);
+    assert!(collapsed[0].collapsed);
+    assert_eq!(collapsed[0].hidden_line_count, 2);
+    assert!(collapsed[0].collapsible);
+
+    let mut expanded = HashSet::new();
+    expanded.insert(10);
+    let open =
+        rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::All, &expanded);
+    assert_eq!(open.len(), 3);
+    assert!(!open[0].collapsed);
+    assert!(open[0].collapsible);
+}
+
+#[test]
+fn collapse_respects_exclude_on_full_text() {
+    use crate::core::filter::FilterEngine;
+    use crate::core::types::{compile_filter, FilterRule, FilterType, SeverityFilter};
+    use crate::core::visible::rebuild_flat_lines_for_records;
+    use chrono::Utc;
+    use std::collections::HashSet;
+
+    let records = vec![LogRecord {
+        id: 11,
+        lines: vec!["Error: boom".into(), "    at deprecated.js:1".into()],
+        text: "Error: boom\n    at deprecated.js:1".into(),
+        received_at: Utc::now(),
+        level: Some(LogLevel::Error),
+        overwrite: false,
+    }];
+    let filter = FilterEngine::new(vec![compile_filter(FilterRule {
+        id: "e".into(),
+        name: None,
+        filter_type: FilterType::Exclude,
+        pattern: "deprecated".into(),
+        enabled: true,
+        use_regex: true,
+        regex: None,
+    })]);
+    let flat =
+        rebuild_flat_lines_for_records(&records, &filter, SeverityFilter::All, &HashSet::new());
+    assert!(flat.is_empty(), "exclude matches full record text");
+}
+
+#[test]
+fn expand_collapse_all_commands() {
+    use crate::Command;
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine.push_lines_for_test([
+        "Error: boom".into(),
+        "    at foo.js:1:1".into(),
+        "    at bar.js:2:2".into(),
+        "info: done".into(),
+        "info: again".into(),
+    ]);
+    // After second info line, first info commits; Error stack is one collapsed row + one info.
+    assert!(
+        engine.active_flat_line_count_for_test() >= 2,
+        "expected collapsed stack + at least one info line, got {}",
+        engine.active_flat_line_count_for_test()
+    );
+    let collapsed_count = engine.active_flat_line_count_for_test();
+    engine
+        .send_command(Command::RecordsExpandAll)
+        .expect("expand");
+    engine.rebuild_active_for_test();
+    let expanded_count = engine.active_flat_line_count_for_test();
+    assert!(
+        expanded_count > collapsed_count,
+        "expand-all should reveal stack frames ({expanded_count} vs {collapsed_count})"
+    );
+    engine
+        .send_command(Command::RecordsCollapseAll)
+        .expect("collapse");
+    engine.rebuild_active_for_test();
+    assert_eq!(engine.active_flat_line_count_for_test(), collapsed_count);
+}
+
 

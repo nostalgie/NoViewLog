@@ -121,10 +121,17 @@ pub struct StatsSnapshot {
     pub max_scrollback_lines: usize,
     #[serde(default)]
     pub viewport_font_size: f32,
+    /// Active Tab/View severity mode (`all`, `error`, `warn`, `info`, `debug`, `unleveled`).
+    #[serde(default = "default_severity_all")]
+    pub severity_filter: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_severity_all() -> String {
+    "all".to_string()
 }
 
 /// Engine → host event after parsing wire JSON.

@@ -309,6 +309,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
+        let ui_sev = ui.as_weak();
+        ui.on_set_severity(move |mode| {
+            let mode_str = mode.to_string();
+            if let Some(ui) = ui_sev.upgrade() {
+                ui.set_severity_mode(mode.clone());
+            }
+            let _ = engine
+                .borrow_mut()
+                .send_command(Command::SeveritySet { mode: mode_str });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_records_expand_all(move || {
+            let _ = engine.borrow_mut().send_command(Command::RecordsExpandAll);
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_records_collapse_all(move || {
+            let _ = engine
+                .borrow_mut()
+                .send_command(Command::RecordsCollapseAll);
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
         ui.on_viewport_scrolled(move |delta_y| {
             let lines = if delta_y > 0.0 { -3 } else { 3 };
             let _ = engine

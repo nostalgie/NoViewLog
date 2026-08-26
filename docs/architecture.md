@@ -51,6 +51,17 @@ Slint links `noviewlog-core` as an `rlib` and calls `Engine` directly:
 When fixing coloring or escape handling, identify which layer owns the bug
 before changing code.
 
+## Filter pipeline (per Tab/View)
+
+1. Include/exclude `FilterRule`s (`FilterEngine`)
+2. Severity mode (`SeverityFilter` on `LogView`: All / Error / Warn / Info / Debug / Unleveled)
+3. Collapse multiline Records (default collapsed unless Record id is in the view's expand set)
+4. Flat lines → search → Viewport paint (muted severity gutter + disclosure cues)
+
+Severity is orthogonal to presets and does not persist in `config.yaml` in v1.
+Expand/collapse state is per Tab/View and not persisted across restarts.
+Click a collapsed preview (or disclosure cue) to toggle; View → Expand/Collapse all records.
+
 ## Key modules (engine)
 
 | Module | Responsibility |

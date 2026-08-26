@@ -159,6 +159,11 @@ impl Engine {
         } else {
             0.0
         };
+        let severity_filter = if let Some(terminal) = self.terminals.get(active_terminal_idx) {
+            terminal.active_view().severity_filter.as_str().to_string()
+        } else {
+            "all".to_string()
+        };
 
         let snapshot = StatsSnapshot {
             event_type: "stats".to_string(),
@@ -206,6 +211,7 @@ impl Engine {
             file_loading,
             max_scrollback_lines: self.config.max_scrollback_lines,
             viewport_font_size: self.renderer.font_size(),
+            severity_filter,
         };
         match serde_json::to_value(&snapshot) {
             Ok(value) => self.push_event(value),
