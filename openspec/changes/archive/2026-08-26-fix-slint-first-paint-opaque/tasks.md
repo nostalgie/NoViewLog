@@ -5,6 +5,7 @@
 
 ## 2. Host glue
 
+- [x] 2.0 Before `AppWindow::new()`, select backend with `with_winit_window_attributes_hook` forcing `with_transparent(false)` (opaque swapchain)
 - [x] 2.1 Seed an opaque `#0d1117` `SharedPixelBuffer` on `viewport-image` in `main.rs` before `ui.run()`
 - [x] 2.2 Extend `window_should_pause_paint` so occlusion/minimize cannot skip paint until one Viewport frame has been uploaded
 - [x] 2.3 After that first `set_viewport_image` from `Engine::render`, set presented-once and `request_redraw()` once
@@ -12,4 +13,4 @@
 
 ## 3. Verify
 
-- [x] 3.1 `bash scripts/run-slint.sh` from a focused terminal: first map shows chrome + opaque Viewport, not terminal/VRAM fragments
+- [x] 3.1 `cargo build --release -p noviewlog-slint` (and `bash scripts/run-slint.sh` from a focused terminal): first map shows chrome + opaque Viewport, not terminal/VRAM fragments

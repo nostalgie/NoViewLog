@@ -50,6 +50,13 @@ fn seed_opaque_viewport(ui: &AppWindow) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Slint defaults to `with_transparent(true)` for FemtoVG WGPU. On Wayland that
+    // yields a translucent swapchain: empty/alpha-0 regions show the launching
+    // terminal until a full opaque paint. Force an opaque window surface.
+    slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attrs| attrs.with_transparent(false))
+        .select()?;
+
     let ui = AppWindow::new()?;
 
     let tabs_model = Rc::new(VecModel::<TabInfo>::from(vec![TabInfo {

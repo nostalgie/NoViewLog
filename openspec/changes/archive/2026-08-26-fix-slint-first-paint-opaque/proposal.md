@@ -4,6 +4,7 @@ On first map, the frameless Slint window can show the launching terminal (or lef
 
 ## What Changes
 
+- Winit window attributes force `with_transparent(false)` so the swapchain is opaque (Slint default is translucent for FemtoVG WGPU).
 - Viewport `Image` is shown only when the source has pixels; the cell stays an opaque `Theme.bg-window` fill otherwise.
 - Rust seeds an opaque `#0d1117` bitmap on the viewport `Image` before `ui.run()`.
 - The engine tick still ingests PTY while occluded, but it MUST present at least one viewport frame before occlusion/minimize may skip paint.

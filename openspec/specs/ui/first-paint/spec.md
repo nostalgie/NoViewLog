@@ -1,12 +1,21 @@
-## ADDED Requirements
+## Purpose
+
+Guarantees the first mapped Slint frame is opaque chrome plus Viewport so launching from a focused terminal never shows desktop or VRAM through the window.
+
+## Requirements
 
 ### Requirement: First mapped window is opaque
-The first presented Slint frame SHALL fill the Window with opaque chrome (title strip, TERMINALS sidebar, tab strip) and an opaque Viewport cell. An empty viewport `Image` source SHALL NOT cover the Viewport cell. Until a bitmap with non-zero width and height is bound, the cell SHALL show only the opaque window background fill.
+The host SHALL create the Slint window with an opaque winit surface (`with_transparent(false)`). The first presented Slint frame SHALL fill the Window with opaque chrome (title strip, TERMINALS sidebar, tab strip) and an opaque Viewport cell. An empty viewport `Image` source SHALL NOT cover the Viewport cell. Until a bitmap with non-zero width and height is bound, the cell SHALL show only the opaque window background fill.
 
 #### Scenario: First map does not show the launching terminal through the window
 - **GIVEN** the user starts `noviewlog-slint` from a focused terminal or a .desktop launcher
 - **WHEN** the Window maps for the first time
 - **THEN** the visible surface is NoViewLog chrome and an opaque Viewport, not terminal or VRAM fragments from behind the window
+
+#### Scenario: Window surface is opaque
+- **GIVEN** the host selects the Slint winit backend before creating `AppWindow`
+- **WHEN** the native window is created
+- **THEN** window attributes use `with_transparent(false)` so empty regions do not composite the desktop through the swapchain
 
 #### Scenario: Empty Image does not punch a hole
 - **GIVEN** `viewport-image` has not yet been assigned a bitmap with pixels
