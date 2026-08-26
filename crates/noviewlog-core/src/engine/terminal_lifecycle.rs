@@ -20,6 +20,14 @@ fn format_process_exit_message(code: i32) -> String {
 }
 
 impl Engine {
+    fn bump_pty_generation_for(&mut self, terminal_id: &str) -> u64 {
+        let Some(term) = self.terminals.iter_mut().find(|t| t.id == terminal_id) else {
+            return 0;
+        };
+        term.pty_generation = term.pty_generation.wrapping_add(1);
+        term.pty_generation
+    }
+
     pub(crate) fn poll_pty(&mut self) {
         let mut changed = false;
         let mut active_changed = false;
@@ -44,10 +52,24 @@ impl Engine {
                         active_changed = true;
                     }
                 }
-                PtyEvent::Exit { id, code } => {
+                PtyEvent::Exit {
+                    id,
+                    code,
+                    generation,
+                } => {
+                    if self
+                        .ptys
+                        .get(&id)
+                        .is_some_and(|p| p.generation() != generation)
+                    {
+                        continue;
+                    }
                     let Some(term) = self.terminals.iter_mut().find(|t| t.id == id) else {
                         continue;
                     };
+                    if term.pty_generation != generation {
+                        continue;
+                    }
                     term.ingest.finish(&mut term.buffer, &mut term.parser);
                     term.running = false;
                     term.exit_code = Some(code);
@@ -100,21 +122,25 @@ impl Engine {
                 return;
             }
         };
-        let cmdline = crate::spawn_resolve::format_spawn_cmdline(
-            &command,
-            &args,
-            cwd.as_deref(),
-        );
+        let cmdline = crate::spawn_resolve::format_spawn_cmdline(&command, &args, cwd.as_deref());
         self.status_message = format!("Running: {cmdline}");
         self.push_event(json!({"type":"status","message": self.status_message}));
         self.active_terminal_mut().exit_code = None;
         self.active_terminal_mut().running = true;
         self.sync_terminal_geometry();
         let size = self.viewport_pty_size();
+        let generation = self.bump_pty_generation_for(&id);
         let start_result = {
             let pty = self.ptys.entry(id.clone()).or_default();
             let _ = pty.set_size(size);
-            pty.start(self.pty_tx.clone(), id.clone(), command, args, cwd)
+            pty.start(
+                self.pty_tx.clone(),
+                id.clone(),
+                command,
+                args,
+                cwd,
+                generation,
+            )
         };
         if let Err(err) = start_result {
             self.active_terminal_mut().running = false;
@@ -160,11 +186,7 @@ impl Engine {
                 return;
             }
         };
-        let cmdline = crate::spawn_resolve::format_spawn_cmdline(
-            &command,
-            &args,
-            cwd.as_deref(),
-        );
+        let cmdline = crate::spawn_resolve::format_spawn_cmdline(&command, &args, cwd.as_deref());
         let is_active = term_idx == self.active_terminal;
         if is_active {
             self.status_message = format!("Shell: {cmdline}");
@@ -181,10 +203,18 @@ impl Engine {
         }
         let size = self.viewport_pty_size();
         let id = terminal_id.to_string();
+        let generation = self.bump_pty_generation_for(&id);
         let start_result = {
             let pty = self.ptys.entry(id.clone()).or_default();
             let _ = pty.set_size(size);
-            pty.start(self.pty_tx.clone(), id.clone(), command, args, cwd)
+            pty.start(
+                self.pty_tx.clone(),
+                id.clone(),
+                command,
+                args,
+                cwd,
+                generation,
+            )
         };
         if let Err(err) = start_result {
             self.terminals[term_idx].running = false;

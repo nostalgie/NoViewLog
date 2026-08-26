@@ -87,7 +87,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Opaque placeholder before `ui.run()` — empty Image punches a see-through hole.
     seed_opaque_viewport(&ui);
 
-    let mut engine = Engine::new();
     let cli: Vec<String> = std::env::args().skip(1).collect();
     let launch = launch_args::parse(&cli);
     if launch.has_process_launch() {
@@ -97,10 +96,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .or(launch.log_file.as_deref())
             .unwrap_or("launch");
         ui.set_status_text(SharedString::from(format!("launch: {label}")));
-        engine.set_launch(launch);
     } else {
         ui.set_status_text(SharedString::from("interactive shell"));
     }
+    let mut engine = Engine::new();
+    engine.set_launch(launch);
 
     let engine = Rc::new(RefCell::new(engine));
     let logical_size = Rc::new(RefCell::new((800.0f32, 600.0f32)));

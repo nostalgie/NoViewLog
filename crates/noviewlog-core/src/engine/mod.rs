@@ -126,8 +126,9 @@ impl Engine {
             max_scrollback,
         );
 
-        #[allow(unused_mut)] // mut needed for start_interactive_shell outside tests
-        let mut engine = Self {
+        // No PTY yet — [`Self::set_launch`] starts the CLI command, log file, or
+        // interactive shell so a leftover boot-shell Exit cannot steal the session.
+        Self {
             terminals: vec![terminal],
             active_terminal: 0,
             config,
@@ -151,13 +152,7 @@ impl Engine {
             filter_draft_query: String::new(),
             filter_draft_regex: false,
             filter_draft_pattern: None,
-        };
-        // Boot with an interactive shell for the first terminal (skip in unit tests).
-        #[cfg(not(test))]
-        {
-            engine.start_interactive_shell();
         }
-        engine
     }
 
     pub(crate) fn has_active_terminal(&self) -> bool {
@@ -575,6 +570,21 @@ impl Engine {
 
         if let Some(mut pty) = self.ptys.remove(&id) {
             pty.stop();
+        }
+
+        let log_file = self.active_terminal().launch.log_file.clone();
+        let has_command = self.active_terminal().launch.command.is_some();
+        if let Some(path) = log_file {
+            self.active_terminal_mut().process_started = true;
+            self.start_log_file_load(&path);
+        } else if has_command {
+            self.active_terminal_mut().process_started = true;
+            self.start_launch_process();
+        } else {
+            #[cfg(not(test))]
+            {
+                self.start_interactive_shell();
+            }
         }
     }
 

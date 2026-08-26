@@ -422,3 +422,53 @@ fn selection_text_with_no_selection_returns_none() {
     assert!(engine.selection_text_for_test().is_none());
 }
 
+#[test]
+fn set_launch_starts_command_immediately() {
+    use crate::core::types::LaunchConfig;
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine.set_launch(LaunchConfig {
+        command: Some("sleep".into()),
+        args: vec!["30".into()],
+        ..LaunchConfig::default()
+    });
+    assert!(engine.process_started_for_test());
+    assert!(engine.active_terminal_running_for_test());
+    assert!(
+        engine.status_message_for_test().starts_with("Running:"),
+        "status={}",
+        engine.status_message_for_test()
+    );
+    assert_eq!(engine.terminals_for_test().len(), 1);
+    engine.tick();
+    assert!(engine.active_terminal_running_for_test());
+    assert_eq!(engine.terminals_for_test().len(), 1);
+}
+
+#[test]
+fn stale_pty_exit_does_not_replace_cli_process() {
+    use crate::core::types::LaunchConfig;
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine.set_launch(LaunchConfig {
+        command: Some("sleep".into()),
+        args: vec!["30".into()],
+        ..LaunchConfig::default()
+    });
+    let id = engine.active_terminal_id_for_test();
+    let gen = engine.pty_generation_for_test();
+    assert!(gen >= 1);
+    engine.inject_pty_exit_for_test(&id, 0, gen.wrapping_sub(1));
+    engine.tick();
+    assert!(engine.active_terminal_running_for_test());
+    assert_eq!(engine.pty_generation_for_test(), gen);
+    assert_eq!(engine.terminals_for_test().len(), 1);
+    assert!(
+        engine.status_message_for_test().starts_with("Running:"),
+        "status={}",
+        engine.status_message_for_test()
+    );
+}
+
