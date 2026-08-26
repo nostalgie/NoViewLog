@@ -143,6 +143,7 @@ impl Engine {
     pub(crate) fn selection_at(&mut self, x: f32, y: f32, extend: bool, click_count: u32) {
         let view = self.active_view();
         let metrics = self.renderer.metrics();
+        let cell_width = metrics.cell_width;
         let visual = build_visual_lines(
             &view.flat_lines,
             view.wrap_lines,
@@ -164,6 +165,21 @@ impl Engine {
             &view.flat_lines,
         );
         self.active_view_mut().auto_follow = false;
+
+        // Collapse toggle: disclosure gutter, or anywhere on a collapsed preview row.
+        if !extend && click_count == 1 {
+            if let Some(line) = self.active_view().flat_lines.get(pos.line_index) {
+                let disclosure_hit = x < (LEFT_PAD as f32 + cell_width as f32 * 1.5);
+                if line.collapsed || (line.collapsible && line.line_index == 0 && disclosure_hit) {
+                    let id = line.record_id;
+                    self.active_view_mut().toggle_record_collapse(id);
+                    self.active_terminal_mut().selection = None;
+                    self.mark_viewport_dirty();
+                    self.last_stats_at = None;
+                    return;
+                }
+            }
+        }
 
         if !extend && click_count >= 3 {
             if let Some(sel) = record_selection_at(&self.active_view().flat_lines, pos) {

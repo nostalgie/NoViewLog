@@ -27,7 +27,7 @@ use crate::spawn_resolve::{resolve_interactive_shell, resolve_process_launch};
 use crate::viewport::ViewportRenderer;
 use crate::viewport_layout::{
     build_visual_lines, content_width, max_cols, max_scroll_x, pos_at_pixel, selection_plain_text,
-    record_selection_at, word_selection_at, TextSelection,
+    record_selection_at, word_selection_at, TextSelection, LEFT_PAD,
 };
 use crate::core::visible::SearchPattern;
 use portable_pty::PtySize;

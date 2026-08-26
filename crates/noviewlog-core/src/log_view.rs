@@ -3,15 +3,17 @@
 //! `Command::Tab*` and stats field `tabs` refer to `LogView` instances.
 //! Index 0 is the Console (not filter-editable in the UI).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::core::buffer::RecordBuffer;
 use crate::core::config::tab_config_from_runtime;
 use crate::core::filter::FilterEngine;
-use crate::core::types::{FilterRule, FlatLine, SearchMatch, TabConfig};
+use crate::core::types::{FilterRule, FlatLine, SearchMatch, SeverityFilter, TabConfig};
 use crate::core::visible::{
-    append_search_matches, collect_search_matches, compile_search_pattern, rebuild_flat_lines,
-    rebuild_flat_lines_for_records, SearchPattern,
+    append_search_matches, collect_search_matches, compile_search_pattern,
+    record_ids_needing_expand_for_search, rebuild_flat_lines, rebuild_flat_lines_for_records,
+    SearchPattern,
 };
 
 pub struct LogView {
@@ -33,6 +35,10 @@ pub struct LogView {
     search_full_rescan: bool,
     pub auto_follow: bool,
     pub wrap_lines: bool,
+    /// Orthogonal to include/exclude; default All (no severity narrowing).
+    pub severity_filter: SeverityFilter,
+    /// Multiline Records in this set are expanded; others default to collapsed.
+    pub expanded_record_ids: HashSet<u64>,
     pub flat_lines: Arc<Vec<FlatLine>>,
     flat_lines_dirty: bool,
     pub(crate) flat_lines_record_cursor: usize,
@@ -58,11 +64,46 @@ impl LogView {
             search_full_rescan: true,
             auto_follow: tab.auto_follow,
             wrap_lines: tab.wrap_lines,
+            severity_filter: SeverityFilter::All,
+            expanded_record_ids: HashSet::new(),
             flat_lines: Arc::new(Vec::new()),
             flat_lines_dirty: true,
             flat_lines_record_cursor: 0,
             filter_engine: FilterEngine::new(tab.filters),
         }
+    }
+
+    pub fn set_severity_filter(&mut self, mode: SeverityFilter) {
+        if self.severity_filter != mode {
+            self.severity_filter = mode;
+            self.flat_lines_dirty = true;
+        }
+    }
+
+    pub fn toggle_record_collapse(&mut self, record_id: u64) {
+        if self.expanded_record_ids.contains(&record_id) {
+            self.expanded_record_ids.remove(&record_id);
+        } else {
+            self.expanded_record_ids.insert(record_id);
+        }
+        self.flat_lines_dirty = true;
+    }
+
+    pub fn expand_all_multiline(&mut self, records: &[crate::core::types::LogRecord]) {
+        for record in self.filter_engine.filter_records(records) {
+            if !self.severity_filter.allows(record.level) {
+                continue;
+            }
+            if record.lines.len() >= 2 {
+                self.expanded_record_ids.insert(record.id);
+            }
+        }
+        self.flat_lines_dirty = true;
+    }
+
+    pub fn collapse_all_multiline(&mut self) {
+        self.expanded_record_ids.clear();
+        self.flat_lines_dirty = true;
     }
 
     pub fn from_runtime(name: &str, filters: Vec<FilterRule>) -> Self {
@@ -189,7 +230,12 @@ impl LogView {
 
     pub fn rebuild(&mut self, buffer: &RecordBuffer) -> Option<usize> {
         if self.flat_lines_dirty {
-            self.flat_lines = Arc::new(rebuild_flat_lines(buffer, &self.filter_engine));
+            self.flat_lines = Arc::new(rebuild_flat_lines(
+                buffer,
+                &self.filter_engine,
+                self.severity_filter,
+                &self.expanded_record_ids,
+            ));
             self.flat_lines_record_cursor = buffer.records().len();
             self.flat_lines_dirty = false;
             self.search_dirty = true;
@@ -197,7 +243,12 @@ impl LogView {
             self.search_match_scan_end = 0;
         } else if self.flat_lines_record_cursor < buffer.records().len() {
             let records = &buffer.records()[self.flat_lines_record_cursor..];
-            let appended = rebuild_flat_lines_for_records(records, &self.filter_engine);
+            let appended = rebuild_flat_lines_for_records(
+                records,
+                &self.filter_engine,
+                self.severity_filter,
+                &self.expanded_record_ids,
+            );
             if !appended.is_empty() {
                 Arc::make_mut(&mut self.flat_lines).extend(appended);
                 self.search_dirty = true;
@@ -206,9 +257,64 @@ impl LogView {
         }
         if self.search_dirty {
             self.search_dirty = false;
-            return self.refresh_search();
+            return self.refresh_search_with_buffer(buffer);
         }
         None
+    }
+
+    fn refresh_search_with_buffer(&mut self, buffer: &RecordBuffer) -> Option<usize> {
+        // Auto-expand collapsed Records that match only on hidden lines.
+        if !self.search_query.is_empty() {
+            let pattern = if let Some(p) = self.search_pattern.clone() {
+                Some(p)
+            } else {
+                match compile_search_pattern(
+                    &self.search_query,
+                    self.search_regex,
+                    self.search_case_sensitive,
+                    self.search_whole_word,
+                ) {
+                    Ok(p) => {
+                        self.search_error = None;
+                        self.search_pattern = Some(p.clone());
+                        Some(p)
+                    }
+                    Err(e) => {
+                        self.search_error = Some(e);
+                        self.search_matches.clear();
+                        self.search_pattern = None;
+                        self.search_match_index = 0;
+                        self.search_match_scan_end = 0;
+                        self.search_full_rescan = true;
+                        return None;
+                    }
+                }
+            };
+            if let Some(pattern) = pattern {
+                let need = record_ids_needing_expand_for_search(
+                    buffer.records(),
+                    &self.filter_engine,
+                    self.severity_filter,
+                    &self.expanded_record_ids,
+                    &pattern,
+                );
+                if !need.is_empty() {
+                    for id in need {
+                        self.expanded_record_ids.insert(id);
+                    }
+                    self.flat_lines = Arc::new(rebuild_flat_lines(
+                        buffer,
+                        &self.filter_engine,
+                        self.severity_filter,
+                        &self.expanded_record_ids,
+                    ));
+                    self.flat_lines_record_cursor = buffer.records().len();
+                    self.search_full_rescan = true;
+                    self.search_match_scan_end = 0;
+                }
+            }
+        }
+        self.refresh_search()
     }
 
     pub fn mark_search_changed(&mut self) {

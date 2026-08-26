@@ -11,6 +11,56 @@ pub enum LogLevel {
     Debug,
 }
 
+/// Per-view severity reading mode (orthogonal to include/exclude FilterRules).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeverityFilter {
+    #[default]
+    All,
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Unleveled,
+}
+
+impl SeverityFilter {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Unleveled => "unleveled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "all" => Some(Self::All),
+            "error" | "errors" => Some(Self::Error),
+            "warn" | "warning" | "warnings" => Some(Self::Warn),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "unleveled" | "none" | "normal" => Some(Self::Unleveled),
+            _ => None,
+        }
+    }
+
+    /// Whether a Record with this detected level passes the mode.
+    pub fn allows(self, level: Option<LogLevel>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Error => level == Some(LogLevel::Error),
+            Self::Warn => level == Some(LogLevel::Warn),
+            Self::Info => level == Some(LogLevel::Info),
+            Self::Debug => level == Some(LogLevel::Debug),
+            Self::Unleveled => level.is_none(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LogRecord {
     pub id: u64,
@@ -254,6 +304,14 @@ pub struct FlatLine {
     pub line_index: usize,
     pub segments: Vec<TextSegment>,
     pub raw: String,
+    /// Detected level for Viewport severity cue; set only on the Record's first physical line.
+    pub level: Option<LogLevel>,
+    /// Record has ≥2 physical lines (show disclosure cue on the first painted row).
+    pub collapsible: bool,
+    /// This flat row is a collapsed preview (only the first physical line is shown).
+    pub collapsed: bool,
+    /// When `collapsed`, how many additional physical lines are hidden.
+    pub hidden_line_count: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -387,6 +387,10 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         }
     }
 

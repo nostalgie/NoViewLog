@@ -1,25 +1,61 @@
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::core::ansi::{overlay_styles, parse_ansi_line, strip_ansi};
 use crate::core::buffer::RecordBuffer;
 use crate::core::filter::FilterEngine;
 use crate::core::types::{
-    compile_filter, FlatLine, FilterRule, FilterType, SearchMatch, TextSegment, TextStyle,
+    compile_filter, FlatLine, FilterRule, FilterType, SearchMatch, SeverityFilter, TextSegment,
+    TextStyle,
 };
 
-pub fn rebuild_flat_lines(buffer: &RecordBuffer, filter_engine: &FilterEngine) -> Vec<FlatLine> {
-    rebuild_flat_lines_for_records(buffer.records(), filter_engine)
+pub fn rebuild_flat_lines(
+    buffer: &RecordBuffer,
+    filter_engine: &FilterEngine,
+    severity: SeverityFilter,
+    expanded_record_ids: &HashSet<u64>,
+) -> Vec<FlatLine> {
+    rebuild_flat_lines_for_records(
+        buffer.records(),
+        filter_engine,
+        severity,
+        expanded_record_ids,
+    )
 }
 
 pub fn rebuild_flat_lines_for_records(
     records: &[crate::core::types::LogRecord],
     filter_engine: &FilterEngine,
+    severity: SeverityFilter,
+    expanded_record_ids: &HashSet<u64>,
 ) -> Vec<FlatLine> {
+    // Pipeline: include/exclude → severity → collapse → flat lines.
     let visible = filter_engine.filter_records(records);
     let mut flat = Vec::new();
 
     for record in visible {
+        if !severity.allows(record.level) {
+            continue;
+        }
+        let collapsible = record.lines.len() >= 2;
+        let collapsed = collapsible && !expanded_record_ids.contains(&record.id);
+        if collapsed {
+            let colored = &record.lines[0];
+            let plain = strip_ansi(colored);
+            let segments = parse_ansi_line(colored);
+            flat.push(FlatLine {
+                record_id: record.id,
+                line_index: 0,
+                segments,
+                raw: plain,
+                level: record.level,
+                collapsible: true,
+                collapsed: true,
+                hidden_line_count: record.lines.len() - 1,
+            });
+            continue;
+        }
         for (line_index, colored) in record.lines.iter().enumerate() {
             let plain = strip_ansi(colored);
             let segments = parse_ansi_line(colored);
@@ -28,11 +64,49 @@ pub fn rebuild_flat_lines_for_records(
                 line_index,
                 segments,
                 raw: plain,
+                level: if line_index == 0 {
+                    record.level
+                } else {
+                    None
+                },
+                collapsible,
+                collapsed: false,
+                hidden_line_count: 0,
             });
         }
     }
 
     flat
+}
+
+/// Records that need expand so a search hit on a non-preview line becomes visible.
+pub fn record_ids_needing_expand_for_search(
+    records: &[crate::core::types::LogRecord],
+    filter_engine: &FilterEngine,
+    severity: SeverityFilter,
+    expanded_record_ids: &HashSet<u64>,
+    pattern: &SearchPattern,
+) -> Vec<u64> {
+    let mut need = Vec::new();
+    for record in filter_engine.filter_records(records) {
+        if !severity.allows(record.level) {
+            continue;
+        }
+        if record.lines.len() < 2 || expanded_record_ids.contains(&record.id) {
+            continue;
+        }
+        for (line_index, colored) in record.lines.iter().enumerate() {
+            if line_index == 0 {
+                continue;
+            }
+            let plain = strip_ansi(colored);
+            if pattern.find_iter(&plain).next().is_some() {
+                need.push(record.id);
+                break;
+            }
+        }
+    }
+    need
 }
 
 /// Compiled search pattern: ASCII literal scan, or regex (incl. unicode literal fallback).

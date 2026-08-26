@@ -224,6 +224,56 @@ export component TitleBarToggleChip inherits Rectangle {
     }
 }
 
+// Caption-cluster chip that opens a PopupWindow dropdown (e.g. severity filter).
+// Visual match for TitleBarToggleChip; @children hold the PopupWindow.
+export component TitleBarDropdownChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> active: false;
+    in property <bool> open: false;
+    callback clicked();
+
+    height: Theme.title-strip;
+    border-radius: 4px;
+    background: root.open || root.active
+        ? (ta.pressed ? Theme.bg-input-active : Theme.accent-soft)
+        : (ta.pressed
+            ? Theme.bg-input-active
+            : ta.has-hover ? Theme.bg-input-hover : transparent);
+
+    HorizontalLayout {
+        height: 100%;
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 4px;
+        alignment: center;
+
+        Text {
+            text: root.label;
+            color: root.open || root.active || ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+            font-size: 11px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        // Small chevron cue (▾) — muted, not an accent border.
+        Text {
+            text: "▾";
+            color: root.open || root.active || ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+            font-size: 9px;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    @children
+}
+
 // Title-bar menu opener (File / View / Tab) — not native MenuBar.
 // Armed hover-switch does NOT use has-hover: open PopupWindow (WindowKind::Popup)
 // blocks move/hover on the main window. AppWindow.menu-bar-pointer-moved (from

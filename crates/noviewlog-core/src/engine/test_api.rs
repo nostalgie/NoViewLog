@@ -258,6 +258,21 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn active_view_severity_for_test(&self) -> String {
+        self.active_view().severity_filter.as_str().to_string()
+    }
+
+    #[cfg(test)]
+    pub fn active_flat_line_count_for_test(&self) -> usize {
+        self.active_view().flat_lines.len()
+    }
+
+    #[cfg(test)]
+    pub fn rebuild_active_for_test(&mut self) {
+        self.rebuild_if_needed();
+    }
+
+    #[cfg(test)]
     pub fn push_lines_for_test(&mut self, lines: impl IntoIterator<Item = String>) {
         self.push_lines(lines, true);
         self.rebuild_if_needed();

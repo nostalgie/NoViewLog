@@ -13,6 +13,7 @@ import {
     ModeToggle,
     CaptionButton,
     TitleBarToggleChip,
+    TitleBarDropdownChip,
     TitleBarMenuButton,
     ChromeMenuItem,
     ChromeMenuSeparator,
@@ -151,6 +152,11 @@ export component AppWindow inherits Window {
     callback zoom-reset();
     callback set-wrap-lines(wrap: bool);
     callback set-follow(follow: bool);
+    // Severity reading mode → engine severity_set (`all`/`error`/`warn`/`info`/`debug`/`unleveled`).
+    callback set-severity(mode: string);
+    // Multiline Record expand/collapse → engine records_expand_all / records_collapse_all.
+    callback records-expand-all();
+    callback records-collapse-all();
     // Ctrl/Meta + wheel over the log viewport → zoom (delta-y > 0 zooms in).
     callback viewport-zoom-wheel(delta-y: float);
 
@@ -169,6 +175,8 @@ export component AppWindow inherits Window {
     // Engine default auto_follow / wrap_lines: true — init checked; stats overwrite on first flush.
     in-out property <bool> auto-follow: true;
     in-out property <bool> wrap-lines: true;
+    // Active Tab/View severity filter (`all`, `error`, `warn`, `info`, `debug`, `unleveled`).
+    in-out property <string> severity-mode: "all";
     // Max retained log lines (engine max_scrollback_lines); Settings edits a draft.
     in-out property <int> max-scrollback-lines: 10000;
     property <int> settings-draft: 10000;
@@ -183,6 +191,29 @@ export component AppWindow inherits Window {
 
     pure function is-renaming() -> bool {
         root.renaming-tab-index >= 0 || root.renaming-terminal-id != ""
+    }
+
+    pure function severity-chip-label() -> string {
+        if (root.severity-mode == "error") {
+            return "Err";
+        }
+        if (root.severity-mode == "warn") {
+            return "Warn";
+        }
+        if (root.severity-mode == "info") {
+            return "Info";
+        }
+        if (root.severity-mode == "debug") {
+            return "Dbg";
+        }
+        if (root.severity-mode == "unleveled") {
+            return "Plain";
+        }
+        return "All";
+    }
+
+    pure function severity-is(mode: string) -> bool {
+        return root.severity-mode == mode;
     }
 
     // In-panel ChromeSubmenu mutual exclusion per L1 menu (-1 = none).
@@ -343,6 +374,18 @@ export component AppWindow inherits Window {
         view-menu.close();
         tab-menu.close();
         help-menu.close();
+        severity-menu.close();
+    }
+
+    function open-severity-menu() {
+        root.file-active-submenu = -1;
+        root.view-active-submenu = -1;
+        root.tab-active-submenu = -1;
+        file-menu.close();
+        view-menu.close();
+        tab-menu.close();
+        help-menu.close();
+        severity-menu.show();
     }
 
     function start-tab-rename(index: int) {
@@ -436,6 +479,7 @@ export component AppWindow inherits Window {
         view-menu.close();
         tab-menu.close();
         help-menu.close();
+        severity-menu.close();
         root.file-active-submenu = -1;
         file-menu.show();
     }
@@ -446,6 +490,7 @@ export component AppWindow inherits Window {
         file-menu.close();
         tab-menu.close();
         help-menu.close();
+        severity-menu.close();
         root.view-active-submenu = -1;
         view-menu.show();
     }
@@ -456,6 +501,7 @@ export component AppWindow inherits Window {
         file-menu.close();
         view-menu.close();
         help-menu.close();
+        severity-menu.close();
         root.tab-active-submenu = -1;
         tab-menu.show();
     }
@@ -467,6 +513,7 @@ export component AppWindow inherits Window {
         file-menu.close();
         view-menu.close();
         tab-menu.close();
+        severity-menu.close();
         help-menu.show();
     }
 
@@ -604,9 +651,11 @@ export component AppWindow inherits Window {
                         close-policy: close-on-click-outside;
 
                         ChromeMenuPopup {
-                            // Zoom flyout: 3 items → 8+96
+                            // Zoom flyout: 3 items; Severity flyout: 6 items
                             cascade-open: root.view-active-submenu >= 0;
-                            cascade-panel-height: 8px + 32px * 3;
+                            cascade-panel-height: root.view-active-submenu == 1
+                                ? 8px + 32px * 6
+                                : 8px + 32px * 3;
                             ChromeMenuItem {
                                 title: "Follow";
                                 checkable: true;
@@ -637,6 +686,82 @@ export component AppWindow inherits Window {
                                 }
                             }
                             ChromeMenuSeparator {}
+                            ChromeMenuItem {
+                                title: "Expand all records";
+                                activated => {
+                                    root.records-expand-all();
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Collapse all records";
+                                activated => {
+                                    root.records-collapse-all();
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuSeparator {}
+                            ChromeSubmenu {
+                                title: "Severity";
+                                submenu-id: 1;
+                                item-count: 6;
+                                active-submenu-id <=> root.view-active-submenu;
+
+                                ChromeMenuItem {
+                                    title: "All";
+                                    checkable: true;
+                                    checked: root.severity-is("all");
+                                    activated => {
+                                        root.set-severity("all");
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Errors";
+                                    checkable: true;
+                                    checked: root.severity-is("error");
+                                    activated => {
+                                        root.set-severity("error");
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Warnings";
+                                    checkable: true;
+                                    checked: root.severity-is("warn");
+                                    activated => {
+                                        root.set-severity("warn");
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Info";
+                                    checkable: true;
+                                    checked: root.severity-is("info");
+                                    activated => {
+                                        root.set-severity("info");
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Debug";
+                                    checkable: true;
+                                    checked: root.severity-is("debug");
+                                    activated => {
+                                        root.set-severity("debug");
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                                ChromeMenuItem {
+                                    title: "Unleveled";
+                                    checkable: true;
+                                    checked: root.severity-is("unleveled");
+                                    activated => {
+                                        root.set-severity("unleveled");
+                                        root.close-chrome-menus();
+                                    }
+                                }
+                            }
                             ChromeSubmenu {
                                 title: "Zoom";
                                 submenu-id: 0;
@@ -804,6 +929,86 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.set-wrap-lines(!root.wrap-lines);
                         root.close-chrome-menus();
+                    }
+                }
+                // Severity filter — dropdown (not cycle-on-click). Soft tint when narrowed.
+                TitleBarDropdownChip {
+                    horizontal-stretch: 0;
+                    label: root.severity-chip-label();
+                    active: root.severity-mode != "all";
+                    open: severity-menu.is-open;
+                    clicked => {
+                        if (severity-menu.is-open) {
+                            root.close-chrome-menus();
+                        } else {
+                            root.open-severity-menu();
+                        }
+                    }
+
+                    severity-menu := PopupWindow {
+                        // Align under the chip; grow left if near caption buttons.
+                        x: min(0px, parent.width - self.width);
+                        y: parent.height + 1px;
+                        close-policy: close-on-click-outside;
+
+                        ChromeMenuPopup {
+                            cascade-open: false;
+                            cascade-panel-height: 0px;
+                            ChromeMenuItem {
+                                title: "All";
+                                checkable: true;
+                                checked: root.severity-is("all");
+                                activated => {
+                                    root.set-severity("all");
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Errors";
+                                checkable: true;
+                                checked: root.severity-is("error");
+                                activated => {
+                                    root.set-severity("error");
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Warnings";
+                                checkable: true;
+                                checked: root.severity-is("warn");
+                                activated => {
+                                    root.set-severity("warn");
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Info";
+                                checkable: true;
+                                checked: root.severity-is("info");
+                                activated => {
+                                    root.set-severity("info");
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Debug";
+                                checkable: true;
+                                checked: root.severity-is("debug");
+                                activated => {
+                                    root.set-severity("debug");
+                                    root.close-chrome-menus();
+                                }
+                            }
+                            ChromeMenuItem {
+                                title: "Unleveled";
+                                checkable: true;
+                                checked: root.severity-is("unleveled");
+                                activated => {
+                                    root.set-severity("unleveled");
+                                    root.close-chrome-menus();
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1834,7 +2039,9 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.max-scroll-y > 0.5: EngineScrollBar {
+                        // Always reserve the V-scrollbar track so the viewport width
+                        // does not jump when content first becomes scrollable.
+                        EngineScrollBar {
                             horizontal: false;
                             width: 10px;
                             vertical-stretch: 1;
@@ -1859,7 +2066,8 @@ export component AppWindow inherits Window {
                             scrolled(v) => { root.viewport-scroll-x-changed(v); }
                         }
 
-                        if root.max-scroll-y > 0.5: Rectangle {
+                        // Corner filler matching the always-on V-scrollbar width.
+                        Rectangle {
                             width: 10px;
                             background: Theme.bg-input;
                         }

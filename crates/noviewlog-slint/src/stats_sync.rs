@@ -384,6 +384,15 @@ fn apply_stats_to_view_chrome(
         ui.set_wrap_lines(wrap_lines);
     }
 
+    let severity = if stats.severity_filter.is_empty() {
+        "all"
+    } else {
+        stats.severity_filter.as_str()
+    };
+    if ui.get_severity_mode().as_str() != severity {
+        ui.set_severity_mode(SharedString::from(severity));
+    }
+
     // Slint `auto-follow` / callback `set-follow` ↔ engine `SetFollow` / stats `auto_follow`.
     let auto_follow = stats.auto_follow;
     if ui.get_auto_follow() != auto_follow {

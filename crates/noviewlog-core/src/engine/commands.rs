@@ -183,6 +183,18 @@ pub enum Command {
     SetViewportFocus {
         focused: bool,
     },
+    /// Set severity reading mode on the active Tab/View (orthogonal to include/exclude).
+    SeveritySet {
+        mode: String,
+    },
+    /// Toggle collapse for one multiline Record in the active Tab/View.
+    RecordCollapseToggle {
+        record_id: u64,
+    },
+    /// Expand all currently filtered multiline Records in the active Tab/View.
+    RecordsExpandAll,
+    /// Collapse all multiline Records in the active Tab/View.
+    RecordsCollapseAll,
 }
 
 fn default_click_count() -> u32 {
@@ -339,6 +351,32 @@ impl Engine {
             } => self.set_settings(max_scrollback_lines),
             Command::SetViewportFontSize { size } => self.set_viewport_font_size(size),
             Command::SetViewportFocus { focused } => self.set_viewport_focus(focused),
+            Command::SeveritySet { mode } => {
+                let Some(parsed) = crate::core::types::SeverityFilter::parse(&mode) else {
+                    return Err(format!("unknown severity mode: {mode}"));
+                };
+                self.active_view_mut().set_severity_filter(parsed);
+                self.last_stats_at = None;
+                self.mark_viewport_dirty();
+            }
+            Command::RecordCollapseToggle { record_id } => {
+                self.active_view_mut().toggle_record_collapse(record_id);
+                self.last_stats_at = None;
+                self.mark_viewport_dirty();
+            }
+            Command::RecordsExpandAll => {
+                let terminal = self.active_terminal_mut();
+                let view_idx = terminal.active_view;
+                let records = terminal.buffer.records().to_vec();
+                terminal.views[view_idx].expand_all_multiline(&records);
+                self.last_stats_at = None;
+                self.mark_viewport_dirty();
+            }
+            Command::RecordsCollapseAll => {
+                self.active_view_mut().collapse_all_multiline();
+                self.last_stats_at = None;
+                self.mark_viewport_dirty();
+            }
         }
         Ok(())
     }

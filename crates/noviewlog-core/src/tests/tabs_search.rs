@@ -268,12 +268,20 @@ fn search_literal_is_case_insensitive() {
             line_index: 0,
             segments: vec![],
             raw: "Error: BOOM".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         },
         FlatLine {
             record_id: 2,
             line_index: 0,
             segments: vec![],
             raw: "info: ok".to_string(),
+                    level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
         },
     ];
     let pattern = compile_search_pattern("boom", false, false, false).unwrap();
@@ -293,7 +301,11 @@ fn search_case_sensitive_excludes_mismatched_case() {
         line_index: 0,
         segments: vec![],
         raw: "Error: BOOM boom".to_string(),
-    }];
+                level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        }];
     let ci = compile_search_pattern("boom", false, false, false).unwrap();
     let cs = compile_search_pattern("boom", false, true, false).unwrap();
     assert_eq!(collect_search_matches(&lines, &ci).len(), 2);
@@ -312,7 +324,11 @@ fn search_whole_word_excludes_substrings() {
         line_index: 0,
         segments: vec![],
         raw: "err error err".to_string(),
-    }];
+                level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        }];
     let any = compile_search_pattern("err", false, false, false).unwrap();
     let whole = compile_search_pattern("err", false, false, true).unwrap();
     assert_eq!(collect_search_matches(&lines, &any).len(), 3); // err, err in error, err
@@ -349,7 +365,11 @@ fn search_regex_mode_matches_pattern() {
         line_index: 0,
         segments: vec![],
         raw: "GET /api/users 200".to_string(),
-    }];
+                level: None,
+                    collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        }];
     let pattern = compile_search_pattern(r"GET /api/\w+", true, false, false).unwrap();
     let matches = collect_search_matches(&lines, &pattern);
     assert_eq!(matches.len(), 1);
