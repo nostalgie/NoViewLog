@@ -1504,11 +1504,17 @@ export component AppWindow inherits Window {
                                             renaming: root.renaming-tab-index == tab.index;
                                             rename-text: root.rename-draft;
                                             activated => {
-                                                if (root.renaming-tab-index != tab.index) {
-                                                    root.tab-switch(tab.index);
+                                                // Other chip click does not blur rename (strip
+                                                // focus-on-click gated) — commit explicitly.
+                                                if (root.renaming-tab-index >= 0 && root.renaming-tab-index != tab.index) {
+                                                    root.dismiss-tab-rename-if-any();
                                                 }
+                                                root.tab-switch(tab.index);
                                             }
-                                            close-clicked => { root.tab-close(tab.index); }
+                                            close-clicked => {
+                                                root.dismiss-any-rename-if-any();
+                                                root.tab-close(tab.index);
+                                            }
                                             wheel(dy) => { root.scroll-tabs-by(dy); }
                                             rename-requested => {
                                                 root.tab-switch(tab.index);
