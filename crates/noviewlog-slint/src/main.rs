@@ -57,14 +57,15 @@ fn seed_opaque_viewport(ui: &AppWindow) {
 }
 
 /// Sync Slint caret overlay from engine geometry (device px → logical).
-fn sync_console_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, scale: f32) {
+/// Returns whether the overlay is shown.
+fn sync_console_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, scale: f32) -> bool {
     if !eng.console_caret_active() {
         ui.set_caret_visible(false);
-        return;
+        return false;
     }
     let Some((x, y, w, h)) = eng.console_caret_rect(width, height) else {
         ui.set_caret_visible(false);
-        return;
+        return false;
     };
     let scale = scale.max(0.5);
     ui.set_caret_x(x / scale);
@@ -72,6 +73,19 @@ fn sync_console_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, sca
     ui.set_caret_w(w / scale);
     ui.set_caret_h(h / scale);
     ui.set_caret_visible(true);
+    true
+}
+
+/// Focus Console viewport + engine flag + overlay (startup / tab switch).
+fn arm_console_caret(ui: &AppWindow, eng: &mut Engine, logical: (f32, f32)) {
+    ui.invoke_focus_viewport();
+    let _ = eng.send_command(Command::SetViewportFocus { focused: true });
+    eng.reset_caret_blink();
+    ui.set_caret_blink_on(true);
+    let scale = ui.window().scale_factor().max(0.5) as f32;
+    let width = (logical.0 * scale).ceil().max(1.0) as u32;
+    let height = (logical.1 * scale).ceil().max(1.0) as u32;
+    let _ = sync_console_caret(ui, eng, width, height, scale);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -206,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let scale = ui.window().scale_factor().max(0.5) as f32;
                     let width = (lw * scale).ceil().max(1.0) as u32;
                     let height = (lh * scale).ceil().max(1.0) as u32;
-                    sync_console_caret(&ui, &eng, width, height, scale);
+                    let _ = sync_console_caret(&ui, &eng, width, height, scale);
                 }
             } else if let Some(ui) = ui_focus.upgrade() {
                 ui.set_caret_visible(false);
@@ -698,6 +712,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let console_active = console_active.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
+        let logical_size = logical_size.clone();
+        let viewport_focused = viewport_focused.clone();
         let ui_tabs = ui.as_weak();
         ui.on_tab_switch(move |index| {
             if let Some(ui) = ui_tabs.upgrade() {
@@ -705,19 +721,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_filters_editable(index != 0);
             }
             console_active.set(index == 0);
-            let _ = engine
-                .borrow_mut()
-                .send_command(Command::TabSwitch {
-                    index: index as usize,
-                });
+            let mut eng = engine.borrow_mut();
+            let _ = eng.send_command(Command::TabSwitch {
+                index: index as usize,
+            });
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
-            if index != 0 {
-                if let Some(ui) = ui_tabs.upgrade() {
+            if let Some(ui) = ui_tabs.upgrade() {
+                if index == 0 {
+                    viewport_focused.set(true);
+                    arm_console_caret(&ui, &mut eng, *logical_size.borrow());
+                } else {
                     ui.set_caret_visible(false);
                 }
-            } else if let Some(ui) = ui_tabs.upgrade() {
-                ui.set_caret_blink_on(true);
             }
         });
     }
@@ -1431,7 +1447,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ui.set_viewport_page_h(height as f32);
 
                     // Caret overlay tracks focus/tab/running even when the Image is idle.
-                    sync_console_caret(&ui, &eng, width, height, scale);
+                    let was_visible = ui.get_caret_visible();
+                    let now_visible = sync_console_caret(&ui, &eng, width, height, scale);
+                    // Shell often becomes ready after first focus — re-arm blink when caret appears.
+                    if now_visible && !was_visible {
+                        ui.set_caret_blink_on(true);
+                    }
 
                     if !dirty {
                         drop(eng);
@@ -1449,7 +1470,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         break;
                     }
                     // Position may change with scroll/follow after paint.
-                    sync_console_caret(&ui, &eng, width, height, scale);
+                    let was_visible = ui.get_caret_visible();
+                    let now_visible = sync_console_caret(&ui, &eng, width, height, scale);
+                    if now_visible && !was_visible {
+                        ui.set_caret_blink_on(true);
+                    }
                     drop(eng);
                     ui.set_viewport_image(Image::from_rgba8(buffer));
                     if !presented_tick.get() {
@@ -1509,6 +1534,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         });
+    }
+
+    // Init / forward-focus can fire before Rust handlers exist, so engine never
+    // learns viewport_focused=true until a later click. Arm caret after the loop starts.
+    {
+        let ui_boot = ui.as_weak();
+        let engine = engine.clone();
+        let logical_size = logical_size.clone();
+        let viewport_focused = viewport_focused.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        let schedule = |delay_ms: u64| {
+            let ui_boot = ui_boot.clone();
+            let engine = engine.clone();
+            let logical_size = logical_size.clone();
+            let viewport_focused = viewport_focused.clone();
+            let force_render = force_render.clone();
+            let timer = timer.clone();
+            let timer_fast = timer_fast.clone();
+            Timer::single_shot(Duration::from_millis(delay_ms), move || {
+                let Some(ui) = ui_boot.upgrade() else {
+                    return;
+                };
+                if ui.get_active_tab_index() != 0 {
+                    return;
+                }
+                viewport_focused.set(true);
+                let mut eng = engine.borrow_mut();
+                arm_console_caret(&ui, &mut eng, *logical_size.borrow());
+                force_render.set(true);
+                bump_fast_timer(&timer, &timer_fast);
+            });
+        };
+        schedule(0);
+        // Shell prompt / live screen may appear slightly after first paint.
+        schedule(150);
     }
 
     // Keep Rc<Timer> alive for the UI lifetime (Drop stops the timer).
