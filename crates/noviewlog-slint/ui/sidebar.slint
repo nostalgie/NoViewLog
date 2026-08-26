@@ -69,8 +69,32 @@ export component TabChip inherits TouchArea {
 
     callback activated();
 
+    // Double-click: down sets press-tracking, then renaming=true before up.
+    // Swallowing all events while renaming left press-tracking stuck → ghost
+    // reorder-drag (dim-as-drag-source) after commit. Clear on enter + on up.
+    // Also clear skip-next-activated: the double-click Up is handled while
+    // renaming, so the flag must not survive and eat the next real click.
+    changed renaming => {
+        if (root.renaming) {
+            if (root.reorder-dragging) {
+                root.reorder-drag-end();
+            }
+            root.press-tracking = false;
+            root.reorder-dragging = false;
+            root.skip-next-activated = false;
+        }
+    }
+
     pointer-event(event) => {
         if (root.renaming) {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                if (root.reorder-dragging) {
+                    root.reorder-drag-end();
+                }
+                root.press-tracking = false;
+                root.reorder-dragging = false;
+                root.skip-next-activated = false;
+            }
             return;
         }
         if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.down) {
@@ -648,8 +672,29 @@ export component TerminalRow inherits TouchArea {
     // Swallow built-in clicked — select goes through activated on pointer-up.
     clicked => { }
 
+    // Same as TabChip: clear stuck press-tracking / skip-next-activated so a
+    // post-commit click activates on the first try (not the second).
+    changed renaming => {
+        if (root.renaming) {
+            if (root.reorder-dragging) {
+                root.reorder-drag-end();
+            }
+            root.press-tracking = false;
+            root.reorder-dragging = false;
+            root.skip-next-activated = false;
+        }
+    }
+
     pointer-event(event) => {
         if (root.renaming) {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                if (root.reorder-dragging) {
+                    root.reorder-drag-end();
+                }
+                root.press-tracking = false;
+                root.reorder-dragging = false;
+                root.skip-next-activated = false;
+            }
             return;
         }
         if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
