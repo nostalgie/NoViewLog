@@ -22,7 +22,7 @@ use crate::file_index::{PREFETCH_RAW_LINES, WINDOW_RAW_LINES};
 use crate::file_load::FileLoadState;
 use crate::log_view::LogView;
 use crate::terminal_state::{next_terminal_id, PendingFileWindow, TerminalState, MAX_CLOSED_TABS};
-use crate::pty::{PtyEvent, PtyManager};
+use crate::pty::{PtyActivityWake, PtyEvent, PtyManager};
 use crate::spawn_resolve::{resolve_interactive_shell, resolve_process_launch};
 use crate::viewport::ViewportRenderer;
 use crate::viewport_layout::{
@@ -36,7 +36,7 @@ use portable_pty::PtySize;
 pub const MAX_RECORDS: usize = DEFAULT_MAX_SCROLLBACK_LINES;
 const PENDING_IDLE_FLUSH: Duration = Duration::from_millis(120);
 /// Console block caret blink half-period (~classic terminal rate).
-const CARET_BLINK_PERIOD: Duration = Duration::from_millis(530);
+pub const CARET_BLINK_PERIOD: Duration = Duration::from_millis(530);
 /// Minimum PTY/emulator column width.
 ///
 /// Soft-wrap is display-only and always uses the real viewport width. The PTY
@@ -74,6 +74,8 @@ pub struct Engine {
     pub(crate) ptys: HashMap<String, PtyManager>,
     pub(crate) pty_rx: Receiver<PtyEvent>,
     pub(crate) pty_tx: Sender<PtyEvent>,
+    /// Host callback when PTY bytes/exit are posted (coalesced wake).
+    pub(crate) pty_activity_wake: Option<PtyActivityWake>,
     pub(crate) status_message: String,
     pub(crate) events: VecDeque<String>,
     pub(crate) viewport_width: u32,
@@ -138,6 +140,7 @@ impl Engine {
             ptys: HashMap::new(),
             pty_rx,
             pty_tx,
+            pty_activity_wake: None,
             status_message: String::new(),
             events: VecDeque::new(),
             viewport_width: 800,
@@ -252,7 +255,7 @@ impl Engine {
         self.emit_stats();
     }
 
-    pub(crate) fn console_caret_active(&self) -> bool {
+    pub fn console_caret_active(&self) -> bool {
         self.viewport_focused
             && self.has_active_terminal()
             && self.active_terminal().running
@@ -260,38 +263,83 @@ impl Engine {
             && self.active_terminal().ingest.viewport_caret().is_some()
     }
 
+    /// Device-pixel block caret rect `(x, y, w, h)` for the Slint overlay, or `None`
+    /// when the Console cannot accept input or the caret is off-screen.
+    pub fn console_caret_rect(&self, width: u32, height: u32) -> Option<(f32, f32, f32, f32)> {
+        if !self.console_caret_active() || width == 0 || height == 0 {
+            return None;
+        }
+        let terminal = self.active_terminal();
+        let view = terminal.active_view();
+        let flat_lines = view.flat_lines.as_ref();
+        let wrap_lines = view.wrap_lines;
+        let scroll_x = if wrap_lines {
+            0.0
+        } else {
+            terminal.scroll_x
+        };
+        let mut scroll_y = terminal.scroll_offset_y;
+        let metrics = self.renderer.metrics();
+        let visual = build_visual_lines(flat_lines, wrap_lines, width, metrics.cell_width);
+        if view.auto_follow && view.search_query.is_empty() {
+            let content_h = visual.len() as f32 * metrics.row_stride;
+            scroll_y = (content_h - height as f32).max(0.0);
+        }
+        let screen = terminal.ingest.viewport_caret()?;
+        let base = flat_lines
+            .len()
+            .saturating_sub(terminal.ingest.volatile_count());
+        let caret = crate::viewport::ViewportCaret {
+            flat_index: base.saturating_add(screen.line),
+            col: screen.col,
+        };
+        let first_row = (scroll_y / metrics.row_stride).floor() as usize;
+        let y_offset = scroll_y - first_row as f32 * metrics.row_stride;
+        let x_base = if wrap_lines {
+            LEFT_PAD as i32
+        } else {
+            LEFT_PAD as i32 - scroll_x as i32
+        };
+        let (cx, cy) = crate::viewport::caret_pixel_pos(
+            flat_lines,
+            &visual,
+            caret,
+            first_row,
+            y_offset,
+            x_base,
+            metrics.row_stride,
+            metrics.cell_width,
+            height,
+        )?;
+        let w = metrics.cell_width.max(1) as f32;
+        let h = metrics.row_height.max(1.0);
+        Some((cx as f32, cy, w, h))
+    }
+
+    /// Register a host wake when PTY bytes or exit are posted (from the reader thread).
+    pub fn set_pty_activity_wake(&mut self, wake: PtyActivityWake) {
+        self.pty_activity_wake = Some(wake);
+    }
+
     pub(crate) fn set_viewport_focus(&mut self, focused: bool) {
         if self.viewport_focused == focused {
             return;
         }
         self.viewport_focused = focused;
-        if focused {
-            self.reset_caret_blink();
-        } else {
-            self.mark_viewport_dirty();
-        }
+        // Overlay caret is host-drawn; content paint is unchanged by focus alone.
+        // Unfocus: no need to dirty the bitmap (caret overlay hides independently).
+        let _ = focused;
     }
 
+    /// Host owns blink phase; engine no longer dirties the viewport for caret blink.
     pub(crate) fn tick_caret_blink(&mut self) {
-        if !self.console_caret_active() {
-            if !self.caret_blink_on {
-                self.caret_blink_on = true;
-                self.caret_blink_at = Instant::now();
-            }
-            return;
-        }
-        if self.caret_blink_at.elapsed() < CARET_BLINK_PERIOD {
-            return;
-        }
-        self.caret_blink_on = !self.caret_blink_on;
-        self.caret_blink_at = Instant::now();
-        self.mark_viewport_dirty();
+        // retained for tick() call site stability — blink is Slint-side now
     }
 
-    pub(crate) fn reset_caret_blink(&mut self) {
+    /// Reset blink phase (host shows overlay immediately while typing / on focus).
+    pub fn reset_caret_blink(&mut self) {
         self.caret_blink_on = true;
         self.caret_blink_at = Instant::now();
-        self.mark_viewport_dirty();
     }
 
     pub fn needs_render(&self) -> bool {
@@ -435,19 +483,7 @@ impl Engine {
         }
         let effective_scroll_x = if wrap_lines { 0.0 } else { scroll_x };
 
-        let caret = if self.console_caret_active() && self.caret_blink_on {
-            let terminal = self.active_terminal();
-            terminal.ingest.viewport_caret().map(|c| {
-                let base = flat_lines.len().saturating_sub(terminal.ingest.volatile_count());
-                crate::viewport::ViewportCaret {
-                    flat_index: base.saturating_add(c.line),
-                    col: c.col,
-                }
-            })
-        } else {
-            None
-        };
-
+        // Caret is drawn by the Slint host overlay — keep the bitmap content-only.
         self.renderer.render(
             out,
             width,
@@ -460,7 +496,7 @@ impl Engine {
             search_pattern.as_ref(),
             filter_draft_pattern.as_ref(),
             active_match,
-            caret,
+            None,
         )?;
         self.viewport_dirty = false;
         Ok(())

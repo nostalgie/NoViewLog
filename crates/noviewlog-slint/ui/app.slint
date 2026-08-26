@@ -77,6 +77,14 @@ export component AppWindow inherits Window {
     in-out property <float> viewport-page-w: 1.0;
     in-out property <bool> show-hscroll: false;
 
+    // Console block caret overlay (host-drawn; blink does not repaint the log Image).
+    in-out property <bool> caret-visible: false;
+    in-out property <bool> caret-blink-on: true;
+    in-out property <float> caret-x: 0.0;
+    in-out property <float> caret-y: 0.0;
+    in-out property <float> caret-w: 0.0;
+    in-out property <float> caret-h: 0.0;
+
     // Viewport context menu (Copy / Paste) enable flags — refreshed from Rust.
     in-out property <bool> can-copy: false;
     in-out property <bool> can-paste: false;
@@ -1696,6 +1704,17 @@ export component AppWindow inherits Window {
                                 height: 100%;
                                 source: root.viewport-image;
                                 image-fit: fill;
+                            }
+
+                            // Block caret overlay — blink toggles caret-blink-on only (no Image repaint).
+                            if root.caret-visible && root.caret-blink-on: Rectangle {
+                                x: root.caret-x * 1px;
+                                y: root.caret-y * 1px;
+                                width: root.caret-w * 1px;
+                                height: root.caret-h * 1px;
+                                border-radius: 0px;
+                                border-width: 0px;
+                                background: Theme.text-primary;
                             }
 
                             // Custom popup: MenuItem.shortcut is MenuBar-only in Slint 1.17,

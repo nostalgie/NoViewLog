@@ -77,6 +77,17 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
+    pub fn ensure_live_screen_for_test(&mut self) {
+        if !self.has_active_terminal() {
+            return;
+        }
+        let terminal = self.active_terminal_mut();
+        terminal
+            .ingest
+            .ensure_live_screen(&mut terminal.buffer);
+    }
+
     /// Append lines like PTY ingest (`mark_dirty = false`) so inactive views keep
     /// their record cursors and catch up incrementally when selected.
     #[cfg(test)]
