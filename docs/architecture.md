@@ -41,6 +41,10 @@ Slint links `noviewlog-core` as an `rlib` and calls `Engine` directly:
 - `handle_key`, `set_launch`, `selection_text`
 - JSON (`send_command_json`) remains for tests and tooling
 
+First paint: the host forces an opaque winit surface (`with_transparent(false)`),
+gates the Viewport `Image` until a bitmap exists, and seeds an opaque placeholder
+so the first map never composites the desktop through an empty cell.
+
 ## Dual ANSI paths
 
 | Layer | Module | Role |

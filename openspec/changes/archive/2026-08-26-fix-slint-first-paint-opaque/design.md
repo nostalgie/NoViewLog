@@ -20,13 +20,15 @@ Engine commands and PTY geometry are unchanged. This is Slint host glue only.
 
 ## Decisions
 
-1. **Gate the `Image` on a non-empty source** in `image-cell` (`app.slint`). The cell `Rectangle` (`Theme.bg-window`) always paints. `if viewport-image.width > 0px` (and height) mounts the `Image`. Empty source never covers the cell.
+1. **Force an opaque winit surface** via `BackendSelector::with_winit_window_attributes_hook(|a| a.with_transparent(false))` before `AppWindow::new()`. Slint’s default `with_transparent(true)` is the durable root cause of the see-through first map; seed/gate alone cannot fix a translucent swapchain.
 
-2. **Seed an opaque placeholder before `ui.run()`** in `main.rs`: an 8×8 `#0d1117` `SharedPixelBuffer` (same RGB as `Theme.bg-window`) assigned via `set_viewport_image`. First Slint frame already has a real bitmap.
+2. **Gate the `Image` on a non-empty source** in `image-cell` (`app.slint`). The cell `Rectangle` (`Theme.bg-window`) always paints. `if viewport-image.width > 0px` (and height) mounts the `Image`. Empty source never covers the cell.
 
-3. **`window_should_pause_paint` takes `presented_once`.** If false, return false (do not pause). After a successful `set_viewport_image` from `Engine::render`, set the flag and call `ui.window().request_redraw()` once. Occluded cadence (`TICK_OCCLUDED`) only after that.
+3. **Seed an opaque placeholder before `ui.run()`** in `main.rs`: an 8×8 `#0d1117` `SharedPixelBuffer` (same RGB as `Theme.bg-window`) assigned via `set_viewport_image`. First Slint frame already has a real bitmap.
 
-4. **No hide-then-show.** On Wayland, creating the window maps it; delaying `show()` is not a fix.
+4. **`window_should_pause_paint` takes `presented_once`.** If false, return false (do not pause). After a successful `set_viewport_image` from `Engine::render`, set the flag and call `ui.window().request_redraw()` once. Occluded cadence (`TICK_OCCLUDED`) only after that.
+
+5. **No hide-then-show.** On Wayland, creating the window maps it; delaying `show()` is not a fix.
 
 ## Risks / Trade-offs
 
