@@ -1338,8 +1338,8 @@ export component AppWindow inherits Window {
                                         color: Theme.text-primary;
                                         horizontal-alignment: left;
                                         vertical-alignment: center;
-                                        selection-background-color: Theme.accent-soft;
-                                        selection-foreground-color: Theme.text-primary;
+                                        selection-background-color: Theme.selection-bg;
+                                        selection-foreground-color: Theme.selection-fg;
                                         single-line: true;
                                         // Disable during tab/terminal rename so this field cannot steal
                                         // focus from the rename TextInput.
@@ -1475,6 +1475,7 @@ export component AppWindow inherits Window {
                 // FocusScope.height to tabs-scroll-max() — that layoutinfo-cycles with flick width.
                 // H bar is `if` below tabs so preferred height collapses when unused.
                 // Keep focus on the rename TextInput; strip presses must not blur it.
+                // Click-away (gutter / + / restore) commits via dismiss-any-rename-if-any.
                 focus-on-click: !root.is-renaming();
                 vertical-stretch: 0;
 
@@ -1591,6 +1592,16 @@ export component AppWindow inherits Window {
                                         root.scroll-tabs-by(event.delta-y / 1px);
                                         accept
                                     }
+                                    // Strip focus-on-click is off while renaming — a gutter press
+                                    // would otherwise leave the TextInput focused and stuck.
+                                    clicked => {
+                                        root.dismiss-any-rename-if-any();
+                                    }
+                                    pointer-event(event) => {
+                                        if (event.kind == PointerEventKind.down) {
+                                            root.dismiss-any-rename-if-any();
+                                        }
+                                    }
                                     double-clicked => {
                                         root.gutter-request-tab-add();
                                     }
@@ -1611,7 +1622,10 @@ export component AppWindow inherits Window {
                                 height: 28px;
                                 horizontal-stretch: 0;
                                 mouse-cursor: pointer;
-                                clicked => { root.tab-add(); }
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    root.tab-add();
+                                }
                                 scroll-event(event) => {
                                     root.scroll-tabs-by(event.delta-y / 1px);
                                     accept
@@ -1641,7 +1655,10 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 0;
                                 mouse-cursor: pointer;
                                 enabled: root.can-restore-tab;
-                                clicked => { root.tab-restore(); }
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    root.tab-restore();
+                                }
                                 scroll-event(event) => {
                                     root.scroll-tabs-by(event.delta-y / 1px);
                                     accept
@@ -1946,8 +1963,8 @@ export component AppWindow inherits Window {
                                                         color: Theme.text-primary;
                                                         horizontal-alignment: left;
                                                         vertical-alignment: center;
-                                                        selection-background-color: Theme.accent-soft;
-                                                        selection-foreground-color: Theme.text-primary;
+                                                        selection-background-color: Theme.selection-bg;
+                                                        selection-foreground-color: Theme.selection-fg;
                                                         single-line: true;
                                                         edited => {
                                                             root.find-query = self.text;
