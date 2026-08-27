@@ -544,6 +544,14 @@ impl Engine {
                 return;
             }
         }
+        // Typing in the Terminal tab while scrolled up: Follow on and jump to
+        // the live prompt (same as a conventional terminal emulator).
+        if self.active_terminal().active_view == 0
+            && !bytes.is_empty()
+            && !self.active_view().auto_follow
+        {
+            self.scroll_to_end();
+        }
         let id = self.active_terminal().id.clone();
         let write_result = self
             .ptys

@@ -148,6 +148,47 @@ fn scroll_to_bottom_enables_follow() {
 }
 
 #[test]
+fn typing_while_scrolled_up_enables_follow_and_jumps_to_end() {
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":400,"height":120}"#)
+        .expect("resize");
+    engine.push_lines_for_test((0..80).map(|i| format!("line {i:03}")));
+    engine.mark_running_for_test();
+    engine
+        .send_command_json(r#"{"cmd":"set_follow","follow":false}"#)
+        .expect("set_follow false");
+    engine
+        .send_command_json(r#"{"cmd":"scroll_to","pos":"start"}"#)
+        .expect("scroll_to start");
+    assert!(!engine.auto_follow_for_test());
+    let max_scroll = engine.max_scroll_offset_for_test();
+    assert!(
+        max_scroll > 1.0,
+        "fixture must be tall enough to scroll, max={max_scroll}"
+    );
+    assert!(
+        engine.scroll_offset_y_for_test() < max_scroll - 1.0,
+        "must start away from the bottom"
+    );
+
+    engine.handle_key(b"x");
+
+    assert!(
+        engine.auto_follow_for_test(),
+        "typing in the Terminal tab must turn Follow on"
+    );
+    let after = engine.scroll_offset_y_for_test();
+    let max_after = engine.max_scroll_offset_for_test();
+    assert!(
+        (after - max_after).abs() < 1.0,
+        "typing must jump to the end (scroll={after}, max={max_after})"
+    );
+}
+
+#[test]
 fn viewport_font_size_clamps_and_defaults() {
     use crate::core::types::{
         clamp_viewport_font_size, DEFAULT_VIEWPORT_FONT_SIZE, MAX_VIEWPORT_FONT_SIZE,
