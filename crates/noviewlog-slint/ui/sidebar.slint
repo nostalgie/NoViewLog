@@ -17,6 +17,7 @@ export component TabChip inherits TouchArea {
     in property <int> tab-index: 0;
     in property <bool> can-reorder: true;
     in property <bool> show-drop-before: false;
+    in property <bool> show-drop-after: false;
     in property <bool> dim-as-drag-source: false;
     callback close-clicked();
     // Forward wheel so the tab strip can scroll horizontally (Flickable ignores Y-wheel).
@@ -25,9 +26,9 @@ export component TabChip inherits TouchArea {
     callback rename-edited(text: string);
     callback rename-accepted(text: string);
     callback rename-cancelled();
-    // abs-x is viewport X for drop-index math on AppWindow.
+    // local-x / local-y are the pointer in tabs-row content space (chip.x + mouse).
     callback reorder-drag-start(index: int);
-    callback reorder-drag-move(abs-x: length);
+    callback reorder-drag-move(local-x: length, local-y: length);
     callback reorder-drag-end();
 
     height: 34px;
@@ -37,7 +38,7 @@ export component TabChip inherits TouchArea {
     // TouchArea defaults to stretch:1 — keep chips at preferred so the empty
     // gutter overlay stays to the right of real chip bounds.
     horizontal-stretch: 0;
-    mouse-cursor: pointer;
+    mouse-cursor: root.reorder-dragging ? grabbing : pointer;
     opacity: root.dim-as-drag-source ? 0.45 : 1.0;
 
     property <length> ctx-menu-x: 0px;
@@ -136,7 +137,9 @@ export component TabChip inherits TouchArea {
                 root.reorder-drag-start(root.tab-index);
             }
             if (root.reorder-dragging) {
-                root.reorder-drag-move(self.absolute-position.x + self.mouse-x);
+                // Parent-layout coords, not absolute-position: Flickable+row map_to_window
+                // double-counts chip.x, so the ghost ran further right with every extra tab.
+                root.reorder-drag-move(self.x + self.mouse-x, self.y + self.mouse-y);
             }
         }
     }
@@ -164,14 +167,23 @@ export component TabChip inherits TouchArea {
         background: root.active ? Theme.bg-window : transparent;
     }
 
-    // Reorder drop cue — muted only, never Theme.accent (no bright blue on tab strip).
+    // Reorder drop cue — muted, never Theme.accent (no bright blue on tab strip).
     // Hidden when drop target == source (no-op) so a stuck drag session cannot leave a stripe.
     if root.show-drop-before: Rectangle {
         x: 0px;
-        y: 4px;
+        y: 0px;
         width: 2px;
-        height: parent.height - 8px;
-        background: Theme.border;
+        height: parent.height;
+        background: Theme.text-muted;
+        z: 10;
+    }
+
+    if root.show-drop-after: Rectangle {
+        x: parent.width - 2px;
+        y: 0px;
+        width: 2px;
+        height: parent.height;
+        background: Theme.text-muted;
         z: 10;
     }
 

@@ -109,6 +109,14 @@ export component AppWindow inherits Window {
     property <bool> tab-dragging: false;
     property <int> tab-drag-from: -1;
     property <int> tab-drop-to: -1;
+    // Visual insert-before index in the current strip (n = after last chip).
+    property <int> tab-drop-gap: -1;
+    property <bool> tab-drop-line-visible: false;
+    property <length> tab-drop-line-x: 0px;
+    property <length> tab-drop-line-y: 0px;
+    property <length> tab-drag-preview-x: 0px;
+    property <length> tab-drag-preview-y: 0px;
+    property <string> tab-drag-title: "";
 
     callback viewport-resized(width: length, height: length);
     callback viewport-focused(focused: bool);
@@ -347,17 +355,27 @@ export component AppWindow inherits Window {
         root.term-drop-to = -1;
     }
 
-    function update-tab-drop(abs-x: length) {
+    function update-tab-drop(local-x: length, local-y: length) {
+        // local-* = pointer in tabs-row content space. Window = flick origin + content + viewport.
+        root.tab-drag-preview-x = tab-flick.absolute-position.x + local-x + tab-flick.viewport-x;
+        root.tab-drag-preview-y = tab-flick.absolute-position.y + local-y + tab-flick.viewport-y;
         let n = root.tabs-model.length;
         if (n < 2 || !root.tab-dragging || root.tab-drag-from < 1) {
+            root.tab-drop-line-visible = false;
             return;
         }
-        let origin = tabs-row.absolute-position.x;
-        let x_px = (abs-x - origin) / 1px + root.tabs-scroll-x;
-        let avg_px = (tabs-row.preferred-width / 1px) / n;
-        let raw = avg_px > 0.0 ? floor(x_px / avg_px) : 1;
-        // Console stays at 0 — filter drops clamp to [1, n-1].
-        root.tab-drop-to = max(1, min(n - 1, raw));
+        let pitch = 120.0;
+        let x_px = local-x / 1px;
+        let raw_slot = floor(x_px / pitch);
+        let into = x_px - raw_slot * pitch;
+        let gap_raw = into < pitch * 0.5 ? raw_slot : raw_slot + 1;
+        let gap = max(1, min(n, gap_raw));
+        root.tab-drop-gap = gap;
+        let dest = root.tab-drag-from < gap ? gap - 1 : gap;
+        root.tab-drop-to = max(1, min(n - 1, dest));
+        root.tab-drop-line-visible = root.tab-drop-to != root.tab-drag-from;
+        root.tab-drop-line-x = tab-flick.absolute-position.x + (gap * pitch) * 1px + tab-flick.viewport-x - 1px;
+        root.tab-drop-line-y = tab-flick.absolute-position.y;
     }
 
     function finish-tab-drag() {
@@ -368,6 +386,11 @@ export component AppWindow inherits Window {
         root.tab-dragging = false;
         root.tab-drag-from = -1;
         root.tab-drop-to = -1;
+        root.tab-drop-gap = -1;
+        root.tab-drop-line-visible = false;
+        root.tab-drag-preview-x = 0px;
+        root.tab-drag-preview-y = 0px;
+        root.tab-drag-title = "";
     }
 
     init => {
@@ -559,7 +582,7 @@ export component AppWindow inherits Window {
 
     // 1px CSD outline (Theme.window-border) — keeps frameless window distinct from neighbors.
     // Hidden when maximized so the edge sits flush with the screen.
-    Rectangle {
+    csd-frame := Rectangle {
         border-width: root.maximized ? 0px : 1px;
         border-color: Theme.window-border;
         background: Theme.bg-window;
@@ -1513,9 +1536,6 @@ export component AppWindow inherits Window {
                                             can-rename: !tab.is-console;
                                             tab-index: tab.index;
                                             can-reorder: !tab.is-console;
-                                            show-drop-before: root.tab-dragging
-                                                && root.tab-drop-to == tab.index
-                                                && root.tab-drop-to != root.tab-drag-from;
                                             dim-as-drag-source: root.tab-dragging && root.tab-drag-from == tab.index;
                                             renaming: root.renaming-tab-index == tab.index;
                                             rename-text: root.rename-draft;
@@ -1549,8 +1569,12 @@ export component AppWindow inherits Window {
                                                 root.tab-dragging = true;
                                                 root.tab-drag-from = index;
                                                 root.tab-drop-to = index;
+                                                root.tab-drop-gap = index;
+                                                root.tab-drag-title = (index >= 0 && index < root.tabs-model.length)
+                                                    ? root.tabs-model[index].name
+                                                    : "";
                                             }
-                                            reorder-drag-move(abs-x) => { root.update-tab-drop(abs-x); }
+                                            reorder-drag-move(local-x, local-y) => { root.update-tab-drop(local-x, local-y); }
                                             reorder-drag-end => { root.finish-tab-drag(); }
                                         }
                                     }
@@ -2130,6 +2154,59 @@ export component AppWindow inherits Window {
             }
         }
     }
+    }
+
+    // Paint-only tab-drag ghost (no TouchArea — must not steal the reorder pointer).
+    // Sibling of the CSD VerticalLayout so tabs-strip-slot clip cannot hide it.
+    // Explicit width: default is 100% of the window, which painted a full-span bar.
+    if root.tab-dragging: Rectangle {
+        x: root.tab-drag-preview-x - csd-frame.absolute-position.x + 8px;
+        y: root.tab-drag-preview-y - csd-frame.absolute-position.y + 10px;
+        width: min(160px, max(88px, ghost-title.preferred-width + 32px));
+        height: 26px;
+        horizontal-stretch: 0;
+        vertical-stretch: 0;
+        opacity: 0.85;
+        background: Theme.bg-input;
+        border-width: 1px;
+        border-color: Theme.border;
+        border-radius: 0px;
+        z: 50;
+
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            spacing: 6px;
+            alignment: center;
+
+            ghost-title := Text {
+                text: root.tab-drag-title;
+                color: Theme.text-primary;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 0;
+            }
+
+            Text {
+                text: "×";
+                color: Theme.text-muted;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+        }
+    }
+
+    if root.tab-drop-line-visible: Rectangle {
+        x: root.tab-drop-line-x - csd-frame.absolute-position.x;
+        y: root.tab-drop-line-y - csd-frame.absolute-position.y;
+        width: 2px;
+        height: 34px;
+        horizontal-stretch: 0;
+        vertical-stretch: 0;
+        background: Theme.text-muted;
+        z: 51;
     }
     }
 
