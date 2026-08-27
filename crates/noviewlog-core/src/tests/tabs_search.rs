@@ -566,3 +566,56 @@ fn search_goto_advances_match_and_dirties_viewport() {
     assert_eq!(engine.search_counter_for_test(), format!("{n}/{n}"));
 }
 
+#[test]
+fn search_set_empty_clears_matches_so_follow_can_stick() {
+    use crate::engine::Engine;
+
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
+        .expect("resize");
+    let mut rgba = vec![0u8; 800 * 400 * 4];
+    let _ = engine.render(800, 400, &mut rgba);
+
+    engine.push_lines_for_test([
+        "hit-one unique-token".into(),
+        "nope".into(),
+        "hit-two unique-token".into(),
+        "hit-three unique-token".into(),
+        "hit-four unique-token".into(),
+    ]);
+    engine
+        .send_command_json(r#"{"cmd":"search_set","query":"unique-token","regex":false}"#)
+        .expect("search_set");
+    engine.rebuild_if_needed_for_test();
+    let n = engine.search_match_count_for_test();
+    assert!(n >= 2, "expected matches before clear, got {n}");
+    assert_eq!(
+        engine.active_tab_config_for_test().search_query,
+        "unique-token"
+    );
+
+    engine
+        .send_command_json(r#"{"cmd":"set_follow","follow":true}"#)
+        .expect("set_follow");
+    assert!(engine.auto_follow_for_test());
+
+    engine
+        .send_command_json(r#"{"cmd":"search_set","query":"","regex":false}"#)
+        .expect("search_set empty");
+    engine.rebuild_if_needed_for_test();
+    assert!(
+        engine.active_tab_config_for_test().search_query.is_empty(),
+        "closing Find must drop the engine query so highlights and Follow freeze stop"
+    );
+    assert_eq!(engine.search_match_count_for_test(), 0);
+    assert!(
+        engine.search_counter_for_test().is_empty(),
+        "empty query has no match counter"
+    );
+    assert!(
+        engine.auto_follow_for_test(),
+        "clearing search must not turn Follow off"
+    );
+}
+

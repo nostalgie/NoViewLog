@@ -620,20 +620,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // or a pending typed query can be overwritten by a stale empty search.
                     if !was_open {
                         find_resync_key.set(true);
+                        // Closing Find clears engine search; re-apply the last query
+                        // so highlights return with the bar.
+                        let query = ui.get_find_query();
+                        if !query.is_empty() {
+                            let _ = engine.borrow_mut().send_command(Command::SearchSet {
+                                query: query.to_string(),
+                                regex: ui.get_find_regex(),
+                                case_sensitive: ui.get_find_case_sensitive(),
+                                whole_word: ui.get_find_whole_word(),
+                            });
+                        }
                     }
                 }
                 force_render.set(true);
                 bump_fast_timer(&timer, &timer_fast);
                 return true;
             }
-            // Escape closes find when open (does not clear query).
+            // Escape closes find when open and clears engine search.
             if text == "\u{1b}" {
                 if let Some(ui) = ui_find_key.upgrade() {
                     if ui.get_find_open() {
-                        // Invoke commit via property path: stop debounce + flush in handler
-                        // by synthesizing the same work as find-commit (handler is separate).
-                        ui.invoke_find_commit();
                         ui.set_find_open(false);
+                        ui.invoke_find_closed();
                         force_render.set(true);
                         bump_fast_timer(&timer, &timer_fast);
                         return true;
@@ -1167,8 +1176,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        let find_debounce = find_debounce.clone();
+        let find_pending = find_pending.clone();
+        let ui_closed = ui.as_weak();
         ui.on_find_closed(move || {
-            // Close hides chrome only; engine query/flags remain for reopen.
+            // Drop in-flight typing so a late debounce cannot re-apply search.
+            find_debounce.stop();
+            find_pending.borrow_mut().take();
+            let (regex, case_sensitive, whole_word) = ui_closed
+                .upgrade()
+                .map(|ui| {
+                    (
+                        ui.get_find_regex(),
+                        ui.get_find_case_sensitive(),
+                        ui.get_find_whole_word(),
+                    )
+                })
+                .unwrap_or((false, false, false));
+            let _ = engine.borrow_mut().send_command(Command::SearchSet {
+                query: String::new(),
+                regex,
+                case_sensitive,
+                whole_word,
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
         });
     }
 

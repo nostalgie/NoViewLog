@@ -152,6 +152,7 @@ export component AppWindow inherits Window {
     callback find-goto(delta: int);
     // Flush pending search_set (focus left the Find field / toggles).
     callback find-commit();
+    // Hide Find: drop pending search_set and clear engine query (highlights + follow).
     callback find-closed();
 
     // View menu → engine commands (bitmap font zoom + wrap + follow).
@@ -1919,6 +1920,8 @@ export component AppWindow inherits Window {
                                                         text <=> root.find-query;
                                                         font-size: 12px;
                                                         color: Theme.text-primary;
+                                                        horizontal-alignment: left;
+                                                        vertical-alignment: center;
                                                         selection-background-color: Theme.accent-soft;
                                                         selection-foreground-color: Theme.text-primary;
                                                         single-line: true;
@@ -1944,7 +1947,6 @@ export component AppWindow inherits Window {
                                                         }
                                                         key-pressed(event) => {
                                                             if (event.text == "\u{1b}") {
-                                                                root.find-commit();
                                                                 root.find-open = false;
                                                                 root.find-closed();
                                                                 viewport-host.focus();
@@ -2047,7 +2049,6 @@ export component AppWindow inherits Window {
                                             height: 22px;
                                             mouse-cursor: pointer;
                                             clicked => {
-                                                root.find-commit();
                                                 root.find-open = false;
                                                 root.find-closed();
                                                 viewport-host.focus();
