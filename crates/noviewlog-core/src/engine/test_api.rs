@@ -220,6 +220,14 @@ impl Engine {
         self.active_view().auto_follow
     }
 
+    pub fn scroll_offset_y_for_test(&self) -> f32 {
+        self.active_terminal().scroll_offset_y
+    }
+
+    pub fn max_scroll_offset_for_test(&self) -> f32 {
+        self.max_scroll_offset()
+    }
+
     #[cfg(test)]
     pub fn can_restore_closed_tab_for_test(&self) -> bool {
         !self.active_terminal().closed_tabs.is_empty()
