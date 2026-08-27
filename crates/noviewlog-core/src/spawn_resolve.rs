@@ -83,7 +83,7 @@ pub fn resolve_process_launch(
     Ok((command, launch.args.clone(), launch.cwd.clone()))
 }
 
-/// Resolve an interactive shell for the Console tab (no configured Start command needed).
+/// Resolve an interactive shell for the Terminal tab (no configured Start command needed).
 ///
 /// Uses the program's cwd / WSL settings when present. On Unix: `$SHELL` (fallback
 /// `/bin/bash`). On Windows: PowerShell, or a login `bash` inside WSL when `wsl: true`.

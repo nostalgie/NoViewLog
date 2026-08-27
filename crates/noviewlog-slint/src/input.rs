@@ -36,7 +36,7 @@ pub(crate) fn copy_selection_to_clipboard(engine: &Engine) -> bool {
     clipboard.set_text(text).is_ok()
 }
 
-pub(crate) fn paste_clipboard_to_console(engine: &mut Engine) {
+pub(crate) fn paste_clipboard_to_terminal(engine: &mut Engine) {
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         return;
     };

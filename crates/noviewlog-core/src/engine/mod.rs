@@ -20,7 +20,7 @@ use crate::core::types::{
 use crate::core::types::TabConfig;
 use crate::file_index::{PREFETCH_RAW_LINES, WINDOW_RAW_LINES};
 use crate::file_load::FileLoadState;
-use crate::log_view::LogView;
+use crate::log_view::{LogView, TERMINAL_TAB_NAME};
 use crate::terminal_state::{next_terminal_id, PendingFileWindow, TerminalState, MAX_CLOSED_TABS};
 use crate::pty::{PtyActivityWake, PtyEvent, PtyManager};
 use crate::spawn_resolve::{resolve_interactive_shell, resolve_process_launch};
@@ -35,7 +35,7 @@ use portable_pty::PtySize;
 /// Default / legacy alias for the scrollback retention cap (records ≈ lines).
 pub const MAX_RECORDS: usize = DEFAULT_MAX_SCROLLBACK_LINES;
 const PENDING_IDLE_FLUSH: Duration = Duration::from_millis(120);
-/// Console block caret blink half-period (~classic terminal rate).
+/// Terminal tab block caret blink half-period (~classic terminal rate).
 pub const CARET_BLINK_PERIOD: Duration = Duration::from_millis(530);
 /// Minimum PTY/emulator column width.
 ///
@@ -85,7 +85,7 @@ pub struct Engine {
     pub(crate) viewport_dirty: bool,
     /// When true, the first tick auto-starts the active program (CLI launch only).
     pub(crate) auto_start_launch: bool,
-    /// Console block-caret blink: visible when true; toggled on [`CARET_BLINK_PERIOD`].
+    /// Terminal tab block-caret blink: visible when true; toggled on [`CARET_BLINK_PERIOD`].
     pub(crate) caret_blink_on: bool,
     pub(crate) caret_blink_at: Instant,
     /// Host viewport has keyboard focus — caret only blinks when true.
@@ -178,7 +178,7 @@ impl Engine {
         }
         self.active_terminal = self.active_terminal.min(self.terminals.len() - 1);
         let runtime = build_runtime_config(&self.config, Some(&self.preset_name));
-        self.terminals[self.active_terminal].ensure_console_view(&runtime);
+        self.terminals[self.active_terminal].ensure_terminal_tab_view(&runtime);
     }
 
     pub(crate) fn active_terminal(&self) -> &TerminalState {
@@ -255,7 +255,7 @@ impl Engine {
         self.emit_stats();
     }
 
-    pub fn console_caret_active(&self) -> bool {
+    pub fn terminal_caret_active(&self) -> bool {
         self.viewport_focused
             && self.has_active_terminal()
             && self.active_terminal().running
@@ -264,9 +264,9 @@ impl Engine {
     }
 
     /// Device-pixel block caret rect `(x, y, w, h)` for the Slint overlay, or `None`
-    /// when the Console cannot accept input or the caret is off-screen.
-    pub fn console_caret_rect(&self, width: u32, height: u32) -> Option<(f32, f32, f32, f32)> {
-        if !self.console_caret_active() || width == 0 || height == 0 {
+    /// when the Terminal tab cannot accept input or the caret is off-screen.
+    pub fn terminal_caret_rect(&self, width: u32, height: u32) -> Option<(f32, f32, f32, f32)> {
+        if !self.terminal_caret_active() || width == 0 || height == 0 {
             return None;
         }
         let terminal = self.active_terminal();
@@ -473,8 +473,8 @@ impl Engine {
         }
 
         if !running && flat_lines.is_empty() {
-            let on_console = self.active_terminal().active_view == 0;
-            let msg = if on_console {
+            let on_terminal_tab = self.active_terminal().active_view == 0;
+            let msg = if on_terminal_tab {
                 "Type to open a shell — or ▶ Start for the saved command"
             } else {
                 "Press ▶ Start to run"
@@ -531,7 +531,7 @@ impl Engine {
         if !self.has_active_terminal() {
             return;
         }
-        // Console tab: auto-start an interactive shell so typing works without ▶ Start.
+        // Terminal tab: auto-start an interactive shell so typing works without ▶ Start.
         if !self.active_terminal().running {
             if self.active_terminal().active_view != 0 {
                 return;
@@ -596,11 +596,11 @@ impl Engine {
                 view.clear_flat_lines();
             }
             if terminal.views.is_empty() {
-                terminal.views = vec![LogView::from_runtime("Console", Vec::new())];
+                terminal.views = vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())];
                 terminal.active_view = 0;
-            } else if let Some(console) = terminal.views.first_mut() {
-                if !console.filters().is_empty() {
-                    console.clear_filters();
+            } else if let Some(terminal_tab) = terminal.views.first_mut() {
+                if !terminal_tab.filters().is_empty() {
+                    terminal_tab.clear_filters();
                 }
             }
             terminal.parser = RecordParser::new(default_format);
@@ -693,7 +693,7 @@ impl Engine {
 
     pub(crate) fn close_tab(&mut self, index: usize) {
         let terminal = self.active_terminal_mut();
-        // Tab 0 is the Console — never close it.
+        // Tab 0 is the Terminal tab — never close it.
         if index == 0 || terminal.views.len() <= 1 || index >= terminal.views.len() {
             return;
         }
@@ -744,14 +744,14 @@ impl Engine {
     pub(crate) fn rename_tab(&mut self, index: usize, name: &str) {
         let name = name.trim();
         let terminal = self.active_terminal_mut();
-        // Tab 0 is Console — never rename it (UI also blocks; this is defense in depth).
+        // Tab 0 is the Terminal tab — never rename it (UI also blocks; this is defense in depth).
         if name.is_empty() || index >= terminal.views.len() || index == 0 {
             return;
         }
         terminal.views[index].name = name.to_string();
     }
 
-    /// Reorder filter tabs. Console stays at index 0 (`from`/`to` of 0 are no-ops).
+    /// Reorder filter tabs. The Terminal tab stays at index 0 (`from`/`to` of 0 are no-ops).
     pub(crate) fn tab_move(&mut self, from_index: usize, to_index: usize) {
         let terminal = self.active_terminal_mut();
         let len = terminal.views.len();
@@ -1034,9 +1034,9 @@ impl Engine {
         }
         let filters = load_preset(&self.config, name);
         self.preset_name = name.to_string();
-        let on_console = self.active_terminal().active_view == 0;
-        if on_console {
-            // Console keeps an unfiltered stream; presets do nothing on Console.
+        let on_terminal_tab = self.active_terminal().active_view == 0;
+        if on_terminal_tab {
+            // The Terminal tab keeps an unfiltered stream; presets do nothing there.
             self.active_view_mut().clear_filters();
         } else {
             self.active_view_mut().set_filters(filters);

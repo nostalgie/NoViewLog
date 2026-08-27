@@ -112,7 +112,7 @@ pub enum Command {
         index: usize,
         name: String,
     },
-    /// Reorder filter tabs on the active terminal. Console (index 0) is pinned.
+    /// Reorder filter tabs on the active terminal. The Terminal tab (index 0) is pinned.
     TabMove {
         from_index: usize,
         to_index: usize,
@@ -245,7 +245,7 @@ impl Engine {
             } => self.add_filter(filter_type, &pattern, regex),
             Command::FilterClear => {
                 if self.active_terminal().active_view == 0 {
-                    // Console tab has no filters.
+                    // The Terminal tab has no filters.
                 } else {
                     self.active_view_mut().clear_filters();
                 }
@@ -255,7 +255,7 @@ impl Engine {
             Command::FilterUpdate { id, pattern } => self.filter_update(&id, &pattern),
             Command::FilterSet { filters } => {
                 if self.active_terminal().active_view == 0 {
-                    // Console tab has no filters.
+                    // The Terminal tab has no filters.
                 } else {
                     self.active_view_mut()
                         .set_filters(filters.into_iter().map(compile_filter).collect());

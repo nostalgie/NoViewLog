@@ -21,7 +21,7 @@ fn workspace_key_uses_canonical_path() {
 }
 
 #[test]
-fn tab_move_reorders_filters_and_pins_console() {
+fn tab_move_reorders_filters_and_pins_terminal_tab() {
     use crate::engine::Engine;
 
     let mut engine = Engine::new();
@@ -39,7 +39,7 @@ fn tab_move_reorders_filters_and_pins_console() {
         .expect("rename b");
     assert_eq!(engine.active_tab_index_for_test(), 2);
 
-    // Console, A, B — move A (1) to index 2 → Console, B, A; active was B@2 → stays on B@1
+    // Terminal, A, B — move A (1) to index 2 → Terminal, B, A; active was B@2 → stays on B@1
     engine
         .send_command_json(r#"{"cmd":"tab_move","from_index":1,"to_index":2}"#)
         .expect("tab_move");
@@ -48,41 +48,41 @@ fn tab_move_reorders_filters_and_pins_console() {
         .into_iter()
         .map(|t| t.name)
         .collect();
-    assert_eq!(names, vec!["Console", "B", "A"]);
+    assert_eq!(names, vec!["Terminal", "B", "A"]);
     assert_eq!(engine.active_tab_index_for_test(), 1);
 
     engine
         .send_command_json(r#"{"cmd":"tab_move","from_index":0,"to_index":2}"#)
-        .expect("refuse console from");
+        .expect("refuse terminal tab from");
     let names: Vec<String> = engine
         .tab_configs_for_test()
         .into_iter()
         .map(|t| t.name)
         .collect();
-    assert_eq!(names, vec!["Console", "B", "A"]);
+    assert_eq!(names, vec!["Terminal", "B", "A"]);
 
     engine
         .send_command_json(r#"{"cmd":"tab_move","from_index":2,"to_index":0}"#)
-        .expect("refuse console to");
+        .expect("refuse terminal tab to");
     let names: Vec<String> = engine
         .tab_configs_for_test()
         .into_iter()
         .map(|t| t.name)
         .collect();
-    assert_eq!(names, vec!["Console", "B", "A"]);
+    assert_eq!(names, vec!["Terminal", "B", "A"]);
 }
 
 #[test]
-fn tab_rename_rejects_console_index_zero() {
+fn tab_rename_rejects_terminal_tab_index_zero() {
     use crate::engine::Engine;
 
     let mut engine = Engine::new();
     let before = engine.tab_configs_for_test()[0].name.clone();
-    assert_eq!(before, "Console");
+    assert_eq!(before, "Terminal");
 
     engine
         .send_command_json(r#"{"cmd":"tab_rename","index":0,"name":"Shell"}"#)
-        .expect("tab_rename console");
+        .expect("tab_rename terminal tab");
     assert_eq!(engine.tab_configs_for_test()[0].name, before);
 
     engine
@@ -92,7 +92,7 @@ fn tab_rename_rejects_console_index_zero() {
         .send_command_json(r#"{"cmd":"tab_rename","index":1,"name":"Errors"}"#)
         .expect("tab_rename filter");
     assert_eq!(engine.tab_configs_for_test()[1].name, "Errors");
-    assert_eq!(engine.tab_configs_for_test()[0].name, "Console");
+    assert_eq!(engine.tab_configs_for_test()[0].name, "Terminal");
 }
 
 #[test]

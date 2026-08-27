@@ -39,4 +39,4 @@ mod tabs_search;
 mod terminals_files;
 mod viewport_wrap;
 mod volatile_patch;
-mod console_caret;
+mod terminal_caret;

@@ -6,7 +6,7 @@ NoViewLog manages **terminals** — independent sessions:
 
 ```
 Terminal (shell / process / log file + cwd or file label)
- └── Tab (Console + filter tabs)
+ └── Tab (Terminal tab + filter tabs)
 ```
 
 Each terminal:
@@ -44,7 +44,7 @@ CLI launch with a log file still configures the initial terminal as a file sessi
 | `terminal_rename` | Set a **custom** sidebar title for a terminal id (trim; empty/unknown = no-op; does not clear an existing custom title) |
 | `terminal_start` | Start saved launch / log file / interactive shell on a terminal |
 | `load_file` | Open path in a dedicated file terminal (or switch + reload) |
-| `tab_move` | Reorder filter tabs on the active terminal; **Console stays at index 0** |
+| `tab_move` | Reorder filter tabs on the active terminal; **the Terminal tab stays at index 0** |
 
 ## Engine shape
 
@@ -79,6 +79,6 @@ There is **no** `projects.yaml` session store for terminals. Filter presets and 
 Slint sidebar **TERMINALS** list supports **drag-and-drop reorder** (engine
 `terminal_move`; PTYs keep running) and **double-click inline rename** (engine
 `terminal_rename`; custom title overrides the auto cwd/file label for the
-session). The tab strip supports DnD among **filter tabs**; the Console tab
+session). The tab strip supports DnD among **filter tabs**; the Terminal tab
 stays pinned at index 0 and cannot be dragged or dropped onto. File → **Open log
 file**. See `docs/architecture.md`.

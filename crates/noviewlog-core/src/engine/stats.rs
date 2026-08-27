@@ -68,7 +68,7 @@ impl Engine {
                 .map(|(i, v)| StatsTab {
                     index: i,
                     name: v.name.clone(),
-                    is_console: i == 0,
+                    is_terminal_tab: i == 0,
                 })
                 .collect();
             (
@@ -177,8 +177,8 @@ impl Engine {
             tab_name,
             active_tab,
             tab_count,
-            console_tab: 0,
-            is_console_tab: active_tab == 0,
+            terminal_tab: 0,
+            is_terminal_tab: active_tab == 0,
             tabs,
             dropped,
             formats: format_ids,

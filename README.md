@@ -14,16 +14,16 @@ work, but they are not the main development focus yet.
 
 - Launch a command through a PTY (`bash scripts/run-slint.sh -- …`) or open a log file (CLI path, `--file` / `-f`, or File → Open log file)
 - Run multiple independent terminals; switching the viewport does not stop other sessions
-- Type into a live process on the Console tab; copy and paste (including middle-click paste)
+- Type into a live process on the Terminal tab; copy and paste (including middle-click paste)
 - Open a log in a dedicated view-only file terminal (no PTY or stdin); reopening the same path switches to it and reloads
 - Sidebar: add or close terminals (the first stays), rename, and drag-reorder; the working directory updates via OSC 7
 
 ### Tabs and filters
 
-- Each terminal has a pinned Console tab (not filter-editable) plus optional filter tabs
+- Each terminal has a pinned Terminal tab (not filter-editable) plus optional filter tabs
 - Include and exclude rules (literal or regex): add, toggle, edit, and remove; the draft highlights matches while you type
 - After include/exclude, a per-tab severity mode: All, Errors, Warnings, Info, Debug, or Unleveled
-- Add, close, restore the last closed tab, rename, and drag-reorder filter tabs (Console stays at index 0)
+- Add, close, restore the last closed tab, rename, and drag-reorder filter tabs (the Terminal tab stays at index 0)
 
 ### Find and viewport
 
@@ -60,8 +60,8 @@ bash scripts/run-slint.sh -- --preset node-dev -- node server.js
 This builds and runs `noviewlog-slint`. First run may fetch local fontconfig
 deps via `scripts/setup-slint-deps.sh` into `.deps/`.
 
-Arguments after `--` are executed in a PTY. Each terminal has its own Console
-and filter tabs; switching terminals does not stop background sessions.
+Arguments after `--` are executed in a PTY. Each terminal has its own Terminal
+tab and filter tabs; switching terminals does not stop background sessions.
 See [`docs/terminals.md`](docs/terminals.md) and
 [`docs/architecture.md`](docs/architecture.md).
 

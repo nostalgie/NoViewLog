@@ -241,16 +241,16 @@ fn filter_update_keeps_id_type_regex() {
 }
 
 #[test]
-fn filter_update_console_and_empty_are_noop() {
+fn filter_update_terminal_tab_and_empty_are_noop() {
     use crate::engine::Engine;
 
     let mut engine = Engine::new();
     engine
         .send_command_json(r#"{"cmd":"filter_update","id":"missing","pattern":"foo"}"#)
-        .expect("filter_update on console");
+        .expect("filter_update on terminal tab");
     assert!(
         engine.active_tab_config_for_test().filters.is_empty(),
-        "Console tab must not accept filter_update"
+        "Terminal tab must not accept filter_update"
     );
 
     engine

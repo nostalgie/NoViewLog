@@ -6,7 +6,7 @@ Defines how each Tab/View filters Records by detected LogLevel so users can show
 
 ### Requirement: Per-view severity filter mode
 
-Each Tab/View (including Console) SHALL have a severity filter mode among: All, Errors, Warnings, Info, Debug, Unleveled. Default SHALL be All.
+Each Tab/View (including the Terminal tab) SHALL have a severity filter mode among: All, Errors, Warnings, Info, Debug, Unleveled. Default SHALL be All.
 
 #### Scenario: Default shows all levels
 

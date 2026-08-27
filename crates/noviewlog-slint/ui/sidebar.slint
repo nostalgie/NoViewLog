@@ -10,7 +10,7 @@ export component TabChip inherits TouchArea {
     in property <string> title;
     in property <bool> active;
     in property <bool> show-close;
-    // False for Console — double-click / context Rename must not start rename.
+    // False for the Terminal tab — double-click / context Rename must not start rename.
     in property <bool> can-rename: true;
     in property <bool> renaming: false;
     in property <string> rename-text: "";
@@ -861,7 +861,7 @@ export component TerminalRow inherits TouchArea {
                                 root.finish-rename-accept(self.text);
                             }
 
-                            // Real focus loss (viewport/console *click*) commits.
+                            // Real focus loss (viewport/Terminal tab *click*) commits.
                             // Mouse leave / hover over viewport must not blur.
                             changed has-focus => {
                                 if (self.has-focus) {

@@ -1,7 +1,7 @@
 use crate::engine::{Command, Engine};
 
 #[test]
-fn console_caret_rect_when_focused_running() {
+fn terminal_caret_rect_when_focused_running() {
     let mut engine = Engine::new();
     engine
         .send_command(Command::SetViewportFocus { focused: true })
@@ -9,10 +9,10 @@ fn console_caret_rect_when_focused_running() {
     engine.mark_running_for_test();
     engine.ensure_live_screen_for_test();
     engine.rebuild_if_needed_for_test();
-    let rect = engine.console_caret_rect(800, 600);
+    let rect = engine.terminal_caret_rect(800, 600);
     assert!(
         rect.is_some(),
-        "focused running console should expose a caret rect"
+        "focused running Terminal tab should expose a caret rect"
     );
     let (x, y, w, h) = rect.unwrap();
     assert!(w > 0.0 && h > 0.0, "cell size positive");
@@ -20,11 +20,11 @@ fn console_caret_rect_when_focused_running() {
 }
 
 #[test]
-fn console_caret_rect_none_when_unfocused() {
+fn terminal_caret_rect_none_when_unfocused() {
     let mut engine = Engine::new();
     engine.mark_running_for_test();
     engine.ensure_live_screen_for_test();
-    assert!(engine.console_caret_rect(800, 600).is_none());
+    assert!(engine.terminal_caret_rect(800, 600).is_none());
 }
 
 #[test]
