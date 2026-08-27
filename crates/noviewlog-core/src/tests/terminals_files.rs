@@ -47,7 +47,7 @@ fn terminal_add_switch_keeps_other_running() {
 }
 
 #[test]
-fn terminal_close_refuses_first() {
+fn terminal_close_refuses_last_live() {
     use crate::engine::Engine;
 
     let mut engine = Engine::new();
@@ -58,16 +58,18 @@ fn terminal_close_refuses_first() {
     assert_eq!(engine.terminals_for_test().len(), 2);
     let second_id = engine.active_terminal_id_for_test();
 
+    // Can close a non-last live terminal (including the first by index).
     engine
         .send_command_json(&format!(r#"{{"cmd":"terminal_close","terminal_id":"{first_id}"}}"#))
-        .expect("terminal_close first refused");
-    assert_eq!(engine.terminals_for_test().len(), 2);
+        .expect("terminal_close first");
+    assert_eq!(engine.terminals_for_test().len(), 1);
+    assert_eq!(engine.active_terminal_id_for_test(), second_id);
 
+    // Cannot close the last live terminal.
     engine
         .send_command_json(&format!(r#"{{"cmd":"terminal_close","terminal_id":"{second_id}"}}"#))
-        .expect("terminal_close second");
+        .expect("terminal_close last refused");
     assert_eq!(engine.terminals_for_test().len(), 1);
-    assert_eq!(engine.active_terminal_id_for_test(), first_id);
 }
 
 #[test]
@@ -246,8 +248,8 @@ fn load_file_on_terminal_sets_log_file() {
         .expect("load_file");
     engine.finish_file_load_for_test();
     assert!(engine.buffer_record_count_for_test() >= 2);
-    // Pristine idle terminal is reused in tests (no shell auto-start).
-    assert_eq!(engine.terminals_for_test().len(), 1);
+    // load_file always opens a dedicated file session (live terminal stays).
+    assert_eq!(engine.terminals_for_test().len(), 2);
     assert!(engine.active_is_file_session_for_test());
     let _ = std::fs::remove_file(&path);
 }
@@ -470,5 +472,106 @@ fn stale_pty_exit_does_not_replace_cli_process() {
         "status={}",
         engine.status_message_for_test()
     );
+}
+
+#[test]
+fn stats_split_terminals_and_files() {
+    use crate::engine::Engine;
+    use serde_json::Value;
+    use std::io::Write;
+    use std::thread;
+    use std::time::Duration;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-stats-split-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "hello").unwrap();
+    }
+    let mut engine = Engine::new();
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+
+    while engine.poll_event_json().is_some() {}
+    thread::sleep(Duration::from_millis(260));
+    engine.tick();
+    let mut stats = None;
+    while let Some(ev) = engine.poll_event_json() {
+        let v: Value = serde_json::from_str(&ev).unwrap();
+        if v["type"] == "stats" {
+            stats = Some(v);
+        }
+    }
+    let parsed = stats.expect("stats");
+    assert_eq!(parsed["terminals"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["files"].as_array().unwrap().len(), 1);
+    assert!(parsed["is_file_session"].as_bool().unwrap());
+    assert!(!parsed["auto_follow"].as_bool().unwrap());
+    let file_name = path.file_name().unwrap().to_string_lossy();
+    assert_eq!(parsed["tabs"][0]["name"].as_str().unwrap(), file_name.as_ref());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn file_session_ignores_set_follow() {
+    use crate::engine::Engine;
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-nofollow-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "line").unwrap();
+    }
+    let mut engine = Engine::new();
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    engine
+        .send_command_json(r#"{"cmd":"set_follow","follow":true}"#)
+        .expect("set_follow");
+    assert!(!engine.auto_follow_for_test());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn can_close_file_while_keeping_last_live() {
+    use crate::engine::Engine;
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-close-file-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "line").unwrap();
+    }
+    let mut engine = Engine::new();
+    let live_id = engine.active_terminal_id_for_test();
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    let file_id = engine.active_terminal_id_for_test();
+    assert_ne!(live_id, file_id);
+
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"terminal_close","terminal_id":"{file_id}"}}"#))
+        .expect("close file");
+    assert_eq!(engine.terminals_for_test().len(), 1);
+    assert_eq!(engine.active_terminal_id_for_test(), live_id);
+    assert!(!engine.active_is_file_session_for_test());
+    let _ = std::fs::remove_file(&path);
 }
 

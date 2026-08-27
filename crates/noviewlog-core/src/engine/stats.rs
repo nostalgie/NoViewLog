@@ -15,19 +15,27 @@ impl Engine {
 
         let format_ids: Vec<String> = self.formats.keys().cloned().collect();
         let preset_names: Vec<String> = self.config.presets.keys().cloned().collect();
-        let terminals: Vec<StatsTerminal> = self
-            .terminals
-            .iter()
-            .enumerate()
-            .map(|(i, t)| StatsTerminal {
+        let mut terminals: Vec<StatsTerminal> = Vec::new();
+        let mut files: Vec<StatsTerminal> = Vec::new();
+        for (i, t) in self.terminals.iter().enumerate() {
+            let row = StatsTerminal {
                 index: i,
                 id: t.id.clone(),
                 label: t.label(),
                 running: t.running,
                 cwd: t.cwd.clone(),
-            })
-            .collect();
+            };
+            if t.is_file_session() {
+                files.push(row);
+            } else {
+                terminals.push(row);
+            }
+        }
         let active_terminal_idx = self.active_terminal;
+        let is_file_session = self
+            .terminals
+            .get(active_terminal_idx)
+            .is_some_and(|t| t.is_file_session());
         let (
             tabs,
             terminal_id,
@@ -86,7 +94,11 @@ impl Engine {
                 terminal.scroll_x,
                 terminal.scroll_offset_y,
                 terminal.selection.is_some_and(|s| !s.is_empty()),
-                view.auto_follow,
+                if terminal.is_file_session() {
+                    false
+                } else {
+                    view.auto_follow
+                },
                 view.name.clone(),
                 view.filters().to_vec(),
                 view.search_query.clone(),
@@ -199,11 +211,15 @@ impl Engine {
             max_scroll_y,
             has_selection,
             terminals,
+            files,
             active_terminal: active_terminal_idx,
             terminal_id,
             terminal_label,
             has_launch,
             has_active_terminal: self.has_active_terminal(),
+            is_file_session,
+            terminals_section_expanded: self.config.terminals_section_expanded,
+            files_section_expanded: self.config.files_section_expanded,
             file_total_lines,
             file_index_progress,
             file_window_start,

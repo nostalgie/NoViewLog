@@ -176,6 +176,11 @@ pub enum Command {
     SetSettings {
         max_scrollback_lines: usize,
     },
+    /// Persist collapsible sidebar section expand state.
+    SetSidebarExpanded {
+        terminals: bool,
+        files: bool,
+    },
     SetViewportFontSize {
         size: f32,
     },
@@ -285,12 +290,18 @@ impl Engine {
             Command::Restart => self.restart(),
             Command::SetFormat { format_id } => self.set_format(&format_id),
             Command::SetFollow { follow } => {
-                self.active_view_mut().auto_follow = follow;
-                if follow {
-                    self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
-                    self.mark_viewport_dirty();
+                if self.active_terminal().is_file_session() {
+                    // File sessions never Follow.
+                    self.active_view_mut().auto_follow = false;
+                    self.last_stats_at = None;
+                } else {
+                    self.active_view_mut().auto_follow = follow;
+                    if follow {
+                        self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
+                        self.mark_viewport_dirty();
+                    }
+                    self.last_stats_at = None;
                 }
-                self.last_stats_at = None;
             }
             Command::LoadPreset { name } => self.preset_apply(&name),
             Command::SaveConfig => self.preset_create_from_tab(&self.preset_name.clone()),
@@ -349,6 +360,9 @@ impl Engine {
             Command::SetSettings {
                 max_scrollback_lines,
             } => self.set_settings(max_scrollback_lines),
+            Command::SetSidebarExpanded { terminals, files } => {
+                self.set_sidebar_expanded(terminals, files);
+            }
             Command::SetViewportFontSize { size } => self.set_viewport_font_size(size),
             Command::SetViewportFocus { focused } => self.set_viewport_focus(focused),
             Command::SeveritySet { mode } => {

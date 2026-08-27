@@ -3,15 +3,24 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
 use crate::file_index::{FileBackedLog, LineIndex, INDEX_BYTES_PER_TICK};
 
-/// Files above this size show the tail immediately while the full line index
-/// is built in the background.
+/// Files above this size show a small tail window immediately while the line
+/// index is built in the background.
 pub const FILE_LARGE_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Initial tail bytes read for immediate display on large files.
-pub const FILE_INITIAL_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+/// Seek near EOF by this many bytes when picking the initial window for large files.
+/// (Actual ingested lines are capped by [`FILE_INITIAL_WINDOW_LINES`].)
+pub const FILE_INITIAL_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Max lines materialized into the buffer on first open of a large file.
+/// Keeps first paint cheap even when the tail has very long lines.
+pub const FILE_INITIAL_WINDOW_LINES: usize = 800;
+
+/// Soft cap for file sliding windows (independent of live PTY scrollback setting).
+/// Long-line logs (access logs, URLs) explode memory/CPU under wrap if this is 10–30k.
+pub const FILE_VIEW_WINDOW_LINES: usize = 2_000;
 
 /// Lines ingested per engine tick while file content is loading.
-pub const FILE_LOAD_LINES_PER_TICK: usize = 800;
+pub const FILE_LOAD_LINES_PER_TICK: usize = 2_000;
 
 pub struct FileLoadState {
     pub path: String,
@@ -20,6 +29,8 @@ pub struct FileLoadState {
     content_reader: Option<BufReader<File>>,
     pub content_lines_read: u64,
     pub content_finished: bool,
+    /// Stop content ingest after this many lines (`None` = read until EOF).
+    content_line_limit: Option<usize>,
     /// Byte offset where the content reader started (for window placement).
     pub content_start_byte: u64,
     /// Background index construction.
@@ -50,6 +61,11 @@ impl FileLoadState {
             content_reader,
             content_lines_read: 0,
             content_finished: file_size == 0,
+            content_line_limit: if large {
+                Some(FILE_INITIAL_WINDOW_LINES)
+            } else {
+                None
+            },
             content_start_byte,
             index_file: Some(index_file),
             index: LineIndex::new(file_size),
@@ -64,7 +80,10 @@ impl FileLoadState {
 
         if let Some(reader) = self.content_reader.as_mut() {
             if !self.content_finished {
-                for _ in 0..FILE_LOAD_LINES_PER_TICK {
+                let limit = self.content_line_limit.unwrap_or(usize::MAX);
+                let budget = FILE_LOAD_LINES_PER_TICK
+                    .min(limit.saturating_sub(self.content_lines_read as usize));
+                for _ in 0..budget {
                     let mut line = String::new();
                     match reader.read_line(&mut line) {
                         Ok(0) => {
@@ -86,22 +105,26 @@ impl FileLoadState {
                         }
                     }
                 }
+                if self
+                    .content_line_limit
+                    .is_some_and(|lim| self.content_lines_read as usize >= lim)
+                {
+                    self.content_finished = true;
+                }
             }
         } else {
             self.content_finished = true;
         }
 
-        // Index only after content ingestion finishes so each tick does one heavy job.
-        if self.content_finished {
-            if let Some(file) = self.index_file.as_mut() {
-                if !self.index_finished {
-                    let (next, done) = self
-                        .index
-                        .scan_chunk(file, self.index_bytes_done, INDEX_BYTES_PER_TICK)?;
-                    self.index_bytes_done = next;
-                    if done {
-                        self.index_finished = true;
-                    }
+        // Index in parallel with content so large files become scrollable sooner.
+        if let Some(file) = self.index_file.as_mut() {
+            if !self.index_finished {
+                let (next, done) = self
+                    .index
+                    .scan_chunk(file, self.index_bytes_done, INDEX_BYTES_PER_TICK)?;
+                self.index_bytes_done = next;
+                if done {
+                    self.index_finished = true;
                 }
             }
         }
@@ -124,6 +147,11 @@ impl FileLoadState {
 
     pub fn is_finished(&self) -> bool {
         self.content_finished && self.index_finished
+    }
+
+    /// Content window is ready to show (index may still be running).
+    pub fn content_ready(&self) -> bool {
+        self.content_finished
     }
 }
 
@@ -195,6 +223,11 @@ mod tests {
             !first.contains("line 000000"),
             "initial view should be tail, got {first}"
         );
+        assert!(
+            state.content_lines_read as usize <= FILE_INITIAL_WINDOW_LINES,
+            "initial window must be capped, got {}",
+            state.content_lines_read
+        );
 
         while !state.index_finished {
             state.tick().unwrap();
@@ -217,5 +250,43 @@ mod tests {
         assert_eq!(state.content_start_byte, 0);
         assert!(!state.index_finished);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn big_log_home_opens_quickly_if_present() {
+        let path = std::path::Path::new("/home/dima/big.log");
+        if !path.exists() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let mut state = FileLoadState::open(path.to_str().unwrap()).unwrap();
+        assert!(state.file_size > FILE_LARGE_BYTES);
+
+        // First content window must finish fast (not the whole file).
+        while !state.content_finished {
+            state.tick().unwrap();
+        }
+        let content_ms = start.elapsed().as_millis();
+        assert!(
+            state.content_lines_read as usize <= FILE_INITIAL_WINDOW_LINES,
+            "content lines {}",
+            state.content_lines_read
+        );
+        assert!(
+            content_ms < 2_000,
+            "initial window took {content_ms}ms (want <2s)"
+        );
+
+        // Full sparse index for ~74MB should finish in a few seconds of CPU ticks.
+        let index_start = std::time::Instant::now();
+        while !state.index_finished {
+            state.tick().unwrap();
+        }
+        let index_ms = index_start.elapsed().as_millis();
+        assert!(
+            index_ms < 15_000,
+            "sparse index took {index_ms}ms (want <15s)"
+        );
+        assert!(state.index.total_lines() > 100_000);
     }
 }

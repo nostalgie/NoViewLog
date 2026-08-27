@@ -167,6 +167,8 @@ pub fn merge_config_sources(sources: &[AppConfig]) -> AppConfig {
         default_preset: "node-dev".to_string(),
         max_scrollback_lines: DEFAULT_MAX_SCROLLBACK_LINES,
         viewport_font_size: DEFAULT_VIEWPORT_FONT_SIZE,
+        terminals_section_expanded: true,
+        files_section_expanded: true,
         formats: HashMap::new(),
         presets: HashMap::new(),
         workspaces: HashMap::new(),
@@ -180,6 +182,8 @@ pub fn merge_config_sources(sources: &[AppConfig]) -> AppConfig {
         merged.default_preset = source.default_preset.clone();
         merged.max_scrollback_lines = clamp_max_scrollback_lines(source.max_scrollback_lines);
         merged.viewport_font_size = clamp_viewport_font_size(source.viewport_font_size);
+        merged.terminals_section_expanded = source.terminals_section_expanded;
+        merged.files_section_expanded = source.files_section_expanded;
         merged.formats.extend(source.formats.clone());
         merged.presets.extend(source.presets.clone());
         merged.workspaces.extend(source.workspaces.clone());

@@ -76,6 +76,89 @@ pub fn build_visual_lines(
     }
 }
 
+/// Row count for scroll height / prefetch — no `VisualLine` allocation.
+pub fn count_visual_rows(
+    lines: &[FlatLine],
+    wrap: bool,
+    viewport_width: u32,
+    cell_width: u32,
+) -> usize {
+    if !wrap {
+        return lines.len();
+    }
+    let cols = max_cols(content_width(viewport_width), cell_width).max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let cells = display_cell_count(&line.raw);
+            if cells == 0 {
+                1
+            } else {
+                cells.div_ceil(cols)
+            }
+        })
+        .sum()
+}
+
+/// Materialize only the visual rows needed to paint `[first_row, first_row + max_rows)`.
+/// Avoids allocating a full wrap layout for multi-thousand-line file windows.
+pub fn collect_visible_visual_lines(
+    lines: &[FlatLine],
+    wrap: bool,
+    viewport_width: u32,
+    cell_width: u32,
+    first_row: usize,
+    max_rows: usize,
+) -> Vec<VisualLine> {
+    if max_rows == 0 || lines.is_empty() {
+        return Vec::new();
+    }
+    if !wrap {
+        let end = (first_row + max_rows).min(lines.len());
+        if first_row >= end {
+            return Vec::new();
+        }
+        return (first_row..end)
+            .map(|flat_index| VisualLine {
+                flat_index,
+                start: 0,
+                end: lines[flat_index].raw.len(),
+            })
+            .collect();
+    }
+
+    let cols = max_cols(content_width(viewport_width), cell_width).max(1);
+    let mut out = Vec::with_capacity(max_rows.min(256));
+    let mut skipped = 0usize;
+
+    for (flat_index, line) in lines.iter().enumerate() {
+        if out.len() >= max_rows {
+            break;
+        }
+        let cells = display_cell_count(&line.raw);
+        let rows = if cells == 0 { 1 } else { cells.div_ceil(cols) };
+        let line_end = skipped + rows;
+        if line_end <= first_row {
+            skipped = line_end;
+            continue;
+        }
+        // This flat line contributes at least one visible visual row.
+        let wraps = wrap_flat_line(flat_index, &line.raw, cols);
+        for (local, visual) in wraps.into_iter().enumerate() {
+            let abs = skipped + local;
+            if abs < first_row {
+                continue;
+            }
+            if out.len() >= max_rows {
+                break;
+            }
+            out.push(visual);
+        }
+        skipped = line_end;
+    }
+    out
+}
+
 fn wrap_flat_line(flat_index: usize, raw: &str, max_cols: usize) -> Vec<VisualLine> {
     if raw.is_empty() {
         return vec![VisualLine {
@@ -409,6 +492,25 @@ mod tests {
             .map(|v| &line.raw[v.start..v.end])
             .collect();
         assert_eq!(joined, "abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn collect_visible_matches_full_wrap_slice() {
+        let line = flat_line(&"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".repeat(4));
+        let full = build_visual_lines(&[line.clone()], true, 80, 8);
+        assert!(full.len() > 4);
+        assert_eq!(
+            collect_visible_visual_lines(&[line.clone()], true, 80, 8, 0, full.len()),
+            full
+        );
+        assert_eq!(
+            collect_visible_visual_lines(&[line], true, 80, 8, 2, 3),
+            full[2..5]
+        );
+        assert_eq!(
+            count_visual_rows(&[flat_line(&"x".repeat(200))], true, 80, 8),
+            build_visual_lines(&[flat_line(&"x".repeat(200))], true, 80, 8).len()
+        );
     }
 
     #[test]

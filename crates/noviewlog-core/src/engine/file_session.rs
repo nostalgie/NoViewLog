@@ -18,20 +18,9 @@ impl Engine {
             return;
         }
 
-        // Never hijack an interactive (or otherwise used) terminal — open in a
-        // dedicated file session. Reuse only a pristine unused active terminal
-        // (common in unit tests before any shell starts).
-        let reuse_active = {
-            let t = self.active_terminal();
-            !t.running
-                && !t.process_started
-                && !t.is_file_session()
-                && t.buffer.raw_lines().is_empty()
-        };
-        if !reuse_active {
-            self.terminal_add_blank();
-        }
-
+        // Never convert a live PTY session into a file row — always open a
+        // dedicated file session (appears under FILES in the sidebar).
+        self.terminal_add_blank();
         self.configure_active_as_file_session(&path);
         self.start_log_file_load(&path);
     }
@@ -54,6 +43,8 @@ impl Engine {
             if let Some(cwd) = parent {
                 terminal.cwd = cwd;
             }
+            terminal.sync_primary_tab_identity();
+            terminal.disable_follow_all_views();
         }
         // Stop any PTY that might still be attached (should not happen on a
         // blank terminal, but keeps reopen/reload safe).
@@ -103,6 +94,7 @@ impl Engine {
             return;
         };
 
+        let was_empty = self.active_terminal().buffer.raw_lines().is_empty();
         let (lines, content_done, index_done) = match load.tick() {
             Ok(result) => result,
             Err(message) => {
@@ -113,7 +105,10 @@ impl Engine {
             }
         };
 
-        if !lines.is_empty() {
+        let first_batch = was_empty && !lines.is_empty();
+        let got_lines = !lines.is_empty();
+        if got_lines {
+            // Quiet ingest during load — paint only on first/last content batch.
             self.push_lines(lines, false);
             let terminal = self.active_terminal_mut();
             if load.content_start_byte == 0 {
@@ -124,6 +119,11 @@ impl Engine {
             terminal.buffer_line_end = terminal.buffer_line_start + load.content_lines_read;
         }
 
+        if first_batch || (content_done && got_lines) {
+            self.mark_all_views_dirty();
+            self.mark_viewport_dirty();
+        }
+
         if load.is_finished() {
             {
                 let terminal = self.active_terminal_mut();
@@ -131,7 +131,7 @@ impl Engine {
                     let shifted = terminal.buffer.add(last);
                     terminal.buffer_line_start += shifted as u64;
                 }
-                if load.content_start_byte > 0 && terminal.buffer_line_start == 0 {
+                if load.content_start_byte > 0 {
                     terminal.buffer_line_start = load.index.line_at_offset(load.content_start_byte);
                 }
                 terminal.buffer_line_end = terminal.buffer_line_start + load.content_lines_read;
@@ -166,12 +166,15 @@ impl Engine {
             let lines_read = load.content_lines_read;
             let index_pct = (load.index_progress() * 100.0) as u32;
             self.active_terminal_mut().file_load = Some(load);
+            // Throttle status churn: update only every ~5% while indexing.
             if content_done && !index_done {
+                if index_pct % 5 == 0 || index_pct >= 99 {
+                    self.status_message =
+                        format!("Indexing: {path}… ({index_pct}%, {lines_read} lines visible)");
+                }
+            } else if !content_done {
                 self.status_message =
-                    format!("Indexing: {path}… ({index_pct}%, {lines_read} lines visible)");
-            } else {
-                self.status_message =
-                    format!("Loading: {path}… ({lines_read} lines, index {index_pct}%)");
+                    format!("Loading: {path}… ({lines_read} lines)");
             }
         }
     }
@@ -192,13 +195,13 @@ impl Engine {
                 return;
             };
             let view = terminal.active_view();
-            let visual = build_visual_lines(
-                &view.flat_lines,
-                view.wrap_lines,
+            // Cached row count — never allocate a full wrap layout on every tick.
+            let rows = view.cached_visual_rows(
                 self.viewport_width,
                 metrics.cell_width,
+                count_visual_rows,
             );
-            let content_h = visual.len() as f32 * row_stride;
+            let content_h = rows as f32 * row_stride;
             let near_top = terminal.scroll_offset_y <= PREFETCH_SCROLL_PX;
             let near_bottom =
                 terminal.scroll_offset_y + self.viewport_height as f32 >= content_h - PREFETCH_SCROLL_PX;
@@ -218,14 +221,21 @@ impl Engine {
             let scroll_adjust = (window_start - new_start) as f32 * row_stride;
             self.request_file_window_at(new_start, scroll_y + scroll_adjust);
         } else if need_down {
-            let window = self.config.max_scrollback_lines.min(WINDOW_RAW_LINES) as u64;
+            let window = self.file_view_window_lines() as u64;
             let new_start = window_end.min(total_lines.saturating_sub(window));
             self.request_file_window_at(new_start, 0.0);
         }
     }
 
+    pub(crate) fn file_view_window_lines(&self) -> usize {
+        self.config
+            .max_scrollback_lines
+            .min(WINDOW_RAW_LINES)
+            .min(FILE_VIEW_WINDOW_LINES)
+    }
+
     pub(crate) fn request_file_window_at(&mut self, new_start: u64, scroll_y: f32) {
-        let window = self.config.max_scrollback_lines.min(WINDOW_RAW_LINES) as u64;
+        let window = self.file_view_window_lines() as u64;
         let end_line = {
             let terminal = self.active_terminal();
             let Some(backed) = &terminal.file_backed else {
@@ -334,6 +344,151 @@ impl Engine {
             terminal.pending_file_window = None;
         }
         self.mark_all_views_dirty();
+        self.mark_viewport_dirty();
+    }
+
+    /// Advance whole-file match scan for the active file filter tab.
+    pub(crate) fn advance_file_match_scan(&mut self) {
+        if !self.has_active_terminal() || !self.active_terminal().is_file_session() {
+            return;
+        }
+        if self.active_terminal().file_backed.is_none() {
+            return;
+        }
+
+        let needs = {
+            let view = self.active_view();
+            view.uses_match_index()
+        };
+        if !needs {
+            let view = self.active_view_mut();
+            if view.match_scan_pos.is_some() || !view.match_offsets.is_empty() {
+                view.clear_match_index();
+                view.mark_flat_lines_dirty();
+            }
+            return;
+        }
+
+        // Start scan if filters require an index but none is running/complete.
+        {
+            let view = self.active_view_mut();
+            if view.match_scan_pos.is_none()
+                && view.match_offsets.is_empty()
+                && view.is_flat_lines_dirty()
+            {
+                view.invalidate_match_index();
+            }
+        }
+
+        let Some(from) = self.active_view().match_scan_pos else {
+            return;
+        };
+
+        let file_size = self
+            .active_terminal()
+            .file_backed
+            .as_ref()
+            .map(|b| b.index.file_size())
+            .unwrap_or(0);
+
+        let (filters, severity) = {
+            let view = self.active_view();
+            (view.filters().to_vec(), view.severity_filter)
+        };
+        let filter_engine = crate::core::filter::FilterEngine::new(filters);
+
+        let result = {
+            let mut offsets = self.active_view().match_offsets.clone();
+            let terminal = self.active_terminal_mut();
+            let backed = terminal.file_backed.as_mut().unwrap();
+            let scan = crate::file_match::scan_match_chunk(
+                &mut backed.file,
+                file_size,
+                from,
+                crate::file_match::MATCH_SCAN_BYTES_PER_TICK,
+                &filter_engine,
+                severity,
+                &mut offsets,
+            );
+            (scan, offsets)
+        };
+
+        match result {
+            (Ok((next, done)), offsets) => {
+                let view = self.active_view_mut();
+                view.match_offsets = offsets;
+                if done {
+                    view.match_scan_pos = None;
+                    view.request_match_rebuild();
+                    self.status_message = format!(
+                        "Filter scan complete ({} matches)",
+                        view.match_offsets.len()
+                    );
+                    self.push_event(json!({"type":"status","message": self.status_message}));
+                    self.apply_match_window();
+                } else {
+                    view.match_scan_pos = Some(next);
+                    let pct = if file_size == 0 {
+                        100
+                    } else {
+                        ((next as f32 / file_size as f32) * 100.0) as u32
+                    };
+                    self.status_message = format!(
+                        "Scanning filters… {pct}% ({} matches)",
+                        view.match_offsets.len()
+                    );
+                }
+                self.mark_viewport_dirty();
+                self.last_stats_at = None;
+            }
+            (Err(message), _) => {
+                self.active_view_mut().match_scan_pos = None;
+                self.status_message = message.clone();
+                self.push_event(json!({"type":"status","message": message}));
+            }
+        }
+    }
+
+    /// Materialize a window of match lines into the active view's flat_lines.
+    pub(crate) fn apply_match_window(&mut self) {
+        if !self.has_active_terminal() || self.active_terminal().file_backed.is_none() {
+            return;
+        }
+        if !self.active_view().uses_match_index() {
+            return;
+        }
+        if self.active_view().match_scan_pos.is_some() {
+            return;
+        }
+
+        let metrics = self.renderer.metrics();
+        let scroll_y = self.active_terminal().scroll_offset_y;
+        let first_match = ((scroll_y / metrics.row_stride).floor() as usize)
+            .saturating_sub(crate::file_match::MATCH_WINDOW_LINES / 4);
+
+        let (lines, start) = {
+            let offsets = self.active_view().match_offsets.clone();
+            let start = first_match.min(offsets.len());
+            let terminal = self.active_terminal_mut();
+            let backed = terminal.file_backed.as_mut().unwrap();
+            let lines = match crate::file_match::read_match_window(
+                &mut backed.file,
+                &offsets,
+                start,
+                crate::file_match::MATCH_WINDOW_LINES,
+            ) {
+                Ok(lines) => lines,
+                Err(err) => {
+                    self.status_message = err;
+                    return;
+                }
+            };
+            (lines, start)
+        };
+        self.active_view_mut().match_window_start = start;
+
+        let flat = crate::core::visible::flat_lines_from_raw_lines(&lines, start as u64);
+        self.active_view_mut().set_match_flat_lines(flat);
         self.mark_viewport_dirty();
     }
 }

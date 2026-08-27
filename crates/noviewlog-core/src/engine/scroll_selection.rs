@@ -12,6 +12,9 @@ impl Engine {
             (terminal.scroll_offset_y + delta as f32 * row_stride).clamp(0.0, max_scroll);
         self.sync_follow_from_scroll();
         self.maybe_prefetch_file_window();
+        if self.active_terminal().is_file_session() && self.active_view().uses_match_index() {
+            self.apply_match_window();
+        }
         self.mark_viewport_dirty();
     }
 
@@ -26,6 +29,9 @@ impl Engine {
             (terminal.scroll_offset_y + direction.signum() as f32 * page).clamp(0.0, max_scroll);
         self.sync_follow_from_scroll();
         self.maybe_prefetch_file_window();
+        if self.active_terminal().is_file_session() && self.active_view().uses_match_index() {
+            self.apply_match_window();
+        }
         self.mark_viewport_dirty();
     }
 
@@ -42,7 +48,9 @@ impl Engine {
 
     pub(crate) fn scroll_to_end(&mut self) {
         self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
-        self.active_view_mut().auto_follow = true;
+        if !self.active_terminal().is_file_session() {
+            self.active_view_mut().auto_follow = true;
+        }
         self.last_stats_at = None;
         self.mark_viewport_dirty();
     }
@@ -65,6 +73,13 @@ impl Engine {
 
     /// Stick Follow when the viewport is at (or past) the bottom; clear it when scrolled away.
     pub(crate) fn sync_follow_from_scroll(&mut self) {
+        if self.active_terminal().is_file_session() {
+            if self.active_view().auto_follow {
+                self.active_view_mut().auto_follow = false;
+                self.last_stats_at = None;
+            }
+            return;
+        }
         let max_scroll = self.max_scroll_offset();
         let scroll_y = self.active_terminal().scroll_offset_y;
         let at_bottom = max_scroll <= 0.5 || scroll_y >= max_scroll - 1.0;
@@ -79,17 +94,25 @@ impl Engine {
     pub(crate) fn max_scroll_offset(&self) -> f32 {
         let metrics = self.renderer.metrics();
         let view = self.active_view();
-        let visual = build_visual_lines(
-            &view.flat_lines,
-            view.wrap_lines,
+        let rows = view.cached_visual_rows(
             self.viewport_width,
             metrics.cell_width,
+            count_visual_rows,
         );
-        let mut content_h = visual.len() as f32 * metrics.row_stride;
+        let mut content_h = rows as f32 * metrics.row_stride;
 
         if self.has_active_terminal() {
             let terminal = self.active_terminal();
-            if let Some(backed) = &terminal.file_backed {
+            let view = terminal.active_view();
+            if terminal.is_file_session()
+                && view.uses_match_index()
+                && view.match_scan_pos.is_none()
+            {
+                let total = view.match_offsets.len();
+                let after = total.saturating_sub(view.match_window_start + view.flat_lines.len());
+                let before = view.match_window_start;
+                content_h += (before + after) as f32 * metrics.row_stride;
+            } else if let Some(backed) = &terminal.file_backed {
                 let lines_after = backed
                     .index
                     .total_lines()
@@ -115,7 +138,9 @@ impl Engine {
     }
 
     pub(crate) fn set_wrap_lines(&mut self, wrap: bool) {
-        self.active_view_mut().wrap_lines = wrap;
+        let view = self.active_view_mut();
+        view.wrap_lines = wrap;
+        view.invalidate_visual_rows_cache();
         self.active_terminal_mut().scroll_x = 0.0;
         self.mark_viewport_dirty();
         self.last_stats_at = None;

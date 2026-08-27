@@ -79,6 +79,26 @@ pub fn rebuild_flat_lines_for_records(
     flat
 }
 
+/// Build flat lines from already-matched plain/ANSI lines (match-index path).
+pub fn flat_lines_from_raw_lines(lines: &[String], id_base: u64) -> Vec<FlatLine> {
+    let mut flat = Vec::with_capacity(lines.len());
+    for (i, colored) in lines.iter().enumerate() {
+        let plain = strip_ansi(colored);
+        let segments = parse_ansi_line(colored);
+        flat.push(FlatLine {
+            record_id: id_base.saturating_add(i as u64),
+            line_index: 0,
+            segments,
+            raw: plain,
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        });
+    }
+    flat
+}
+
 /// Records that need expand so a search hit on a non-preview line becomes visible.
 pub fn record_ids_needing_expand_for_search(
     records: &[crate::core::types::LogRecord],

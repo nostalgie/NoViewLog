@@ -246,6 +246,12 @@ pub struct AppConfig {
     /// Bitmap viewport fontdue size in points (not UI chrome scale).
     #[serde(default = "default_viewport_font_size")]
     pub viewport_font_size: f32,
+    /// Sidebar TERMINALS section expanded.
+    #[serde(default = "default_true")]
+    pub terminals_section_expanded: bool,
+    /// Sidebar FILES section expanded.
+    #[serde(default = "default_true")]
+    pub files_section_expanded: bool,
     #[serde(default)]
     pub formats: std::collections::HashMap<String, FormatPreset>,
     #[serde(default)]

@@ -97,6 +97,9 @@ pub struct StatsSnapshot {
     pub has_selection: bool,
     #[serde(default)]
     pub terminals: Vec<StatsTerminal>,
+    /// Open log-file sessions (excludes live PTY terminals).
+    #[serde(default)]
+    pub files: Vec<StatsTerminal>,
     #[serde(default)]
     pub active_terminal: usize,
     #[serde(default)]
@@ -107,6 +110,13 @@ pub struct StatsSnapshot {
     pub has_launch: bool,
     #[serde(default)]
     pub has_active_terminal: bool,
+    /// True when the active session is a read-only log file (not a live PTY).
+    #[serde(default)]
+    pub is_file_session: bool,
+    #[serde(default = "default_true")]
+    pub terminals_section_expanded: bool,
+    #[serde(default = "default_true")]
+    pub files_section_expanded: bool,
     #[serde(default)]
     pub file_total_lines: u64,
     #[serde(default)]
@@ -224,11 +234,15 @@ mod tests {
         "terminals": [
             {"index": 0, "id": "t0", "label": ".", "running": true, "cwd": "/tmp"}
         ],
+        "files": [],
         "active_terminal": 0,
         "terminal_id": "t0",
         "terminal_label": ".",
         "has_launch": false,
         "has_active_terminal": true,
+        "is_file_session": false,
+        "terminals_section_expanded": true,
+        "files_section_expanded": true,
         "file_total_lines": 0,
         "file_index_progress": 0.0,
         "file_window_start": 0,

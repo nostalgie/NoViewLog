@@ -63,3 +63,21 @@ pub(crate) fn find_terminal_index(model: &VecModel<TerminalInfo>, id: &str) -> O
     }
     None
 }
+
+/// Engine global session index (`TerminalInfo.index`) across TERMINALS + FILES models.
+pub(crate) fn find_session_global_index(
+    terminals: &VecModel<TerminalInfo>,
+    files: &VecModel<TerminalInfo>,
+    id: &str,
+) -> Option<i32> {
+    for model in [terminals, files] {
+        for i in 0..model.row_count() {
+            if let Some(t) = model.row_data(i) {
+                if t.id.as_str() == id {
+                    return Some(t.index);
+                }
+            }
+        }
+    }
+    None
+}
