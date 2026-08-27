@@ -27,6 +27,7 @@ pub mod color_emoji;
 pub mod core;
 pub mod file_index;
 pub mod file_load;
+pub mod file_match;
 pub mod engine;
 pub mod log_view;
 pub mod terminal_state;

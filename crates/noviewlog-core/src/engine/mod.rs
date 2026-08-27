@@ -19,15 +19,15 @@ use crate::core::types::{
 #[cfg(test)]
 use crate::core::types::TabConfig;
 use crate::file_index::{PREFETCH_RAW_LINES, WINDOW_RAW_LINES};
-use crate::file_load::FileLoadState;
-use crate::log_view::{LogView, TERMINAL_TAB_NAME};
+use crate::file_load::{FileLoadState, FILE_VIEW_WINDOW_LINES};
+use crate::log_view::LogView;
 use crate::terminal_state::{next_terminal_id, PendingFileWindow, TerminalState, MAX_CLOSED_TABS};
 use crate::pty::{PtyActivityWake, PtyEvent, PtyManager};
 use crate::spawn_resolve::{resolve_interactive_shell, resolve_process_launch};
 use crate::viewport::ViewportRenderer;
 use crate::viewport_layout::{
-    build_visual_lines, content_width, max_cols, max_scroll_x, pos_at_pixel, selection_plain_text,
-    record_selection_at, word_selection_at, TextSelection, LEFT_PAD,
+    build_visual_lines, content_width, count_visual_rows, max_cols, max_scroll_x, pos_at_pixel,
+    selection_plain_text, record_selection_at, word_selection_at, TextSelection, LEFT_PAD,
 };
 use crate::core::visible::SearchPattern;
 use portable_pty::PtySize;
@@ -247,6 +247,7 @@ impl Engine {
         self.poll_pty();
         self.advance_file_load();
         self.advance_pending_file_window();
+        self.advance_file_match_scan();
         self.maybe_prefetch_file_window();
         if self.rebuild_if_needed() {
             self.mark_viewport_dirty();
@@ -280,9 +281,9 @@ impl Engine {
         };
         let mut scroll_y = terminal.scroll_offset_y;
         let metrics = self.renderer.metrics();
-        let visual = build_visual_lines(flat_lines, wrap_lines, width, metrics.cell_width);
-        if view.auto_follow && view.search_query.is_empty() {
-            let content_h = visual.len() as f32 * metrics.row_stride;
+        let rows = view.cached_visual_rows(width, metrics.cell_width, count_visual_rows);
+        if view.auto_follow && view.search_query.is_empty() && !terminal.is_file_session() {
+            let content_h = rows as f32 * metrics.row_stride;
             scroll_y = (content_h - height as f32).max(0.0);
         }
         let screen = terminal.ingest.viewport_caret()?;
@@ -300,11 +301,20 @@ impl Engine {
         } else {
             LEFT_PAD as i32 - scroll_x as i32
         };
+        let max_rows = (height as f32 / metrics.row_stride).ceil() as usize + 1;
+        let visual = crate::viewport_layout::collect_visible_visual_lines(
+            flat_lines,
+            wrap_lines,
+            width,
+            metrics.cell_width,
+            first_row,
+            max_rows,
+        );
         let (cx, cy) = crate::viewport::caret_pixel_pos(
             flat_lines,
             &visual,
             caret,
-            first_row,
+            0,
             y_offset,
             x_base,
             metrics.row_stride,
@@ -441,7 +451,10 @@ impl Engine {
             (
                 // Find chrome owns search: a live query pins the viewport on matches
                 // (no Follow). Closing Find must SearchSet empty or this stays frozen.
-                view.auto_follow && view.search_query.is_empty(),
+                // File sessions never Follow.
+                !terminal.is_file_session()
+                    && view.auto_follow
+                    && view.search_query.is_empty(),
                 view.wrap_lines,
                 Arc::clone(&view.flat_lines),
                 view.search_pattern.clone(),
@@ -457,13 +470,12 @@ impl Engine {
         let mut scroll_offset_y = scroll_offset_y;
         if auto_follow {
             let metrics = self.renderer.metrics();
-            let visual = build_visual_lines(
-                &flat_lines,
-                wrap_lines,
+            let rows = self.active_view().cached_visual_rows(
                 width,
                 metrics.cell_width,
+                count_visual_rows,
             );
-            let content_h = visual.len() as f32 * metrics.row_stride;
+            let content_h = rows as f32 * metrics.row_stride;
             let new_scroll = (content_h - height as f32).max(0.0);
             if (new_scroll - scroll_offset_y).abs() > 0.01 {
                 self.mark_viewport_dirty();
@@ -604,12 +616,13 @@ impl Engine {
                 view.clear_flat_lines();
             }
             if terminal.views.is_empty() {
-                terminal.views = vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())];
+                let name = terminal.primary_tab_name();
+                terminal.views = vec![LogView::from_runtime(&name, Vec::new())];
                 terminal.active_view = 0;
-            } else if let Some(terminal_tab) = terminal.views.first_mut() {
-                if !terminal_tab.filters().is_empty() {
-                    terminal_tab.clear_filters();
-                }
+            }
+            terminal.sync_primary_tab_identity();
+            if terminal.is_file_session() {
+                terminal.disable_follow_all_views();
             }
             terminal.parser = RecordParser::new(default_format);
         }
@@ -621,6 +634,7 @@ impl Engine {
         let log_file = self.active_terminal().launch.log_file.clone();
         let has_command = self.active_terminal().launch.command.is_some();
         if let Some(path) = log_file {
+            self.configure_active_as_file_session(&path);
             self.active_terminal_mut().process_started = true;
             self.start_log_file_load(&path);
         } else if has_command {
@@ -659,6 +673,26 @@ impl Engine {
         if !self.has_active_terminal() {
             return false;
         }
+
+        // File filter tabs with a match index rebuild via apply_match_window.
+        if self.active_terminal().is_file_session() && self.active_view().uses_match_index() {
+            if self.active_view().match_scan_pos.is_some() {
+                return false;
+            }
+            if self.active_view().is_flat_lines_dirty() {
+                self.apply_match_window();
+            }
+            let terminal = self.active_terminal_mut();
+            let view = terminal.active_view_mut();
+            let search_was_dirty = view.is_search_dirty();
+            let scroll_row = view.refresh_search_if_dirty();
+            if let Some(row) = scroll_row {
+                // Search hit is within the match window's flat_lines.
+                terminal.scroll_to_row = Some(row);
+            }
+            return search_was_dirty || scroll_row.is_some();
+        }
+
         let terminal = self.active_terminal_mut();
         let active = terminal.active_view;
         let Some(view) = terminal.views.get_mut(active) else {
@@ -687,9 +721,14 @@ impl Engine {
     pub(crate) fn add_tab(&mut self) {
         let tab_count = self.active_terminal().views.len();
         let name = format!("Tab {}", tab_count + 1);
+        let is_file = self.active_terminal().is_file_session();
         let terminal = self.active_terminal_mut();
         // Filter tabs start empty (full stream); user adds include/exclude rules.
-        terminal.views.push(LogView::from_runtime(&name, Vec::new()));
+        let mut view = LogView::from_runtime(&name, Vec::new());
+        if is_file {
+            view.auto_follow = false;
+        }
+        terminal.views.push(view);
         terminal.active_view = terminal.views.len() - 1;
         terminal.scroll_offset_y = 0.0;
         terminal.scroll_x = 0.0;
@@ -879,7 +918,9 @@ impl Engine {
         if mark_dirty || shifted {
             self.mark_all_views_dirty();
         }
-        if !shifted {
+        // Only paint when callers ask (`mark_dirty`) or the window shifted.
+        // File load uses mark_dirty=false and paints explicitly at first/last batch.
+        if mark_dirty || shifted {
             self.mark_viewport_dirty();
         }
     }
@@ -1109,6 +1150,16 @@ impl Engine {
         }
         self.push_event(json!({"type":"status","message": self.status_message}));
         self.mark_viewport_dirty();
+    }
+
+    pub(crate) fn set_sidebar_expanded(&mut self, terminals: bool, files: bool) {
+        self.config.terminals_section_expanded = terminals;
+        self.config.files_section_expanded = files;
+        if let Err(err) = save_user_config(&self.config) {
+            self.status_message = format!("Sidebar state save failed: {err}");
+            self.push_event(json!({"type":"status","message": self.status_message}));
+        }
+        self.last_stats_at = None;
     }
 
     pub(crate) fn set_viewport_font_size(&mut self, size: f32) {

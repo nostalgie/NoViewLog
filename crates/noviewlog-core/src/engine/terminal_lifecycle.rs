@@ -429,7 +429,7 @@ impl Engine {
     }
 
     pub(crate) fn terminal_close(&mut self, terminal_id: Option<&str>) {
-        if self.terminals.len() <= 1 {
+        if self.terminals.is_empty() {
             return;
         }
         let idx = match terminal_id {
@@ -439,10 +439,34 @@ impl Engine {
         let Some(idx) = idx else {
             return;
         };
-        // Refuse closing the first terminal.
-        if idx == 0 {
+        let is_file = self.terminals[idx].is_file_session();
+        let live_count = self
+            .terminals
+            .iter()
+            .filter(|t| !t.is_file_session())
+            .count();
+
+        // Never close the last live terminal (FILES may be empty).
+        if !is_file && live_count <= 1 {
             return;
         }
+
+        // Never leave the engine with zero sessions.
+        if self.terminals.len() <= 1 {
+            if is_file {
+                // Last session is a file: replace with a blank live terminal.
+                let id = self.terminals[idx].id.clone();
+                if let Some(mut pty) = self.ptys.remove(&id) {
+                    pty.stop();
+                }
+                self.terminals.remove(idx);
+                self.ensure_valid_state();
+                self.mark_viewport_dirty();
+                self.last_stats_at = None;
+            }
+            return;
+        }
+
         let id = self.terminals[idx].id.clone();
         if let Some(mut pty) = self.ptys.remove(&id) {
             pty.stop();

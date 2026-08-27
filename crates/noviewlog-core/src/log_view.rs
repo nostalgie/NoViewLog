@@ -3,6 +3,7 @@
 //! `Command::Tab*` and stats field `tabs` refer to `LogView` instances.
 //! Index 0 is the Terminal tab (not filter-editable in the UI).
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -44,7 +45,15 @@ pub struct LogView {
     pub flat_lines: Arc<Vec<FlatLine>>,
     flat_lines_dirty: bool,
     pub(crate) flat_lines_record_cursor: usize,
+    /// Cached `count_visual_rows` key: (viewport_width, cell_width, wrap, row_count).
+    visual_rows_cache: Cell<Option<(u32, u32, bool, usize)>>,
     filter_engine: FilterEngine,
+    /// Whole-file match byte offsets for file-session filter tabs (`None` scan = idle).
+    pub match_offsets: Vec<u64>,
+    /// Next file byte to scan; `None` means scan complete or not required.
+    pub match_scan_pos: Option<u64>,
+    /// First match ordinal currently materialized in `flat_lines`.
+    pub match_window_start: usize,
 }
 
 impl LogView {
@@ -71,7 +80,11 @@ impl LogView {
             flat_lines: Arc::new(Vec::new()),
             flat_lines_dirty: true,
             flat_lines_record_cursor: 0,
+            visual_rows_cache: Cell::new(None),
             filter_engine: FilterEngine::new(tab.filters),
+            match_offsets: Vec::new(),
+            match_scan_pos: None,
+            match_window_start: 0,
         }
     }
 
@@ -79,6 +92,7 @@ impl LogView {
         if self.severity_filter != mode {
             self.severity_filter = mode;
             self.flat_lines_dirty = true;
+            self.invalidate_match_index();
         }
     }
 
@@ -118,16 +132,35 @@ impl LogView {
 
     pub fn filters_mut(&mut self) -> &mut Vec<FilterRule> {
         self.flat_lines_dirty = true;
+        self.invalidate_match_index();
         self.filter_engine.filters_mut()
     }
 
     pub fn set_filters(&mut self, filters: Vec<FilterRule>) {
         self.filter_engine.set_filters(filters);
         self.flat_lines_dirty = true;
+        self.invalidate_match_index();
     }
 
     pub fn clear_filters(&mut self) {
         self.set_filters(Vec::new());
+    }
+
+    /// Restart whole-file match scan (file filter tabs).
+    pub fn invalidate_match_index(&mut self) {
+        self.match_offsets.clear();
+        self.match_scan_pos = Some(0);
+        self.match_window_start = 0;
+    }
+
+    pub fn clear_match_index(&mut self) {
+        self.match_offsets.clear();
+        self.match_scan_pos = None;
+        self.match_window_start = 0;
+    }
+
+    pub fn uses_match_index(&self) -> bool {
+        crate::file_match::view_needs_match_index(&self.filter_engine, self.severity_filter)
     }
 
     pub fn to_tab_config(&self) -> TabConfig {
@@ -245,6 +278,7 @@ impl LogView {
             self.search_dirty = true;
             self.search_full_rescan = true;
             self.search_match_scan_end = 0;
+            self.visual_rows_cache.set(None);
         } else if self.flat_lines_record_cursor < buffer.records().len() {
             let records = &buffer.records()[self.flat_lines_record_cursor..];
             let appended = rebuild_flat_lines_for_records(
@@ -256,6 +290,7 @@ impl LogView {
             if !appended.is_empty() {
                 Arc::make_mut(&mut self.flat_lines).extend(appended);
                 self.search_dirty = true;
+                self.visual_rows_cache.set(None);
             }
             self.flat_lines_record_cursor = buffer.records().len();
         }
@@ -315,6 +350,7 @@ impl LogView {
                     self.flat_lines_record_cursor = buffer.records().len();
                     self.search_full_rescan = true;
                     self.search_match_scan_end = 0;
+                    self.visual_rows_cache.set(None);
                 }
             }
         }
@@ -334,6 +370,60 @@ impl LogView {
         self.search_dirty
     }
 
+    pub fn is_flat_lines_dirty(&self) -> bool {
+        self.flat_lines_dirty
+    }
+
+    pub fn refresh_search_if_dirty(&mut self) -> Option<usize> {
+        if !self.search_dirty {
+            return None;
+        }
+        self.search_dirty = false;
+        self.refresh_search()
+    }
+
+    /// Replace flat_lines from a match-index window (already filtered).
+    pub fn set_match_flat_lines(&mut self, lines: Vec<crate::core::types::FlatLine>) {
+        self.flat_lines = Arc::new(lines);
+        self.flat_lines_dirty = false;
+        self.flat_lines_record_cursor = 0;
+        self.visual_rows_cache.set(None);
+        self.search_dirty = true;
+        self.search_full_rescan = true;
+        self.search_match_scan_end = 0;
+    }
+
+    /// Cached visual row count for scroll/prefetch (invalidated when flat lines change).
+    pub fn cached_visual_rows(
+        &self,
+        viewport_width: u32,
+        cell_width: u32,
+        count_fn: impl FnOnce(&[FlatLine], bool, u32, u32) -> usize,
+    ) -> usize {
+        if let Some((w, c, wrap, rows)) = self.visual_rows_cache.get() {
+            if w == viewport_width && c == cell_width && wrap == self.wrap_lines {
+                return rows;
+            }
+        }
+        let rows = count_fn(
+            &self.flat_lines,
+            self.wrap_lines,
+            viewport_width,
+            cell_width,
+        );
+        self.visual_rows_cache
+            .set(Some((viewport_width, cell_width, self.wrap_lines, rows)));
+        rows
+    }
+
+    pub fn invalidate_visual_rows_cache(&self) {
+        self.visual_rows_cache.set(None);
+    }
+
+    pub fn request_match_rebuild(&mut self) {
+        self.flat_lines_dirty = true;
+    }
+
     pub fn clear_search_dirty(&mut self) {
         self.search_dirty = false;
     }
@@ -342,12 +432,14 @@ impl LogView {
         self.flat_lines = Arc::new(Vec::new());
         self.flat_lines_record_cursor = 0;
         self.flat_lines_dirty = true;
+        self.visual_rows_cache.set(None);
         self.search_full_rescan = true;
         self.search_match_scan_end = 0;
     }
 
     pub fn mark_flat_lines_dirty(&mut self) {
         self.flat_lines_dirty = true;
+        self.visual_rows_cache.set(None);
         self.search_dirty = true;
         self.search_full_rescan = true;
         self.search_match_scan_end = 0;
@@ -410,6 +502,7 @@ impl LogView {
             lines.extend(vol);
         }
         self.flat_lines_record_cursor = new_total;
+        self.visual_rows_cache.set(None);
         true
     }
 

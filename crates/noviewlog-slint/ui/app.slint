@@ -49,7 +49,12 @@ export component AppWindow inherits Window {
     in-out property <int> active-tab-index: 0;
     in-out property <bool> can-restore-tab: false;
     in-out property <[TerminalInfo]> terminals-model;
+    in-out property <[TerminalInfo]> files-model;
     in-out property <int> active-terminal-index: 0;
+    // Active session is a read-only log file (hide Follow; primary tab = filename).
+    in-out property <bool> is-file-session: false;
+    in-out property <bool> terminals-section-expanded: true;
+    in-out property <bool> files-section-expanded: true;
 
     // Per-tab IN/OUT filters (hidden / no-op on the Terminal tab; engine rejects those filters).
     in-out property <[FilterInfo]> filters-model;
@@ -94,11 +99,13 @@ export component AppWindow inherits Window {
 
     // Chrome list scroll (logical px); Flickable viewport-x/y are negative offsets.
     in-out property <float> terminals-scroll-y: 0.0;
+    in-out property <float> files-scroll-y: 0.0;
     in-out property <float> tabs-scroll-x: 0.0;
     // Bar visibility flags — set from Flickable `changed` callbacks only.
     // Never bind `if *-scroll-max()` into a layout that feeds that same max
     // (layoutinfo cycle via flick width/height).
     property <bool> terminals-bar-visible: false;
+    property <bool> files-bar-visible: false;
     property <bool> tabs-bar-visible: false;
 
     // Drag-reorder session (terminals sidebar / filter tabs).
@@ -106,6 +113,10 @@ export component AppWindow inherits Window {
     property <string> term-drag-id: "";
     property <int> term-drag-from: -1;
     property <int> term-drop-to: -1;
+    property <bool> file-dragging: false;
+    property <string> file-drag-id: "";
+    property <int> file-drag-from: -1;
+    property <int> file-drop-to: -1;
     property <bool> tab-dragging: false;
     property <int> tab-drag-from: -1;
     property <int> tab-drop-to: -1;
@@ -144,6 +155,7 @@ export component AppWindow inherits Window {
     callback terminal-close(id: string);
     callback terminal-move(id: string, to-index: int);
     callback terminal-rename(id: string, name: string);
+    callback set-sidebar-expanded(terminals: bool, files: bool);
 
     // IN/OUT filters → engine filter_add / filter_toggle / filter_remove / filter_update / filter_clear.
     // filter-type is "include" or "exclude"; use-regex is the draft `.*` toggle.
@@ -247,8 +259,32 @@ export component AppWindow inherits Window {
         max(0.0, (term-flick.viewport-height - term-flick.height) / 1px)
     }
 
+    pure function files-scroll-max() -> float {
+        max(0.0, (files-flick.viewport-height - files-flick.height) / 1px)
+    }
+
     pure function tabs-scroll-max() -> float {
         max(0.0, (tab-flick.viewport-width - tab-flick.width) / 1px)
+    }
+
+    // TerminalRow 44px + 3px spacing between rows. Cap visible rows so TERMINALS/FILES
+    // keep stable heights and do not fight each other (or FILTERS) for stretch.
+    pure function sidebar-list-height(count: int, expanded: bool) -> length {
+        if (!expanded || count <= 0) {
+            return 0px;
+        }
+        let n = min(count, 5);
+        return n * 44px + max(0, n - 1) * 3px;
+    }
+
+    function toggle-terminals-section() {
+        root.terminals-section-expanded = !root.terminals-section-expanded;
+        root.set-sidebar-expanded(root.terminals-section-expanded, root.files-section-expanded);
+    }
+
+    function toggle-files-section() {
+        root.files-section-expanded = !root.files-section-expanded;
+        root.set-sidebar-expanded(root.terminals-section-expanded, root.files-section-expanded);
     }
 
     pure function hit-title-menu-btn(btn-x: length, btn-y: length, btn-w: length, btn-h: length, px: length, py: length) -> bool {
@@ -330,6 +366,16 @@ export component AppWindow inherits Window {
         root.terminals-scroll-y = clamp(root.terminals-scroll-y - delta-y, 0.0, root.terminals-scroll-max());
         term-flick.viewport-y = -root.terminals-scroll-y * 1px;
         root.sync-terminals-bar-visible();
+    }
+
+    function sync-files-bar-visible() {
+        root.files-bar-visible = root.files-scroll-max() > 0.5;
+    }
+
+    function scroll-files-by(delta-y: float) {
+        root.files-scroll-y = clamp(root.files-scroll-y - delta-y, 0.0, root.files-scroll-max());
+        files-flick.viewport-y = -root.files-scroll-y * 1px;
+        root.sync-files-bar-visible();
     }
 
     // Row pitch: TerminalRow height 44px + terms-col spacing 3px.
@@ -695,7 +741,7 @@ export component AppWindow inherits Window {
                             cascade-panel-height: root.view-active-submenu == 1
                                 ? 8px + 32px * 6
                                 : 8px + 32px * 3;
-                            ChromeMenuItem {
+                            if !root.is-file-session: ChromeMenuItem {
                                 title: "Follow";
                                 checkable: true;
                                 checked: root.auto-follow;
@@ -952,7 +998,7 @@ export component AppWindow inherits Window {
                 }
 
                 // Follow / WRAP — caption cluster, outside title-drag (no window drag).
-                TitleBarToggleChip {
+                if !root.is-file-session: TitleBarToggleChip {
                     horizontal-stretch: 0;
                     label: "Follow";
                     active: root.auto-follow;
@@ -1107,27 +1153,49 @@ export component AppWindow inherits Window {
                         padding-right: 0px;
                         spacing: 8px;
 
+                        // TERMINALS — collapsible live PTY sessions
                         HorizontalLayout {
-                            spacing: 8px;
+                            spacing: 4px;
                             height: 24px;
-                            padding-left: 12px;
+                            padding-left: 8px;
                             padding-right: 12px;
 
-                            Text {
-                                text: "TERMINALS";
-                                color: Theme.text-muted;
-                                font-size: 11px;
-                                font-weight: 700;
-                                vertical-alignment: center;
+                            TouchArea {
+                                width: 20px;
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-terminals-section(); }
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: root.terminals-section-expanded ? "▾" : "▸";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                height: 24px;
                                 horizontal-stretch: 1;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-terminals-section(); }
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "TERMINALS";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
                             }
 
                             TouchArea {
                                 width: 24px;
                                 height: 24px;
                                 mouse-cursor: pointer;
-                                // Sidebar focus-on-click is off while renaming — + would
-                                // leave TextInput focused and a stuck/corrupt rename row.
                                 clicked => {
                                     root.dismiss-any-rename-if-any();
                                     root.terminal-add();
@@ -1152,13 +1220,13 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Full-width rows: Flickable fills term-list; V-bar overlays on the right
-                        // when scrollable. TerminalRow padding-right reserves the 10px slot so ×
-                        // does not jump when the bar appears.
                         term-list := Rectangle {
-                            // Cap terminals so FILTERS stay visible below.
-                            vertical-stretch: 1;
-                            min-height: 80px;
+                            height: root.sidebar-list-height(
+                                root.terminals-model.length,
+                                root.terminals-section-expanded
+                            );
+                            vertical-stretch: 0;
+                            clip: true;
                             background: transparent;
 
                             term-flick := Flickable {
@@ -1185,21 +1253,16 @@ export component AppWindow inherits Window {
                                         subtitle: term.cwd == "" ? "." : term.cwd;
                                         running: term.running;
                                         active: term.index == root.active-terminal-index;
-                                        show-close: term.index != 0 && root.terminals-model.length > 1;
+                                        show-close: root.terminals-model.length > 1;
                                         term-id: term.id;
                                         term-index: term.index;
                                         show-drop-before: root.term-dragging
                                             && root.term-drop-to == term.index
                                             && root.term-drop-to != root.term-drag-from;
                                         dim-as-drag-source: root.term-dragging && root.term-drag-id == term.id;
-                                        // Idle is empty id — must not match the pre-stats
-                                        // placeholder row (also id "") or first paint opens rename.
                                         renaming: root.renaming-terminal-id != "" && root.renaming-terminal-id == term.id;
                                         rename-text: root.rename-draft;
-                                        // activated (not clicked): drag-reorder suppresses select; double-click
-                                        // rename runs before pointer-up and skips activated while renaming.
                                         activated => {
-                                            // Other row click does not blur rename (focus-on-click gated).
                                             if (root.renaming-terminal-id != "" && root.renaming-terminal-id != term.id) {
                                                 root.dismiss-terminal-rename-if-any();
                                             }
@@ -1246,6 +1309,159 @@ export component AppWindow inherits Window {
                                 page-size: max(1.0, term-flick.height / 1px);
                                 scrolled(v) => {
                                     term-flick.viewport-y = -v * 1px;
+                                }
+                            }
+                        }
+
+                        // FILES — collapsible log-file sessions
+                        HorizontalLayout {
+                            spacing: 4px;
+                            height: 24px;
+                            padding-left: 8px;
+                            padding-right: 12px;
+
+                            TouchArea {
+                                width: 20px;
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-files-section(); }
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: root.files-section-expanded ? "▾" : "▸";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                height: 24px;
+                                horizontal-stretch: 1;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-files-section(); }
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "FILES";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                width: 24px;
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    root.open-log-file();
+                                }
+
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 4px;
+                                    background: parent.has-hover ? Theme.bg-input : transparent;
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "+";
+                                        color: Theme.text-primary;
+                                        font-size: 16px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        files-list := Rectangle {
+                            height: root.sidebar-list-height(
+                                root.files-model.length,
+                                root.files-section-expanded
+                            );
+                            vertical-stretch: 0;
+                            clip: true;
+                            background: transparent;
+
+                            files-flick := Flickable {
+                                width: 100%;
+                                height: 100%;
+                                viewport-width: self.width;
+                                viewport-height: max(self.height, files-col.preferred-height);
+                                viewport-y: -root.files-scroll-y * 1px;
+                                interactive: true;
+
+                                changed viewport-y => {
+                                    root.files-scroll-y = clamp(-self.viewport-y / 1px, 0.0, root.files-scroll-max());
+                                }
+                                changed height => { root.sync-files-bar-visible(); }
+                                changed viewport-height => { root.sync-files-bar-visible(); }
+
+                                files-col := VerticalLayout {
+                                    spacing: 3px;
+                                    alignment: start;
+                                    width: 100%;
+
+                                    for file in root.files-model: TerminalRow {
+                                        title: file.label;
+                                        subtitle: file.cwd == "" ? "." : file.cwd;
+                                        running: false;
+                                        active: file.index == root.active-terminal-index;
+                                        show-close: true;
+                                        term-id: file.id;
+                                        term-index: file.index;
+                                        show-drop-before: false;
+                                        dim-as-drag-source: false;
+                                        renaming: root.renaming-terminal-id != "" && root.renaming-terminal-id == file.id;
+                                        rename-text: root.rename-draft;
+                                        activated => {
+                                            if (root.renaming-terminal-id != "" && root.renaming-terminal-id != file.id) {
+                                                root.dismiss-terminal-rename-if-any();
+                                            }
+                                            root.terminal-switch(file.id);
+                                        }
+                                        close-clicked => {
+                                            root.dismiss-any-rename-if-any();
+                                            root.terminal-close(file.id);
+                                        }
+                                        wheel(dy) => { root.scroll-files-by(dy); }
+                                        rename-requested => {
+                                            root.terminal-switch(file.id);
+                                            root.start-terminal-rename(file.id, file.label);
+                                        }
+                                        rename-edited(text) => {
+                                            root.rename-draft = text;
+                                        }
+                                        rename-accepted(text) => {
+                                            root.commit-terminal-rename(file.id, text);
+                                        }
+                                        rename-cancelled => {
+                                            root.end-terminal-rename();
+                                        }
+                                        reorder-drag-start(id, from-index) => { }
+                                        reorder-drag-move(abs-y) => { }
+                                        reorder-drag-end => { }
+                                    }
+                                }
+                            }
+
+                            if root.files-bar-visible: EngineScrollBar {
+                                x: parent.width - 10px;
+                                width: 10px;
+                                height: 100%;
+                                z: 20;
+                                horizontal: false;
+                                value <=> root.files-scroll-y;
+                                maximum: root.files-scroll-max();
+                                page-size: max(1.0, files-flick.height / 1px);
+                                scrolled(v) => {
+                                    files-flick.viewport-y = -v * 1px;
                                 }
                             }
                         }
@@ -1453,6 +1669,13 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
                             }
+                        }
+
+                        // Absorb leftover height so TERMINALS/FILES lists stay fixed-size
+                        // when FILTERS appears/disappears or sections collapse.
+                        Rectangle {
+                            vertical-stretch: 1;
+                            background: transparent;
                         }
                     }
                 }

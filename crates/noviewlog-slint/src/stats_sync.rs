@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use noviewlog_core::core::types::{clamp_max_scrollback_lines, FilterType};
-use noviewlog_core::{StatsSnapshot, TERMINAL_TAB_NAME};
+use noviewlog_core::{StatsSnapshot, StatsTerminal, TERMINAL_TAB_NAME};
 use slint::{Model, SharedString, Timer, VecModel};
 
 use crate::ui::{AppWindow, FilterInfo, TabInfo, TerminalInfo};
@@ -19,6 +19,7 @@ pub(crate) fn apply_stats(
     stats: &StatsSnapshot,
     tabs: &Rc<VecModel<TabInfo>>,
     terminals: &Rc<VecModel<TerminalInfo>>,
+    files: &Rc<VecModel<TerminalInfo>>,
     filters: &Rc<VecModel<FilterInfo>>,
     ui: &AppWindow,
     terminal_tab_active: &Rc<Cell<bool>>,
@@ -33,7 +34,7 @@ pub(crate) fn apply_stats(
     find_debounce: &Rc<Timer>,
 ) -> bool {
     let tabs_changed = apply_stats_to_tabs(stats, tabs, ui, terminal_tab_active);
-    let terms_changed = apply_stats_to_terminals(stats, terminals, ui);
+    let terms_changed = apply_stats_to_terminals(stats, terminals, files, ui);
     let filters_changed = apply_stats_to_filters(stats, filters, ui);
     apply_stats_to_find(
         stats,
@@ -121,6 +122,7 @@ fn apply_stats_to_scroll(stats: &StatsSnapshot, ui: &AppWindow, syncing: &Rc<Cel
 fn apply_stats_to_terminals(
     stats: &StatsSnapshot,
     terminals: &Rc<VecModel<TerminalInfo>>,
+    files: &Rc<VecModel<TerminalInfo>>,
     ui: &AppWindow,
 ) -> bool {
     let active = stats.active_terminal as i32;
@@ -130,32 +132,55 @@ fn apply_stats_to_terminals(
         ui.set_active_terminal_index(active);
         changed = true;
     }
+    if ui.get_is_file_session() != stats.is_file_session {
+        ui.set_is_file_session(stats.is_file_session);
+        changed = true;
+    }
+    if ui.get_terminals_section_expanded() != stats.terminals_section_expanded {
+        ui.set_terminals_section_expanded(stats.terminals_section_expanded);
+        changed = true;
+    }
+    if ui.get_files_section_expanded() != stats.files_section_expanded {
+        ui.set_files_section_expanded(stats.files_section_expanded);
+        changed = true;
+    }
 
-    let next: Vec<TerminalInfo> = stats
+    let next_terms: Vec<TerminalInfo> = stats
         .terminals
         .iter()
-        .map(|term| {
-            let label = if term.label.is_empty() {
-                "."
-            } else {
-                term.label.as_str()
-            };
-            TerminalInfo {
-                index: term.index as i32,
-                id: SharedString::from(term.id.as_str()),
-                label: SharedString::from(label),
-                cwd: SharedString::from(term.cwd.as_str()),
-                running: term.running,
-            }
-        })
+        .map(|term| stats_terminal_to_info(term))
         .collect();
+    if terminals_model_differs(terminals, &next_terms) {
+        terminals.set_vec(next_terms);
+        changed = true;
+    }
 
-    if terminals_model_differs(terminals, &next) {
-        terminals.set_vec(next);
+    let next_files: Vec<TerminalInfo> = stats
+        .files
+        .iter()
+        .map(|term| stats_terminal_to_info(term))
+        .collect();
+    if terminals_model_differs(files, &next_files) {
+        files.set_vec(next_files);
         changed = true;
     }
 
     changed
+}
+
+fn stats_terminal_to_info(term: &StatsTerminal) -> TerminalInfo {
+    let label = if term.label.is_empty() {
+        "."
+    } else {
+        term.label.as_str()
+    };
+    TerminalInfo {
+        index: term.index as i32,
+        id: SharedString::from(term.id.as_str()),
+        label: SharedString::from(label),
+        cwd: SharedString::from(term.cwd.as_str()),
+        running: term.running,
+    }
 }
 
 fn tabs_model_differs(model: &VecModel<TabInfo>, next: &[TabInfo]) -> bool {
@@ -434,6 +459,7 @@ fn apply_stats_to_view_chrome(
         && !stats
             .terminals
             .iter()
+            .chain(stats.files.iter())
             .any(|t| t.id.as_str() == renaming_tid.as_str())
     {
         ui.set_renaming_terminal_id(SharedString::default());

@@ -32,7 +32,8 @@ thread_local! {
 
 use crate::app_state::ClickTracker;
 use crate::engine_bridge::{
-    bump_fast_timer, find_terminal_index, set_occluded_timer, window_should_pause_paint, TICK_FAST,
+    bump_fast_timer, find_session_global_index, find_terminal_index, set_occluded_timer,
+    window_should_pause_paint, TICK_FAST,
     TICK_IDLE,
 };
 use crate::input::{
@@ -117,7 +118,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         running: true,
     }]));
     ui.set_terminals_model(ModelRc::from(terminals_model.clone()));
+    let files_model = Rc::new(VecModel::<TerminalInfo>::from(vec![]));
+    ui.set_files_model(ModelRc::from(files_model.clone()));
     ui.set_active_terminal_index(0);
+    ui.set_is_file_session(false);
+    ui.set_terminals_section_expanded(true);
+    ui.set_files_section_expanded(true);
 
     let filters_model = Rc::new(VecModel::<FilterInfo>::from(vec![]));
     ui.set_filters_model(ModelRc::from(filters_model.clone()));
@@ -894,14 +900,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let engine = engine.clone();
         let force_render = force_render.clone();
         let terminals_model = terminals_model.clone();
+        let files_model = files_model.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         let ui_term = ui.as_weak();
         ui.on_terminal_switch(move |id| {
             let id_str = id.as_str();
-            if let Some(idx) = find_terminal_index(&terminals_model, id_str) {
+            if let Some(global) =
+                find_session_global_index(&terminals_model, &files_model, id_str)
+            {
                 if let Some(ui) = ui_term.upgrade() {
-                    ui.set_active_terminal_index(idx);
+                    ui.set_active_terminal_index(global);
                 }
             }
             let _ = engine.borrow_mut().send_command(Command::TerminalSwitch {
@@ -934,6 +943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let engine = engine.clone();
         let force_render = force_render.clone();
         let terminals_model = terminals_model.clone();
+        let files_model = files_model.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         ui.on_terminal_rename(move |id, name| {
@@ -946,10 +956,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 terminal_id: id_str.to_string(),
                 name: name.to_string(),
             });
-            if let Some(row) = find_terminal_index(&terminals_model, id_str).map(|i| i as usize) {
-                if let Some(mut t) = terminals_model.row_data(row) {
-                    t.label = SharedString::from(name);
-                    terminals_model.set_row_data(row, t);
+            for model in [&terminals_model, &files_model] {
+                if let Some(row) = find_terminal_index(model, id_str).map(|i| i as usize) {
+                    if let Some(mut t) = model.row_data(row) {
+                        t.label = SharedString::from(name);
+                        model.set_row_data(row, t);
+                    }
+                    break;
                 }
             }
             force_render.set(true);
@@ -979,47 +992,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let engine = engine.clone();
         let force_render = force_render.clone();
-        let terminals_model = terminals_model.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         let ui_term = ui.as_weak();
         ui.on_terminal_close(move |id| {
             let id_str = id.as_str();
-            let Some(row) = find_terminal_index(&terminals_model, id_str).map(|i| i as usize) else {
-                return;
-            };
-            if row == 0 || terminals_model.row_count() <= 1 {
-                return;
-            }
-            let old_active = ui_term
-                .upgrade()
-                .map(|u| u.get_active_terminal_index())
-                .unwrap_or(0);
             let _ = engine.borrow_mut().send_command(Command::TerminalClose {
                 terminal_id: Some(id_str.to_string()),
             });
-
-            terminals_model.remove(row);
-            for i in row..terminals_model.row_count() {
-                if let Some(mut t) = terminals_model.row_data(i) {
-                    t.index = i as i32;
-                    terminals_model.set_row_data(i, t);
-                }
-            }
-            let index = row as i32;
-            let max = (terminals_model.row_count().saturating_sub(1)) as i32;
-            let new_active = if index < old_active {
-                old_active - 1
-            } else if index == old_active {
-                index.min(max)
-            } else {
-                old_active
-            };
-            if let Some(ui) = ui_term.upgrade() {
-                ui.set_active_terminal_index(new_active);
-            }
+            // Models refresh from stats (split TERMINALS / FILES lists).
+            let _ = ui_term.upgrade();
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        ui.on_set_sidebar_expanded(move |terminals, files| {
+            let _ = engine.borrow_mut().send_command(Command::SetSidebarExpanded {
+                terminals,
+                files,
+            });
         });
     }
 
@@ -1342,6 +1336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let force_tick = force_render.clone();
     let tabs_tick = tabs_model.clone();
     let terminals_tick = terminals_model.clone();
+    let files_tick = files_model.clone();
     let filters_tick = filters_model.clone();
     let terminal_tab_tick = terminal_tab_active.clone();
     let timer_tick = timer.clone();
@@ -1372,6 +1367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_tick = force_tick.clone();
         let tabs_tick = tabs_tick.clone();
         let terminals_tick = terminals_tick.clone();
+        let files_tick = files_tick.clone();
         let filters_tick = filters_tick.clone();
         let terminal_tab_tick = terminal_tab_tick.clone();
         let timer_tick = timer_tick.clone();
@@ -1436,6 +1432,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &stats,
                                     &tabs_tick,
                                     &terminals_tick,
+                                    &files_tick,
                                     &filters_tick,
                                     &ui,
                                     &terminal_tab_tick,

@@ -133,6 +133,43 @@ impl TerminalState {
             || self.launch.log_file.is_some()
     }
 
+    /// Basename for the pinned primary tab when this is a file session.
+    pub fn primary_tab_name(&self) -> String {
+        if let Some(path) = self.file_session_path() {
+            return Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(path)
+                .to_string();
+        }
+        TERMINAL_TAB_NAME.to_string()
+    }
+
+    /// Keep index-0 tab named for the session kind; clear filters on that tab.
+    pub fn sync_primary_tab_identity(&mut self) {
+        let name = self.primary_tab_name();
+        let is_file = self.is_file_session();
+        if let Some(tab) = self.views.first_mut() {
+            if tab.name != name {
+                tab.name = name;
+            }
+            if !tab.filters().is_empty() {
+                tab.clear_filters();
+            }
+            if is_file {
+                tab.auto_follow = false;
+            }
+        }
+    }
+
+    /// Disable Follow on every view (file sessions).
+    pub fn disable_follow_all_views(&mut self) {
+        for view in &mut self.views {
+            view.auto_follow = false;
+        }
+    }
+
     pub fn active_view(&self) -> &LogView {
         let idx = self.active_view.min(self.views.len().saturating_sub(1));
         &self.views[idx]
@@ -153,15 +190,15 @@ impl TerminalState {
 
     pub fn ensure_terminal_tab_view(&mut self, _runtime: &RuntimeConfig) {
         if self.views.is_empty() {
-            self.views = vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())];
+            let name = self.primary_tab_name();
+            self.views = vec![LogView::from_runtime(&name, Vec::new())];
             self.active_view = 0;
+            if self.is_file_session() {
+                self.disable_follow_all_views();
+            }
             return;
         }
-        if let Some(terminal_tab) = self.views.first_mut() {
-            if !terminal_tab.filters().is_empty() {
-                terminal_tab.clear_filters();
-            }
-        }
+        self.sync_primary_tab_identity();
         self.active_view = self.active_view.min(self.views.len() - 1);
     }
 }

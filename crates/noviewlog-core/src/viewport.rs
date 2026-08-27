@@ -14,7 +14,7 @@ use crate::core::types::{
 };
 use crate::core::visible::{highlight_search_in_segments, SearchPattern};
 use crate::viewport_layout::{
-    build_visual_lines, selection_slice_range, slice_segments, TextSelection, LEFT_PAD,
+    collect_visible_visual_lines, selection_slice_range, slice_segments, TextSelection, LEFT_PAD,
 };
 
 const BG: [u8; 4] = [0, 0, 0, 255];
@@ -211,19 +211,26 @@ impl ViewportRenderer {
             px.copy_from_slice(&BG);
         }
 
-        let visual_lines = build_visual_lines(lines, wrap_lines, width, self.metrics.cell_width);
         let first_row = (scroll_y / self.metrics.row_stride).floor() as usize;
         let y_offset = scroll_y - first_row as f32 * self.metrics.row_stride;
         let mut row_top = -y_offset;
 
         let max_rows = (height as f32 / self.metrics.row_stride).ceil() as usize + 1;
+        let visual_lines = collect_visible_visual_lines(
+            lines,
+            wrap_lines,
+            width,
+            self.metrics.cell_width,
+            first_row,
+            max_rows,
+        );
         let x_base = if wrap_lines {
             LEFT_PAD as i32
         } else {
             LEFT_PAD as i32 - scroll_x as i32
         };
 
-        for visual in visual_lines.iter().skip(first_row).take(max_rows) {
+        for visual in &visual_lines {
             if row_top >= height as f32 {
                 break;
             }
@@ -262,7 +269,7 @@ impl ViewportRenderer {
                 lines,
                 &visual_lines,
                 c,
-                first_row,
+                0,
                 y_offset,
                 x_base,
                 self.metrics.row_stride,
@@ -305,19 +312,13 @@ pub fn caret_pixel_pos(
         .map(|(i, _)| i)
         .unwrap_or(line.raw.len());
 
-    let mut last_for_flat: Option<usize> = None;
-    for (i, v) in visual_lines.iter().enumerate() {
-        if v.flat_index == caret.flat_index {
-            last_for_flat = Some(i);
-        }
-    }
-    let last_for_flat = last_for_flat?;
-
     for (vis_i, visual) in visual_lines.iter().enumerate() {
         if visual.flat_index != caret.flat_index {
             continue;
         }
-        let is_last = vis_i == last_for_flat;
+        // Last wrap of this flat line ends at `raw.len()` — works with a
+        // visible-only slice (no need for the full wrap layout).
+        let is_last = visual.end == line.raw.len();
         let in_slice = if is_last {
             byte_at >= visual.start
         } else {
