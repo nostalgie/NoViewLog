@@ -439,6 +439,8 @@ impl Engine {
             let terminal = self.active_terminal();
             let view = terminal.active_view();
             (
+                // Find chrome owns search: a live query pins the viewport on matches
+                // (no Follow). Closing Find must SearchSet empty or this stays frozen.
                 view.auto_follow && view.search_query.is_empty(),
                 view.wrap_lines,
                 Arc::clone(&view.flat_lines),

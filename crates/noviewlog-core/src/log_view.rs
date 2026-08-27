@@ -11,9 +11,8 @@ use crate::core::config::tab_config_from_runtime;
 use crate::core::filter::FilterEngine;
 use crate::core::types::{FilterRule, FlatLine, SearchMatch, SeverityFilter, TabConfig};
 use crate::core::visible::{
-    append_search_matches, collect_search_matches, compile_search_pattern,
-    record_ids_needing_expand_for_search, rebuild_flat_lines, rebuild_flat_lines_for_records,
-    SearchPattern,
+    append_search_matches, collect_search_matches, compile_search_pattern, rebuild_flat_lines,
+    rebuild_flat_lines_for_records, record_ids_needing_expand_for_search, SearchPattern,
 };
 
 pub struct LogView {
@@ -149,6 +148,8 @@ impl LogView {
             self.search_match_index = 0;
             self.search_match_scan_end = 0;
             self.search_full_rescan = true;
+            self.search_scroll_pending = false;
+            self.search_jump_to_last = false;
             return None;
         }
 
