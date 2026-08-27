@@ -3,7 +3,7 @@
 - [x] 1.1 Wire PTY reader → Slint wake (coalesced) so Bytes/Exit trigger a prompt tick
 - [x] 1.2 Coalesce consecutive `Bytes` per terminal in `poll_pty` into one `feed`
 - [x] 1.3 Stop clearing `last_stats_at` on pure byte bursts; keep 250 ms stats throttle
-- [x] 1.4 Remove console-key `force_render`; keep `bump_fast_timer`
+- [x] 1.4 Remove Terminal-tab-key `force_render`; keep `bump_fast_timer`
 
 ## 2. Caret scheduling
 
@@ -12,8 +12,8 @@
 
 ## 3. Incremental volatile flat lines
 
-- [x] 3.1 On active PTY volatile update, patch Console flat-lines tail instead of `mark_all_views_dirty`
-- [x] 3.2 Leave non-console views dirty for later switch
+- [x] 3.1 On active PTY volatile update, patch Terminal tab flat-lines tail instead of `mark_all_views_dirty`
+- [x] 3.2 Leave filter-tab views dirty for later switch
 - [x] 3.3 Unit test: many single-byte feeds with large scrollback avoid full rebuild
 
 ## 4. Glyph cache

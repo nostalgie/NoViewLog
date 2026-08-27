@@ -51,7 +51,7 @@ export component AppWindow inherits Window {
     in-out property <[TerminalInfo]> terminals-model;
     in-out property <int> active-terminal-index: 0;
 
-    // Per-tab IN/OUT filters (hidden / no-op on Console; engine rejects Console filters).
+    // Per-tab IN/OUT filters (hidden / no-op on the Terminal tab; engine rejects those filters).
     in-out property <[FilterInfo]> filters-model;
     in-out property <string> filter-draft: "";
     // Draft regex mode for next Include/Exclude (default literal).
@@ -77,7 +77,7 @@ export component AppWindow inherits Window {
     in-out property <float> viewport-page-w: 1.0;
     in-out property <bool> show-hscroll: false;
 
-    // Console block caret overlay (host-drawn; blink does not repaint the log Image).
+    // Terminal tab block caret overlay (host-drawn; blink does not repaint the log Image).
     in-out property <bool> caret-visible: false;
     in-out property <bool> caret-blink-on: true;
     in-out property <float> caret-x: 0.0;
@@ -197,7 +197,7 @@ export component AppWindow inherits Window {
     // Max retained log lines (engine max_scrollback_lines); Settings edits a draft.
     in-out property <int> max-scrollback-lines: 10000;
     property <int> settings-draft: 10000;
-    // Tab menu enablement (console + last-tab guards).
+    // Tab menu enablement (Terminal tab + last-tab guards).
     in-out property <bool> can-close-tab: false;
     in-out property <bool> can-rename-tab: true;
     // Inline rename session (-1 = idle). Draft lives here so chips stay in sync.
@@ -395,7 +395,7 @@ export component AppWindow inherits Window {
 
     init => {
         Palette.color-scheme = ColorScheme.dark;
-        // Ensure Console can accept keys and show the caret without a priming click.
+        // Ensure the Terminal tab can accept keys and show the caret without a priming click.
         viewport-host.focus();
     }
 
@@ -431,8 +431,8 @@ export component AppWindow inherits Window {
         if (index < 0 || index >= root.tabs-model.length) {
             return;
         }
-        // Console is a fixed system tab — never enter inline rename.
-        if (root.tabs-model[index].is-console) {
+        // The Terminal tab is a fixed system tab — never enter inline rename.
+        if (root.tabs-model[index].is-terminal-tab) {
             return;
         }
         // Abort any stuck reorder so drop markers cannot linger during rename.
@@ -1250,7 +1250,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // FILTERS — IN/OUT panel. Console never has filters; hide the
+                        // FILTERS — IN/OUT panel. The Terminal tab never has filters; hide the
                         // whole section instead of a dead "applies on other tabs" stub.
                         if root.filters-editable: Rectangle {
                             height: 1px;
@@ -1532,10 +1532,10 @@ export component AppWindow inherits Window {
                                         for tab in root.tabs-model: TabChip {
                                             title: tab.name;
                                             active: tab.index == root.active-tab-index;
-                                            show-close: !tab.is-console && root.tabs-model.length > 1;
-                                            can-rename: !tab.is-console;
+                                            show-close: !tab.is-terminal-tab && root.tabs-model.length > 1;
+                                            can-rename: !tab.is-terminal-tab;
                                             tab-index: tab.index;
-                                            can-reorder: !tab.is-console;
+                                            can-reorder: !tab.is-terminal-tab;
                                             dim-as-drag-source: root.tab-dragging && root.tab-drag-from == tab.index;
                                             renaming: root.renaming-tab-index == tab.index;
                                             rename-text: root.rename-draft;
@@ -1693,7 +1693,7 @@ export component AppWindow inherits Window {
 
                 changed has-focus => {
                     if (self.has-focus) {
-                        // Console/viewport took keyboard focus — close any stuck rename chrome.
+                        // Terminal tab/viewport took keyboard focus — close any stuck rename chrome.
                         root.dismiss-any-rename-if-any();
                     }
                     root.viewport-focused(self.has-focus);
@@ -1803,7 +1803,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 pointer-event(event) => {
-                                    // Only pointer-*down* takes console focus / dismisses rename.
+                                    // Only pointer-*down* takes Terminal tab focus / dismisses rename.
                                     // Hover/move over the viewport must NOT steal rename focus.
                                     if (event.kind == PointerEventKind.down) {
                                         root.dismiss-any-rename-if-any();

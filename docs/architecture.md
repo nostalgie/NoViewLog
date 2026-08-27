@@ -10,13 +10,13 @@ target is Ubuntu Linux; other platforms are best-effort.
 |------|---------|
 | **Terminal** | Independent session (PTY shell, process, or read-only log file) |
 | **Tab / View** | Filter view inside a terminal (`LogView`). JSON commands use `tab_*`; the type is `LogView` |
-| **Console** | Built-in first tab (index 0); not filter-editable; not renameable in Slint |
+| **Terminal tab** | Built-in first tab (index 0); display name `Terminal`; not filter-editable; not renameable in Slint |
 | **Record** | Parsed log unit (may span multiple physical lines) |
 | **Viewport** | Fontdue-rendered RGBA bitmap of the visible slice |
 
 ```
 TerminalState
- ├── views: Vec<LogView>     # Console + filter tabs
+ ├── views: Vec<LogView>     # Terminal tab + filter tabs
  ├── buffer: RecordBuffer
  ├── ingest / parser
  └── optional file session (file_load / file_backed)

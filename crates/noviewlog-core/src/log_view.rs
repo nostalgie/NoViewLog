@@ -1,7 +1,7 @@
 //! Per-terminal filter **view** (UI/JSON name: **tab**).
 //!
 //! `Command::Tab*` and stats field `tabs` refer to `LogView` instances.
-//! Index 0 is the Console (not filter-editable in the UI).
+//! Index 0 is the Terminal tab (not filter-editable in the UI).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -12,8 +12,11 @@ use crate::core::filter::FilterEngine;
 use crate::core::types::{FilterRule, FlatLine, SearchMatch, SeverityFilter, TabConfig};
 use crate::core::visible::{
     append_search_matches, collect_search_matches, compile_search_pattern, rebuild_flat_lines,
-    rebuild_flat_lines_for_records, record_ids_needing_expand_for_search, SearchPattern,
+    rebuild_flat_lines_for_records,     record_ids_needing_expand_for_search, SearchPattern,
 };
+
+/// Display name of the pinned first tab (index 0).
+pub const TERMINAL_TAB_NAME: &str = "Terminal";
 
 pub struct LogView {
     pub name: String,

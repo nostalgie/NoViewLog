@@ -17,7 +17,9 @@ use std::time::Duration;
 use noviewlog_core::core::types::{
     clamp_max_scrollback_lines, FilterType, DEFAULT_MAX_SCROLLBACK_LINES,
 };
-use noviewlog_core::{parse_engine_event, Command, Engine, EngineEvent, CARET_BLINK_PERIOD};
+use noviewlog_core::{
+    parse_engine_event, Command, Engine, EngineEvent, CARET_BLINK_PERIOD, TERMINAL_TAB_NAME,
+};
 use slint::{
     ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer,
     TimerMode, VecModel,
@@ -35,7 +37,7 @@ use crate::engine_bridge::{
 };
 use crate::input::{
     clipboard_has_text, copy_selection_to_clipboard, handle_key_event, is_key_char, is_zoom_in_key,
-    paste_clipboard_to_console,
+    paste_clipboard_to_terminal,
 };
 use crate::stats_sync::apply_stats;
 use crate::ui::*;
@@ -58,12 +60,12 @@ fn seed_opaque_viewport(ui: &AppWindow) {
 
 /// Sync Slint caret overlay from engine geometry (device px → logical).
 /// Returns whether the overlay is shown.
-fn sync_console_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, scale: f32) -> bool {
-    if !eng.console_caret_active() {
+fn sync_terminal_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, scale: f32) -> bool {
+    if !eng.terminal_caret_active() {
         ui.set_caret_visible(false);
         return false;
     }
-    let Some((x, y, w, h)) = eng.console_caret_rect(width, height) else {
+    let Some((x, y, w, h)) = eng.terminal_caret_rect(width, height) else {
         ui.set_caret_visible(false);
         return false;
     };
@@ -76,8 +78,8 @@ fn sync_console_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, sca
     true
 }
 
-/// Focus Console viewport + engine flag + overlay (startup / tab switch).
-fn arm_console_caret(ui: &AppWindow, eng: &mut Engine, logical: (f32, f32)) {
+/// Focus Terminal tab viewport + engine flag + overlay (startup / tab switch).
+fn arm_terminal_caret(ui: &AppWindow, eng: &mut Engine, logical: (f32, f32)) {
     ui.invoke_focus_viewport();
     let _ = eng.send_command(Command::SetViewportFocus { focused: true });
     eng.reset_caret_blink();
@@ -85,7 +87,7 @@ fn arm_console_caret(ui: &AppWindow, eng: &mut Engine, logical: (f32, f32)) {
     let scale = ui.window().scale_factor().max(0.5) as f32;
     let width = (logical.0 * scale).ceil().max(1.0) as u32;
     let height = (logical.1 * scale).ceil().max(1.0) as u32;
-    let _ = sync_console_caret(ui, eng, width, height, scale);
+    let _ = sync_terminal_caret(ui, eng, width, height, scale);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,8 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tabs_model = Rc::new(VecModel::<TabInfo>::from(vec![TabInfo {
         index: 0,
-        name: SharedString::from("Console"),
-        is_console: true,
+        name: SharedString::from(TERMINAL_TAB_NAME),
+        is_terminal_tab: true,
     }]));
     ui.set_tabs_model(ModelRc::from(tabs_model.clone()));
     ui.set_active_tab_index(0);
@@ -151,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Rc::new(RefCell::new(engine));
     let logical_size = Rc::new(RefCell::new((800.0f32, 600.0f32)));
     let force_render = Rc::new(Cell::new(true));
-    let console_active = Rc::new(Cell::new(true));
+    let terminal_tab_active = Rc::new(Cell::new(true));
     // Engine starts unfocused; Window forward-focus may focus the viewport and fire the callback.
     let viewport_focused = Rc::new(Cell::new(false));
     let timer = Rc::new(Timer::default());
@@ -220,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let scale = ui.window().scale_factor().max(0.5) as f32;
                     let width = (lw * scale).ceil().max(1.0) as u32;
                     let height = (lh * scale).ceil().max(1.0) as u32;
-                    let _ = sync_console_caret(&ui, &eng, width, height, scale);
+                    let _ = sync_terminal_caret(&ui, &eng, width, height, scale);
                 }
             } else if let Some(ui) = ui_focus.upgrade() {
                 ui.set_caret_visible(false);
@@ -243,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_auto_follow(true);
     ui.set_can_close_tab(false);
     ui.set_can_restore_tab(false);
-    // Startup active tab is Console — Rename disabled until a filter tab is active.
+    // Startup active tab is the Terminal tab — Rename disabled until a filter tab is active.
     ui.set_can_rename_tab(false);
     // Explicit idle — empty renaming-terminal-id must not match placeholder term.id "".
     ui.set_renaming_tab_index(-1);
@@ -480,7 +482,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let selecting = selecting.clone();
         let has_selection = has_selection.clone();
         let click_tracker = click_tracker.clone();
@@ -495,9 +497,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // kind: 0=down, 1=up, 2=move; button: 0=left, 1=middle, 2=right
             if kind == 0 && button == 1 {
-                // Middle-click paste (console only).
-                if console_active.get() {
-                    paste_clipboard_to_console(&mut engine.borrow_mut());
+                // Middle-click paste (Terminal tab only).
+                if terminal_tab_active.get() {
+                    paste_clipboard_to_terminal(&mut engine.borrow_mut());
                     force_render.set(true);
                     bump_fast_timer(&timer, &timer_fast);
                 }
@@ -550,7 +552,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let engine = engine.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let has_selection = has_selection.clone();
         let pty_running = pty_running.clone();
         let ui_ptr = ui.as_weak();
@@ -559,12 +561,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             };
             // Viewport context menu: Copy from selection,
-            // Paste when console + running + clipboard has text.
+            // Paste when Terminal tab + running + clipboard has text.
             let selected = has_selection.get()
                 || engine.borrow().selection_text().is_some_and(|t| !t.is_empty());
             has_selection.set(selected);
             ui.set_can_copy(selected);
-            let can_paste = console_active.get() && pty_running.get() && clipboard_has_text();
+            let can_paste = terminal_tab_active.get() && pty_running.get() && clipboard_has_text();
             ui.set_can_paste(can_paste);
         });
     }
@@ -584,15 +586,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let engine = engine.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         ui.on_viewport_paste(move || {
-            if !console_active.get() {
+            if !terminal_tab_active.get() {
                 return;
             }
-            paste_clipboard_to_console(&mut engine.borrow_mut());
+            paste_clipboard_to_terminal(&mut engine.borrow_mut());
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
         });
@@ -600,7 +602,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     {
         let engine = engine.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
@@ -688,17 +690,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return true;
                 }
             }
-            // Paste: Ctrl/Meta+V or Shift+Insert (console only).
+            // Paste: Ctrl/Meta+V or Shift+Insert (Terminal tab only).
             let insert = text == "\u{f727}";
-            if console_active.get()
+            if terminal_tab_active.get()
                 && ((ctrl && is_key_char(&text, 'v')) || (shift && insert))
             {
-                paste_clipboard_to_console(&mut engine.borrow_mut());
+                paste_clipboard_to_terminal(&mut engine.borrow_mut());
                 force_render.set(true);
                 bump_fast_timer(&timer, &timer_fast);
                 return true;
             }
-            if !console_active.get() {
+            if !terminal_tab_active.get() {
                 // Still allow copy from filter tabs.
                 if ctrl && is_key_char(&text, 'c') && has_selection.get() {
                     let _ = copy_selection_to_clipboard(&engine.borrow());
@@ -718,7 +720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let engine = engine.clone();
         let force_render = force_render.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         let logical_size = logical_size.clone();
@@ -729,7 +731,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_active_tab_index(index);
                 ui.set_filters_editable(index != 0);
             }
-            console_active.set(index == 0);
+            terminal_tab_active.set(index == 0);
             let mut eng = engine.borrow_mut();
             let _ = eng.send_command(Command::TabSwitch {
                 index: index as usize,
@@ -739,7 +741,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(ui) = ui_tabs.upgrade() {
                 if index == 0 {
                     viewport_focused.set(true);
-                    arm_console_caret(&ui, &mut eng, *logical_size.borrow());
+                    arm_terminal_caret(&ui, &mut eng, *logical_size.borrow());
                 } else {
                     ui.set_caret_visible(false);
                 }
@@ -768,7 +770,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let engine = engine.clone();
         let force_render = force_render.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let tabs_model = tabs_model.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
@@ -780,14 +782,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tabs_model.push(TabInfo {
                 index: next_index,
                 name,
-                is_console: false,
+                is_terminal_tab: false,
             });
             if let Some(ui) = ui_tabs.upgrade() {
                 ui.set_active_tab_index(next_index);
                 ui.set_filters_editable(true);
                 ui.set_filter_draft(SharedString::default());
             }
-            console_active.set(false);
+            terminal_tab_active.set(false);
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
         });
@@ -796,7 +798,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let engine = engine.clone();
         let force_render = force_render.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let tabs_model = tabs_model.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
@@ -837,7 +839,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_can_restore_tab(true);
                 ui.set_filters_editable(new_active != 0);
             }
-            console_active.set(new_active == 0);
+            terminal_tab_active.set(new_active == 0);
             force_render.set(true);
             bump_fast_timer(&timer, &timer_fast);
         });
@@ -846,13 +848,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let engine = engine.clone();
         let force_render = force_render.clone();
-        let console_active = console_active.clone();
+        let terminal_tab_active = terminal_tab_active.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
         let ui_tabs = ui.as_weak();
         ui.on_tab_restore(move || {
             let _ = engine.borrow_mut().send_command(Command::TabRestore);
-            console_active.set(false);
+            terminal_tab_active.set(false);
             if let Some(ui) = ui_tabs.upgrade() {
                 ui.set_filters_editable(true);
             }
@@ -1341,7 +1343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tabs_tick = tabs_model.clone();
     let terminals_tick = terminals_model.clone();
     let filters_tick = filters_model.clone();
-    let console_tick = console_active.clone();
+    let terminal_tab_tick = terminal_tab_active.clone();
     let timer_tick = timer.clone();
     let timer_fast_tick = timer_fast.clone();
     let window_occluded_tick = window_occluded.clone();
@@ -1371,7 +1373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tabs_tick = tabs_tick.clone();
         let terminals_tick = terminals_tick.clone();
         let filters_tick = filters_tick.clone();
-        let console_tick = console_tick.clone();
+        let terminal_tab_tick = terminal_tab_tick.clone();
         let timer_tick = timer_tick.clone();
         let timer_fast_tick = timer_fast_tick.clone();
         let window_occluded_tick = window_occluded_tick.clone();
@@ -1436,7 +1438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &terminals_tick,
                                     &filters_tick,
                                     &ui,
-                                    &console_tick,
+                                    &terminal_tab_tick,
                                     &syncing_scroll_tick,
                                     &has_selection_tick,
                                     &pty_running_tick,
@@ -1484,7 +1486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Caret overlay tracks focus/tab/running even when the Image is idle.
                     let was_visible = ui.get_caret_visible();
-                    let now_visible = sync_console_caret(&ui, &eng, width, height, scale);
+                    let now_visible = sync_terminal_caret(&ui, &eng, width, height, scale);
                     // Shell often becomes ready after first focus — re-arm blink when caret appears.
                     if now_visible && !was_visible {
                         ui.set_caret_blink_on(true);
@@ -1507,7 +1509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Position may change with scroll/follow after paint.
                     let was_visible = ui.get_caret_visible();
-                    let now_visible = sync_console_caret(&ui, &eng, width, height, scale);
+                    let now_visible = sync_terminal_caret(&ui, &eng, width, height, scale);
                     if now_visible && !was_visible {
                         ui.set_caret_blink_on(true);
                     }
@@ -1599,7 +1601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 viewport_focused.set(true);
                 let mut eng = engine.borrow_mut();
-                arm_console_caret(&ui, &mut eng, *logical_size.borrow());
+                arm_terminal_caret(&ui, &mut eng, *logical_size.borrow());
                 force_render.set(true);
                 bump_fast_timer(&timer, &timer_fast);
             });

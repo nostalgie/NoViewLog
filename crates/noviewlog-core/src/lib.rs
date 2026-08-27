@@ -11,7 +11,8 @@
 //!   process, or read-only file.
 //! - **Tab / View** — filter view inside a terminal ([`log_view::LogView`]).
 //!   JSON/UI commands use the name `tab_*`; the Rust type is `LogView`.
-//! - **Console** — built-in first tab (index 0).
+//! - **Terminal tab** — built-in first tab (index 0); display name
+//!   [`TERMINAL_TAB_NAME`].
 //!
 //! See `docs/architecture.md` in the repo root.
 //!
@@ -38,6 +39,7 @@ pub use engine::{
     parse_engine_event, Command, Engine, EngineEvent, StatsSnapshot, StatsTab, StatsTerminal,
     CARET_BLINK_PERIOD,
 };
+pub use log_view::TERMINAL_TAB_NAME;
 
 #[cfg(test)]
 mod tests;

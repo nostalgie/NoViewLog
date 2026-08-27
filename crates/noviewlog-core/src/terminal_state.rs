@@ -1,7 +1,7 @@
 //! Per-terminal session state (`TerminalState`).
 //!
 //! A **terminal** is an independent session (PTY shell, process, or read-only
-//! log file). Inside it, `views` holds Console + filter tabs (`LogView`).
+//! log file). Inside it, `views` holds the Terminal tab plus filter tabs (`LogView`).
 //! JSON/UI still call those tabs via `tab_*` commands.
 
 use std::collections::VecDeque;
@@ -15,7 +15,7 @@ use crate::core::terminal::TerminalIngest;
 use crate::core::types::{LaunchConfig, LogFormat, TabConfig};
 use crate::file_index::FileBackedLog;
 use crate::file_load::FileLoadState;
-use crate::log_view::LogView;
+use crate::log_view::{LogView, TERMINAL_TAB_NAME};
 use crate::viewport_layout::TextSelection;
 
 pub const MAX_CLOSED_TABS: usize = 15;
@@ -29,7 +29,7 @@ pub struct PendingFileWindow {
     pub lines: Vec<String>,
 }
 
-/// Runtime state for one terminal session (shell/process + Console/filter tabs).
+/// Runtime state for one terminal session (shell/process + Terminal/filter tabs).
 pub struct TerminalState {
     pub id: String,
     /// Live working directory (spawn cwd, updated via OSC 7 when available).
@@ -78,7 +78,7 @@ impl TerminalState {
             cwd,
             custom_title: None,
             launch,
-            views: vec![LogView::from_runtime("Console", Vec::new())],
+            views: vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())],
             active_view: 0,
             closed_tabs: VecDeque::new(),
             buffer: RecordBuffer::new(max_records),
@@ -151,15 +151,15 @@ impl TerminalState {
         self.pending_file_window = None;
     }
 
-    pub fn ensure_console_view(&mut self, _runtime: &RuntimeConfig) {
+    pub fn ensure_terminal_tab_view(&mut self, _runtime: &RuntimeConfig) {
         if self.views.is_empty() {
-            self.views = vec![LogView::from_runtime("Console", Vec::new())];
+            self.views = vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())];
             self.active_view = 0;
             return;
         }
-        if let Some(console) = self.views.first_mut() {
-            if !console.filters().is_empty() {
-                console.clear_filters();
+        if let Some(terminal_tab) = self.views.first_mut() {
+            if !terminal_tab.filters().is_empty() {
+                terminal_tab.clear_filters();
             }
         }
         self.active_view = self.active_view.min(self.views.len() - 1);

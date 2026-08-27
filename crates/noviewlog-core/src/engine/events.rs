@@ -14,7 +14,7 @@ pub struct StatsTab {
     pub index: usize,
     pub name: String,
     #[serde(default)]
-    pub is_console: bool,
+    pub is_terminal_tab: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,9 +54,9 @@ pub struct StatsSnapshot {
     #[serde(default)]
     pub tab_count: usize,
     #[serde(default)]
-    pub console_tab: usize,
+    pub terminal_tab: usize,
     #[serde(default)]
-    pub is_console_tab: bool,
+    pub is_terminal_tab: bool,
     #[serde(default)]
     pub tabs: Vec<StatsTab>,
     #[serde(default)]
@@ -189,11 +189,11 @@ mod tests {
         "tab_name": "Errors",
         "active_tab": 1,
         "tab_count": 2,
-        "console_tab": 0,
-        "is_console_tab": false,
+        "terminal_tab": 0,
+        "is_terminal_tab": false,
         "tabs": [
-            {"index": 0, "name": "Console", "is_console": true},
-            {"index": 1, "name": "Errors", "is_console": false}
+            {"index": 0, "name": "Terminal", "is_terminal_tab": true},
+            {"index": 1, "name": "Errors", "is_terminal_tab": false}
         ],
         "dropped": 0,
         "formats": ["raw"],
@@ -253,8 +253,8 @@ mod tests {
         assert_eq!(s.search_counter, "1/3");
         assert_eq!(s.max_scrollback_lines, 10_000);
         assert_eq!(s.tabs.len(), 2);
-        assert_eq!(s.tabs[0].name, "Console");
-        assert!(s.tabs[0].is_console);
+        assert_eq!(s.tabs[0].name, "Terminal");
+        assert!(s.tabs[0].is_terminal_tab);
         assert_eq!(s.terminals.len(), 1);
         assert_eq!(s.terminals[0].id, "t0");
         assert_eq!(s.filters.len(), 1);

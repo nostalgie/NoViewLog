@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use noviewlog_core::core::types::{clamp_max_scrollback_lines, FilterType};
-use noviewlog_core::StatsSnapshot;
+use noviewlog_core::{StatsSnapshot, TERMINAL_TAB_NAME};
 use slint::{Model, SharedString, Timer, VecModel};
 
 use crate::ui::{AppWindow, FilterInfo, TabInfo, TerminalInfo};
@@ -21,7 +21,7 @@ pub(crate) fn apply_stats(
     terminals: &Rc<VecModel<TerminalInfo>>,
     filters: &Rc<VecModel<FilterInfo>>,
     ui: &AppWindow,
-    console_active: &Rc<Cell<bool>>,
+    terminal_tab_active: &Rc<Cell<bool>>,
     syncing_scroll: &Rc<Cell<bool>>,
     has_selection: &Rc<Cell<bool>>,
     pty_running: &Rc<Cell<bool>>,
@@ -32,7 +32,7 @@ pub(crate) fn apply_stats(
     find_pending: &Rc<RefCell<FindPending>>,
     find_debounce: &Rc<Timer>,
 ) -> bool {
-    let tabs_changed = apply_stats_to_tabs(stats, tabs, ui, console_active);
+    let tabs_changed = apply_stats_to_tabs(stats, tabs, ui, terminal_tab_active);
     let terms_changed = apply_stats_to_terminals(stats, terminals, ui);
     let filters_changed = apply_stats_to_filters(stats, filters, ui);
     apply_stats_to_find(
@@ -54,11 +54,11 @@ fn apply_stats_to_tabs(
     stats: &StatsSnapshot,
     tabs: &Rc<VecModel<TabInfo>>,
     ui: &AppWindow,
-    console_active: &Rc<Cell<bool>>,
+    terminal_tab_active: &Rc<Cell<bool>>,
 ) -> bool {
     let active = stats.active_tab as i32;
     let can_restore = stats.can_restore_closed_tab;
-    let is_console = stats.is_console_tab;
+    let is_terminal_tab = stats.is_terminal_tab;
 
     let mut changed = false;
     if ui.get_active_tab_index() != active {
@@ -69,7 +69,7 @@ fn apply_stats_to_tabs(
         ui.set_can_restore_tab(can_restore);
         changed = true;
     }
-    console_active.set(is_console);
+    terminal_tab_active.set(is_terminal_tab);
 
     let next: Vec<TabInfo> = stats
         .tabs
@@ -78,7 +78,7 @@ fn apply_stats_to_tabs(
             let index = tab.index as i32;
             let name = if tab.name.is_empty() {
                 if index == 0 {
-                    "Console"
+                    TERMINAL_TAB_NAME
                 } else {
                     "Tab"
                 }
@@ -88,7 +88,7 @@ fn apply_stats_to_tabs(
             TabInfo {
                 index,
                 name: SharedString::from(name),
-                is_console: tab.is_console,
+                is_terminal_tab: tab.is_terminal_tab,
             }
         })
         .collect();
@@ -166,7 +166,7 @@ fn tabs_model_differs(model: &VecModel<TabInfo>, next: &[TabInfo]) -> bool {
         let Some(cur) = model.row_data(i) else {
             return true;
         };
-        if cur.index != tab.index || cur.is_console != tab.is_console || cur.name != tab.name {
+        if cur.index != tab.index || cur.is_terminal_tab != tab.is_terminal_tab || cur.name != tab.name {
             return true;
         }
     }
@@ -199,8 +199,8 @@ fn apply_stats_to_filters(
     ui: &AppWindow,
 ) -> bool {
     let active = stats.active_tab as i32;
-    let is_console = stats.is_console_tab;
-    let editable = !is_console && active != 0;
+    let is_terminal_tab = stats.is_terminal_tab;
+    let editable = !is_terminal_tab && active != 0;
     let mut changed = false;
     if ui.get_filters_editable() != editable {
         ui.set_filters_editable(editable);
@@ -404,18 +404,18 @@ fn apply_stats_to_view_chrome(
 
     let tab_count = stats.tab_count as i32;
     let active = stats.active_tab as i32;
-    let is_console = stats.is_console_tab;
+    let is_terminal_tab = stats.is_terminal_tab;
     let can_restore = stats.can_restore_closed_tab;
-    let on_console = is_console || active == 0;
-    let can_close = tab_count > 1 && !on_console;
+    let on_terminal_tab = is_terminal_tab || active == 0;
+    let can_close = tab_count > 1 && !on_terminal_tab;
     if ui.get_can_close_tab() != can_close {
         ui.set_can_close_tab(can_close);
     }
     if ui.get_can_restore_tab() != can_restore {
         ui.set_can_restore_tab(can_restore);
     }
-    // Console must not be renamed — mirror Close enablement for Tab → Rename.
-    let can_rename = !on_console;
+    // The Terminal tab must not be renamed — mirror Close enablement for Tab → Rename.
+    let can_rename = !on_terminal_tab;
     if ui.get_can_rename_tab() != can_rename {
         ui.set_can_rename_tab(can_rename);
     }

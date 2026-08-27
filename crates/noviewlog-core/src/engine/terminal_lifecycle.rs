@@ -161,7 +161,7 @@ impl Engine {
         self.flush_idle_pending();
     }
 
-    /// Patch Console flat lines for a volatile VT update; dirty other views.
+    /// Patch Terminal tab flat lines for a volatile VT update; dirty other views.
     fn apply_active_pty_bytes_to_views(
         &mut self,
         term_idx: usize,
@@ -171,24 +171,24 @@ impl Engine {
         new_total: usize,
     ) {
         let terminal = &mut self.terminals[term_idx];
-        // Non-console views catch up on switch.
+        // Filter tabs catch up on switch.
         for (i, view) in terminal.views.iter_mut().enumerate() {
             if i == 0 {
                 continue;
             }
             view.mark_flat_lines_dirty();
         }
-        let Some(console) = terminal.views.get_mut(0) else {
+        let Some(terminal_tab) = terminal.views.get_mut(0) else {
             return;
         };
-        if !console.try_patch_volatile_tail(
+        if !terminal_tab.try_patch_volatile_tail(
             &terminal.buffer,
             old_volatile,
             old_total,
             new_volatile,
             new_total,
         ) {
-            console.mark_flat_lines_dirty();
+            terminal_tab.mark_flat_lines_dirty();
         }
     }
 

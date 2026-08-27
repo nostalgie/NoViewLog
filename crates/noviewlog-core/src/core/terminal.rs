@@ -1029,7 +1029,7 @@ impl TerminalIngest {
         self.volatile_count
     }
 
-    /// Caret for the Console viewport, relative to the volatile tail.
+    /// Caret for the Terminal tab viewport, relative to the volatile tail.
     /// `None` when the cursor is hidden (`CSI ?25l`).
     pub fn viewport_caret(&self) -> Option<ScreenCursor> {
         if !self.emu.cursor_visible() {

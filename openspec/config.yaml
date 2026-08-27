@@ -12,7 +12,7 @@ context: |
   Domain vocabulary (see docs/architecture.md):
   - Terminal: independent PTY shell, process, or read-only log file session
   - Tab / View: filter view inside a terminal (LogView); JSON commands use tab_*
-  - Console: built-in first tab (index 0); not filter-editable
+  - Terminal tab: built-in first tab (index 0); display name Terminal; not filter-editable
   - Record: parsed log unit (may span multiple physical lines)
   - Viewport: fontdue-rendered RGBA bitmap of the visible slice
 
@@ -50,7 +50,7 @@ rules:
     - Reference existing docs (docs/architecture.md, docs/terminals.md) when relevant
   specs:
     - Use SHALL requirements with Given/When/Then scenarios
-    - Use project vocabulary: Terminal, Tab/View, Console, Record, Viewport
+    - Use project vocabulary: Terminal, Tab/View, Terminal tab, Record, Viewport
   design:
     - Identify engine ↔ Slint boundary and cite key modules
     - Note dual ANSI paths (terminal.rs vs ansi.rs) when touching coloring
