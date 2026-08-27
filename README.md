@@ -10,11 +10,36 @@ work, but they are not the main development focus yet.
 
 ## Features
 
-- Launch commands through a PTY or open existing log files
-- Run multiple independent terminal sessions
-- Group multiline records such as stack traces
-- Add include and exclude filters, presets, and per-tab searches
-- Follow live output and navigate large files with a virtualized viewport
+### Sessions
+
+- Launch a command through a PTY (`bash scripts/run-slint.sh -- …`) or open a log file (CLI path, `--file` / `-f`, or File → Open log file)
+- Run multiple independent terminals; switching the viewport does not stop other sessions
+- Type into a live process on the Console tab; copy and paste (including middle-click paste)
+- Open a log in a dedicated view-only file terminal (no PTY or stdin); reopening the same path switches to it and reloads
+- Sidebar: add or close terminals (the first stays), rename, and drag-reorder; the working directory updates via OSC 7
+
+### Tabs and filters
+
+- Each terminal has a pinned Console tab (not filter-editable) plus optional filter tabs
+- Include and exclude rules (literal or regex): add, toggle, edit, and remove; the draft highlights matches while you type
+- After include/exclude, a per-tab severity mode: All, Errors, Warnings, Info, Debug, or Unleveled
+- Add, close, restore the last closed tab, rename, and drag-reorder filter tabs (Console stays at index 0)
+
+### Find and viewport
+
+- Find bar (Ctrl/Cmd+F): case, whole word, and regex; next/previous match and match count
+- Follow live output; wrap lines or scroll horizontally; virtualized viewport for large files
+- Zoom (View menu, Ctrl/Cmd +/−/0, or Ctrl+wheel); font size is saved in config
+- Select text (drag, double-click a word, triple-click a record) and copy
+- ANSI colors; multiline records such as stack traces are grouped and collapsed by default (click to expand, or View → Expand/Collapse all)
+- Severity gutter cues on leveled records
+
+### Config
+
+- User config: `~/.config/noviewlog/config.yaml`
+- Settings: maximum scrollback lines
+- Bundled preset [`presets/node-dev.yaml`](presets/node-dev.yaml) at launch with `--preset` / `-p` (no in-app preset manager)
+- Other CLI flags: `--file` / `-f`, `--config` / `-c`
 
 ## Run (Ubuntu / Linux)
 
@@ -101,6 +126,8 @@ cargo test -p noviewlog-core --lib
 1. Exclude rules hide matching records.
 2. If any include rule is active, a record must match at least one.
 3. Exclude rules take precedence.
+
+Severity is applied after include/exclude and is not saved in `config.yaml`.
 
 ## License
 
