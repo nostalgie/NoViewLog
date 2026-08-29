@@ -22,7 +22,7 @@ fn strapi_capture_end_to_end_flat_lines() {
         ingest.finish(&mut buffer, &mut parser);
 
         let flat = rebuild_flat_lines(
-            &buffer,
+            &mut buffer,
             &FilterEngine::default(),
             crate::core::types::SeverityFilter::All,
             &std::collections::HashSet::new(),

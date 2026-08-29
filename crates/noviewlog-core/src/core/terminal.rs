@@ -924,8 +924,8 @@ impl TerminalIngest {
         }
         self.strip_volatile(buffer);
         self.emu.resize(cols, rows);
-        self.commit_available(buffer, parser);
-        self.restore_volatile(buffer);
+        let _ = self.commit_available(buffer, parser);
+        let _ = self.restore_volatile(buffer);
     }
 
     fn strip_volatile(&mut self, buffer: &mut RecordBuffer) {
@@ -935,42 +935,45 @@ impl TerminalIngest {
         }
     }
 
-    fn restore_volatile(&mut self, buffer: &mut RecordBuffer) {
+    fn restore_volatile(&mut self, buffer: &mut RecordBuffer) -> usize {
         let lines = self.emu.screen_lines();
         self.volatile_count = lines.len();
+        let mut shifted = 0usize;
         for line in lines {
             self.volatile_id = self.volatile_id.wrapping_add(1);
-            buffer.add(make_volatile_record(self.volatile_id, &line));
+            shifted += buffer.add(make_volatile_record(self.volatile_id, &line));
         }
+        shifted
     }
 
-    fn commit_available(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) {
+    fn commit_available(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) -> usize {
+        let mut shifted = 0usize;
         for line in self.emu.take_committed() {
             for record in parser.push_line(line) {
-                buffer.add(record);
+                shifted += buffer.add(record);
             }
         }
         // Scrolled-off lines that are still "open" in the RecordParser would
         // otherwise sit invisible in pending until the next line or idle_flush
         // (~120ms) — Follow sees them vanish and reappear. Flush immediately.
         if let Some(rec) = parser.flush_pending() {
-            buffer.add(rec);
+            shifted += buffer.add(rec);
         }
+        shifted
     }
 
-    /// Feed a raw PTY byte chunk. Returns true if the buffer changed.
-    /// Also applies any OSC 7 cwd update into `cwd_out` when provided.
+    /// Feed a raw PTY byte chunk. Returns raw lines dropped from the ring (scrollback trim).
     pub fn feed(
         &mut self,
         bytes: &[u8],
         buffer: &mut RecordBuffer,
         parser: &mut RecordParser,
-    ) -> bool {
+    ) -> usize {
         self.strip_volatile(buffer);
         self.parser.advance(&mut self.emu, bytes);
-        self.commit_available(buffer, parser);
-        self.restore_volatile(buffer);
-        true
+        let mut shifted = self.commit_available(buffer, parser);
+        shifted += self.restore_volatile(buffer);
+        shifted
     }
 
     pub fn take_cwd_update(&mut self) -> Option<String> {
@@ -987,7 +990,7 @@ impl TerminalIngest {
         if let Some(rec) = parser.flush_pending() {
             buffer.add(rec);
         }
-        self.restore_volatile(buffer);
+        let _ = self.restore_volatile(buffer);
         true
     }
 
@@ -995,7 +998,7 @@ impl TerminalIngest {
     pub fn finish(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) {
         self.strip_volatile(buffer);
         self.emu.flush_all();
-        self.commit_available(buffer, parser);
+        let _ = self.commit_available(buffer, parser);
         if let Some(rec) = parser.flush_pending() {
             buffer.add(rec);
         }
@@ -1021,7 +1024,7 @@ impl TerminalIngest {
         if self.volatile_count > 0 {
             return;
         }
-        self.restore_volatile(buffer);
+        let _ = self.restore_volatile(buffer);
     }
 
     /// Number of live (volatile) records currently appended to the buffer.

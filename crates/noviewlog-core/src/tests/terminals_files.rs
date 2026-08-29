@@ -575,3 +575,160 @@ fn can_close_file_while_keeping_last_live() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn file_scrollbar_mid_jump_loads_window_not_black() {
+    use crate::engine::{Command, Engine};
+    use std::io::Write;
+
+    // Must be > FILE_LARGE_BYTES so only a sliding window is kept in memory.
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-scroll-mid-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        let pad = "x".repeat(100);
+        for i in 0..200_000 {
+            writeln!(f, "line-{i:06}-{pad}").unwrap();
+        }
+    }
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
+        .expect("resize");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    assert!(engine.active_is_file_session_for_test());
+
+    let max = engine.max_scroll_offset_for_test();
+    assert!(
+        max > 1000.0,
+        "whole-file max_scroll should be large, got {max}"
+    );
+    let mid = max * 0.5;
+    engine
+        .send_command(Command::Scroll { offset: mid })
+        .expect("scroll mid");
+    engine.finish_pending_file_window_for_test();
+    engine.rebuild_if_needed_for_test();
+
+    let start = engine.buffer_line_start_for_test();
+    let end = engine.buffer_line_end_for_test();
+    assert!(
+        end > start,
+        "window must be non-empty start={start} end={end}"
+    );
+    // Mid of a large file must not leave the viewport on the initial tail-only window forever.
+    let total_ish = (max / engine.viewport_row_stride_for_test()) as u64;
+    assert!(
+        start < total_ish / 2 + 5_000 && end > total_ish / 2 - 5_000,
+        "window should cover mid-file region, start={start} end={end} mid≈{}",
+        total_ish / 2
+    );
+    let local = engine.scroll_offset_y_for_test();
+    let local_max = engine.local_window_max_scroll_for_test();
+    assert!(
+        local <= local_max + 1.0,
+        "local scroll must stay in the loaded window (local={local} max={local_max})"
+    );
+
+    let mut rgba = vec![0u8; 800 * 400 * 4];
+    engine.render(800, 400, &mut rgba).expect("render");
+    let lit = rgba.chunks_exact(4).filter(|px| px[0] | px[1] | px[2] > 0x20).count();
+    assert!(
+        lit > 200,
+        "mid-file paint must show glyphs, not an empty/black frame (lit={lit})"
+    );
+
+    let (cur, total) = engine.viewport_line_position_for_test();
+    assert!(total > 0, "line position total");
+    assert!(
+        cur > total / 4 && cur < total * 3 / 4,
+        "mid scroll should report mid line position cur={cur} total={total}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn file_scrollbar_reaches_eof() {
+    use crate::engine::{Command, Engine};
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-scroll-eof-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        let pad = "x".repeat(100);
+        for i in 0..200_000 {
+            writeln!(f, "line-{i:06}-{pad}").unwrap();
+        }
+    }
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
+        .expect("resize");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+
+    let total = engine.file_total_lines_for_test();
+    let window = engine.file_view_window_lines_for_test() as u64;
+    assert!(total > window * 2);
+
+    let max = engine.max_scroll_offset_for_test();
+    engine
+        .send_command(Command::Scroll { offset: max })
+        .expect("scroll eof");
+    engine.finish_pending_file_window_for_test();
+    engine.rebuild_if_needed_for_test();
+
+    let start = engine.buffer_line_start_for_test();
+    let expected_start = total.saturating_sub(window);
+    assert_eq!(
+        start, expected_start,
+        "EOF scroll must pin the last window"
+    );
+    let local = engine.scroll_offset_y_for_test();
+    let local_max = engine.local_window_max_scroll_for_test();
+    assert!(
+        (local - local_max).abs() < engine.viewport_row_stride_for_test(),
+        "EOF local scroll should be at local max (local={local} max={local_max})"
+    );
+    let max_after = engine.max_scroll_offset_for_test();
+    let global = engine.stats_scroll_y_for_test();
+    assert!(
+        (global - max_after).abs() < engine.viewport_row_stride_for_test() * 2.0,
+        "stats scroll_y should stick at max after EOF (global={global} max={max_after})"
+    );
+
+    // Second nudge to max while already on last window.
+    engine
+        .send_command(Command::Scroll {
+            offset: engine.max_scroll_offset_for_test(),
+        })
+        .expect("scroll eof again");
+    engine.finish_pending_file_window_for_test();
+    assert_eq!(engine.buffer_line_start_for_test(), expected_start);
+    let (cur, tot) = engine.viewport_line_position_for_test();
+    assert_eq!(tot, total);
+    assert_eq!(
+        cur, tot,
+        "at EOF status must show N / N (bottom of viewport), got {cur} / {tot}"
+    );
+
+    let mut rgba = vec![0u8; 800 * 400 * 4];
+    engine.render(800, 400, &mut rgba).expect("render");
+    let lit = rgba.chunks_exact(4).filter(|px| px[0] | px[1] | px[2] > 0x20).count();
+    assert!(lit > 200, "EOF paint must show content lit={lit}");
+
+    let _ = std::fs::remove_file(&path);
+}
+

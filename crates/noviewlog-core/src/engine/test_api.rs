@@ -138,7 +138,7 @@ impl Engine {
         if !self.has_active_terminal() {
             return 0;
         }
-        self.active_terminal().buffer.records().len()
+        self.active_terminal().buffer.records_len()
     }
 
     #[cfg(test)]
@@ -226,6 +226,45 @@ impl Engine {
 
     pub fn max_scroll_offset_for_test(&self) -> f32 {
         self.max_scroll_offset()
+    }
+
+    #[cfg(test)]
+    pub fn stats_scroll_y_for_test(&self) -> f32 {
+        self.stats_scroll_y()
+    }
+
+    #[cfg(test)]
+    pub fn buffer_line_start_for_test(&self) -> u64 {
+        self.active_terminal().buffer_line_start
+    }
+
+    #[cfg(test)]
+    pub fn buffer_line_end_for_test(&self) -> u64 {
+        self.active_terminal().buffer_line_end
+    }
+
+    #[cfg(test)]
+    pub fn local_window_max_scroll_for_test(&self) -> f32 {
+        self.local_window_max_scroll()
+    }
+
+    #[cfg(test)]
+    pub fn viewport_line_position_for_test(&self) -> (u64, u64) {
+        self.viewport_line_position()
+    }
+
+    #[cfg(test)]
+    pub fn file_view_window_lines_for_test(&self) -> usize {
+        self.file_view_window_lines()
+    }
+
+    #[cfg(test)]
+    pub fn file_total_lines_for_test(&self) -> u64 {
+        self.active_terminal()
+            .file_backed
+            .as_ref()
+            .map(|b| b.index.total_lines())
+            .unwrap_or(0)
     }
 
     #[cfg(test)]

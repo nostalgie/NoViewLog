@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,12 @@ const MIN_PTY_COLS: u16 = 500;
 pub(crate) const PREFETCH_SCROLL_PX: f32 = 120.0;
 /// Raw file lines read per tick while swapping the in-memory sliding window.
 pub(crate) const FILE_WINDOW_LINES_PER_TICK: usize = 2_000;
+/// Bound pending PTY `Bytes` events (~4 KB each) so the reader blocks under flood.
+/// 384 × 4 KB ≈ 1.5 MB of queued output before kernel backpressure stalls the writer.
+pub(crate) const PTY_QUEUE_CAPACITY: usize = 384;
+/// Max PTY bytes fed through VTE / scrollback on a single UI tick.
+/// Kept below ~512 KB so Follow paints stay smooth while still draining floods promptly.
+pub(crate) const PTY_INGEST_BYTES_PER_TICK: usize = 256 * 1024;
 
 
 mod commands;
@@ -73,9 +79,15 @@ pub struct Engine {
     pub(crate) formats: HashMap<String, LogFormat>,
     pub(crate) ptys: HashMap<String, PtyManager>,
     pub(crate) pty_rx: Receiver<PtyEvent>,
-    pub(crate) pty_tx: Sender<PtyEvent>,
+    pub(crate) pty_tx: SyncSender<PtyEvent>,
     /// Host callback when PTY bytes/exit are posted (coalesced wake).
     pub(crate) pty_activity_wake: Option<PtyActivityWake>,
+    /// Leftover `Bytes`/`Exit` held after a budgeted `poll_pty` (cannot push back to mpsc).
+    pub(crate) pty_hold: Option<PtyEvent>,
+    /// Set when `poll_pty` hits the ingest budget with more work left.
+    /// Host must schedule another tick via its timer — do **not** wake mid-tick
+    /// (that caused a HOST_TICK busy-loop under `cat` floods).
+    pub(crate) pty_drain_pending: bool,
     pub(crate) status_message: String,
     pub(crate) events: VecDeque<String>,
     pub(crate) viewport_width: u32,
@@ -98,7 +110,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        let (pty_tx, pty_rx) = std::sync::mpsc::channel();
+        let (pty_tx, pty_rx) = std::sync::mpsc::sync_channel(PTY_QUEUE_CAPACITY);
         let mut config = load_bundled_config();
         if let Some(user) = load_user_config() {
             config = user;
@@ -141,6 +153,8 @@ impl Engine {
             pty_rx,
             pty_tx,
             pty_activity_wake: None,
+            pty_hold: None,
+            pty_drain_pending: false,
             status_message: String::new(),
             events: VecDeque::new(),
             viewport_width: 800,
@@ -302,13 +316,16 @@ impl Engine {
             LEFT_PAD as i32 - scroll_x as i32
         };
         let max_rows = (height as f32 / metrics.row_stride).ceil() as usize + 1;
-        let visual = crate::viewport_layout::collect_visible_visual_lines(
+        let index = view.ensure_visual_row_index(width, metrics.cell_width);
+        let visual = crate::viewport_layout::collect_visible_visual_lines_with_total(
             flat_lines,
             wrap_lines,
             width,
             metrics.cell_width,
             first_row,
             max_rows,
+            Some(index.total_rows()),
+            Some(index.as_ref()),
         );
         let (cx, cy) = crate::viewport::caret_pixel_pos(
             flat_lines,
@@ -329,6 +346,18 @@ impl Engine {
     /// Register a host wake when PTY bytes or exit are posted (from the reader thread).
     pub fn set_pty_activity_wake(&mut self, wake: PtyActivityWake) {
         self.pty_activity_wake = Some(wake);
+    }
+
+    /// True when budgeted PTY ingest left work for a later tick (`pty_hold` or drain flag).
+    pub fn pty_work_pending(&self) -> bool {
+        self.pty_drain_pending || self.pty_hold.is_some()
+    }
+
+    /// Clear and return whether a drain was requested after the last `poll_pty`.
+    pub fn take_pty_drain_pending(&mut self) -> bool {
+        let pending = self.pty_drain_pending || self.pty_hold.is_some();
+        self.pty_drain_pending = false;
+        pending
     }
 
     pub(crate) fn set_viewport_focus(&mut self, focused: bool) {
@@ -445,6 +474,16 @@ impl Engine {
             self.scroll_to_row_index(row);
         }
 
+        // FILES: never paint with local scroll past the loaded window (black frames).
+        if self.active_terminal().is_file_session() && self.active_terminal().file_backed.is_some()
+        {
+            let local_max = self.local_window_max_scroll();
+            let terminal = self.active_terminal_mut();
+            if terminal.scroll_offset_y > local_max {
+                terminal.scroll_offset_y = local_max;
+            }
+        }
+
         let (auto_follow, wrap_lines, flat_lines, search_pattern, active_match, running, scroll_offset_y, scroll_x, selection) = {
             let terminal = self.active_terminal();
             let view = terminal.active_view();
@@ -497,8 +536,14 @@ impl Engine {
         }
         let effective_scroll_x = if wrap_lines { 0.0 } else { scroll_x };
 
+        let metrics = self.renderer.metrics();
+        let index = self
+            .active_view()
+            .ensure_visual_row_index(width, metrics.cell_width);
+        let total_rows = index.total_rows();
+
         // Caret is drawn by the Slint host overlay — keep the bitmap content-only.
-        self.renderer.render(
+        self.renderer.render_with_total(
             out,
             width,
             height,
@@ -511,6 +556,8 @@ impl Engine {
             filter_draft_pattern.as_ref(),
             active_match,
             None,
+            Some(total_rows),
+            Some(index.as_ref()),
         )?;
         self.viewport_dirty = false;
         Ok(())
@@ -701,7 +748,13 @@ impl Engine {
         let before_records = view.flat_lines_record_cursor;
         let before_lines = view.flat_lines.len();
         let search_was_dirty = view.is_search_dirty();
-        let scroll_row = view.rebuild(&terminal.buffer);
+        // Partial borrow: view + buffer are distinct fields.
+        let scroll_row = {
+            let TerminalState { views, buffer, .. } = terminal;
+            let view = views.get_mut(active).expect("active view");
+            view.rebuild(buffer)
+        };
+        let view = terminal.views.get_mut(active).expect("active view");
         let changed = search_was_dirty
             || view.flat_lines_record_cursor != before_records
             || view.flat_lines.len() != before_lines;

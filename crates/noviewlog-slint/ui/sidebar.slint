@@ -767,7 +767,9 @@ export component TerminalRow inherits TouchArea {
     HorizontalLayout {
         width: 100%;
         height: 100%;
-        padding-left: 8px;
+        // Indent past section chevron so ● sits under "TERMINALS"/"FILES" text,
+        // not under ▾/▸ (header: 8px pad + 20px chevron + 4px gap ≈ 32px).
+        padding-left: 32px;
         // 6px content + 10px reserved for overlaid V-scrollbar slot.
         padding-right: 16px;
         spacing: 8px;
@@ -921,8 +923,12 @@ export component TerminalRow inherits TouchArea {
 }
 
 // Engine-synced scrollbar (std-widgets ScrollBar is not exported). Units match
-// engine scroll_y / scroll_x (device pixels). Thumb size uses page-size.
-// Thickness is 10px everywhere (tabs H bar is the reference).
+// engine scroll_y / scroll_x (device pixels).
+//
+// Thumb geometry MUST match `noviewlog_core::scrollbar_math::thumb_offset_len`:
+// travel = track - thumb_len where thumb_len = max(24px, track * page/range).
+// Using fractional travel (1 - page/range) with a 24px min thumb overflows the
+// track at value==maximum and paints into the status bar on large FILES.
 export component EngineScrollBar inherits Rectangle {
     in property <bool> horizontal: false;
     in-out property <float> value: 0.0;
@@ -933,6 +939,7 @@ export component EngineScrollBar inherits Rectangle {
 
     background: Theme.bg-input;
     border-width: 0px;
+    clip: true;
     // Layout parents must stretch us; default Rectangle preferred size is 0.
     vertical-stretch: root.horizontal ? 0 : 1;
     horizontal-stretch: root.horizontal ? 1 : 0;
@@ -941,14 +948,22 @@ export component EngineScrollBar inherits Rectangle {
 
     property <float> range: max(0.001, root.maximum + max(1.0, root.page-size));
     property <float> thumb-frac: root.maximum <= 0.5 ? 1.0 : min(1.0, max(1.0, root.page-size) / root.range);
-    property <float> thumb-travel: max(0.0, 1.0 - root.thumb-frac);
-    property <float> thumb-pos: root.maximum <= 0.5 ? 0.0 : (clamp(root.value, 0.0, root.maximum) / max(0.001, root.maximum)) * root.thumb-travel;
+
+    // Pixel track / thumb / travel (same as scrollbar_math).
+    property <length> track-len: root.horizontal ? root.width : root.height;
+    property <length> thumb-len: root.maximum <= 0.5
+        ? root.track-len
+        : min(root.track-len, max(24px, root.track-len * root.thumb-frac));
+    property <length> travel-px: max(0px, root.track-len - root.thumb-len);
+    property <length> thumb-offset: root.maximum <= 0.5
+        ? 0px
+        : root.travel-px * (clamp(root.value, 0.0, root.maximum) / max(0.001, root.maximum));
 
     thumb := Rectangle {
-        width: root.horizontal ? max(24px, parent.width * root.thumb-frac) : parent.width - 4px;
-        height: root.horizontal ? parent.height - 4px : max(24px, parent.height * root.thumb-frac);
-        x: root.horizontal ? parent.width * root.thumb-pos : 2px;
-        y: root.horizontal ? 2px : parent.height * root.thumb-pos;
+        width: root.horizontal ? root.thumb-len : parent.width - 4px;
+        height: root.horizontal ? parent.height - 4px : root.thumb-len;
+        x: root.horizontal ? root.thumb-offset : 2px;
+        y: root.horizontal ? 2px : root.thumb-offset;
         border-radius: 4px;
         background: !root.enabled || root.maximum <= 0.5
             ? Theme.border

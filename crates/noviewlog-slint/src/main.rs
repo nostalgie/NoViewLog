@@ -1355,12 +1355,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let find_stats_tab_tick = find_stats_tab.clone();
 
     // Shared tick body so the PTY reader can wake the UI without waiting for TICK_FAST.
+    //
+    // Terminal-first: under flood we must drain promptly *and* stay interactive like a
+    // normal OS terminal. Never tight-loop ingest+paint inside one HOST_TICK entry —
+    // that starved Slint's event loop (`cat ~/big.log` → ~70% CPU, black viewport).
+    // One pass, then yield; if more PTY work remains, schedule the next tick on the
+    // event loop (input/redraw get a turn between chunks).
     let ticking = Arc::new(AtomicBool::new(false));
     let needs_retick = Arc::new(AtomicBool::new(false));
+    let host_tick_queued = Arc::new(AtomicBool::new(false));
+
+    let schedule_host_tick: Arc<dyn Fn() + Send + Sync> = {
+        let host_tick_queued = host_tick_queued.clone();
+        Arc::new(move || {
+            if host_tick_queued.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let host_tick_queued = host_tick_queued.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                host_tick_queued.store(false, Ordering::Release);
+                HOST_TICK.with(|slot| {
+                    if let Some(f) = slot.borrow_mut().as_mut() {
+                        f();
+                    }
+                });
+            });
+        })
+    };
 
     {
         let ticking = ticking.clone();
         let needs_retick = needs_retick.clone();
+        let schedule_host_tick = schedule_host_tick.clone();
         let ui_weak = ui_weak.clone();
         let engine_tick = engine_tick.clone();
         let logical_tick = logical_tick.clone();
@@ -1391,137 +1417,150 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     needs_retick.store(true, Ordering::Release);
                     return;
                 }
-                loop {
-                    needs_retick.store(false, Ordering::Release);
+                needs_retick.store(false, Ordering::Release);
 
-                    let Some(ui) = ui_weak.upgrade() else {
-                        break;
-                    };
+                let Some(ui) = ui_weak.upgrade() else {
+                    ticking.store(false, Ordering::Release);
+                    return;
+                };
 
-                    let occluded = window_should_pause_paint(
-                        ui.window(),
-                        window_occluded_tick.get(),
-                        presented_tick.get(),
-                    );
+                let occluded = window_should_pause_paint(
+                    ui.window(),
+                    window_occluded_tick.get(),
+                    presented_tick.get(),
+                );
 
-                    let became_occluded = occluded && !was_occluded_tick.get();
-                    if was_occluded_tick.get() && !occluded {
-                        force_tick.set(true);
+                let became_occluded = occluded && !was_occluded_tick.get();
+                if was_occluded_tick.get() && !occluded {
+                    force_tick.set(true);
+                }
+                was_occluded_tick.set(occluded);
+
+                let mut eng = engine_tick.borrow_mut();
+                eng.tick();
+
+                if occluded {
+                    while eng.poll_event_json().is_some() {}
+                    if became_occluded || timer_fast_tick.get() {
+                        set_occluded_timer(&timer_tick, &timer_fast_tick);
                     }
-                    was_occluded_tick.set(occluded);
-
-                    let mut eng = engine_tick.borrow_mut();
-                    eng.tick();
-
-                    if occluded {
-                        while eng.poll_event_json().is_some() {}
-                        if became_occluded || timer_fast_tick.get() {
-                            set_occluded_timer(&timer_tick, &timer_fast_tick);
-                        }
-                        drop(eng);
-                        if !needs_retick.load(Ordering::Acquire) {
-                            break;
-                        }
-                        continue;
-                    }
-
-                    while let Some(ev) = eng.poll_event_json() {
-                        match parse_engine_event(&ev) {
-                            Some(EngineEvent::Stats(stats)) => {
-                                if apply_stats(
-                                    &stats,
-                                    &tabs_tick,
-                                    &terminals_tick,
-                                    &files_tick,
-                                    &filters_tick,
-                                    &ui,
-                                    &terminal_tab_tick,
-                                    &syncing_scroll_tick,
-                                    &has_selection_tick,
-                                    &pty_running_tick,
-                                    &viewport_font_size_tick,
-                                    &syncing_follow_tick,
-                                    &find_resync_tick,
-                                    &find_stats_tab_tick,
-                                    &find_pending_tick,
-                                    &find_debounce_tick,
-                                ) {
-                                    force_tick.set(true);
-                                }
-                            }
-                            Some(EngineEvent::Status { message }) => {
-                                ui.set_status_text(SharedString::from(message));
-                            }
-                            Some(EngineEvent::Exit { code, .. }) => {
-                                ui.set_status_text(SharedString::from(format!("exit {code}")));
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    let dirty = eng.needs_render() || force_tick.get();
-                    if dirty {
-                        bump_fast_timer(&timer_tick, &timer_fast_tick);
-                    } else if timer_fast_tick.get() {
-                        timer_tick.set_interval(TICK_IDLE);
-                        timer_fast_tick.set(false);
-                    }
-
-                    let (lw, lh) = *logical_tick.borrow();
-                    if lw <= 1.0 || lh <= 1.0 {
-                        drop(eng);
-                        if !needs_retick.load(Ordering::Acquire) {
-                            break;
-                        }
-                        continue;
-                    }
-                    let scale = ui.window().scale_factor().max(0.5) as f32;
-                    let width = (lw * scale).ceil().max(1.0) as u32;
-                    let height = (lh * scale).ceil().max(1.0) as u32;
-                    ui.set_viewport_page_w(width as f32);
-                    ui.set_viewport_page_h(height as f32);
-
-                    // Caret overlay tracks focus/tab/running even when the Image is idle.
-                    let was_visible = ui.get_caret_visible();
-                    let now_visible = sync_terminal_caret(&ui, &eng, width, height, scale);
-                    // Shell often becomes ready after first focus — re-arm blink when caret appears.
-                    if now_visible && !was_visible {
-                        ui.set_caret_blink_on(true);
-                    }
-
-                    if !dirty {
-                        drop(eng);
-                        if !needs_retick.load(Ordering::Acquire) {
-                            break;
-                        }
-                        continue;
-                    }
-                    force_tick.set(false);
-
-                    let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
-                    if let Err(err) = eng.render(width, height, buffer.make_mut_bytes()) {
-                        ui.set_status_text(SharedString::from(format!("render: {err}")));
-                        drop(eng);
-                        break;
-                    }
-                    // Position may change with scroll/follow after paint.
-                    let was_visible = ui.get_caret_visible();
-                    let now_visible = sync_terminal_caret(&ui, &eng, width, height, scale);
-                    if now_visible && !was_visible {
-                        ui.set_caret_blink_on(true);
-                    }
+                    let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
                     drop(eng);
-                    ui.set_viewport_image(Image::from_rgba8(buffer));
-                    if !presented_tick.get() {
-                        presented_tick.set(true);
-                        ui.window().request_redraw();
+                    ticking.store(false, Ordering::Release);
+                    if more {
+                        bump_fast_timer(&timer_tick, &timer_fast_tick);
+                        schedule_host_tick();
                     }
+                    return;
+                }
 
-                    if !needs_retick.load(Ordering::Acquire) {
-                        break;
+                while let Some(ev) = eng.poll_event_json() {
+                    match parse_engine_event(&ev) {
+                        Some(EngineEvent::Stats(stats)) => {
+                            if apply_stats(
+                                &stats,
+                                &tabs_tick,
+                                &terminals_tick,
+                                &files_tick,
+                                &filters_tick,
+                                &ui,
+                                &terminal_tab_tick,
+                                &syncing_scroll_tick,
+                                &has_selection_tick,
+                                &pty_running_tick,
+                                &viewport_font_size_tick,
+                                &syncing_follow_tick,
+                                &find_resync_tick,
+                                &find_stats_tab_tick,
+                                &find_pending_tick,
+                                &find_debounce_tick,
+                            ) {
+                                force_tick.set(true);
+                            }
+                        }
+                        Some(EngineEvent::Status { message }) => {
+                            ui.set_status_text(SharedString::from(message));
+                        }
+                        Some(EngineEvent::Exit { code, .. }) => {
+                            ui.set_status_text(SharedString::from(format!("exit {code}")));
+                        }
+                        _ => {}
                     }
                 }
+
+                let dirty = eng.needs_render() || force_tick.get();
+                let pty_pending = eng.pty_work_pending();
+                // Keep fast cadence while flooding even if this frame was not dirty yet.
+                if dirty || pty_pending {
+                    bump_fast_timer(&timer_tick, &timer_fast_tick);
+                } else if timer_fast_tick.get() {
+                    timer_tick.set_interval(TICK_IDLE);
+                    timer_fast_tick.set(false);
+                }
+
+                let (lw, lh) = *logical_tick.borrow();
+                if lw <= 1.0 || lh <= 1.0 {
+                    let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
+                    drop(eng);
+                    ticking.store(false, Ordering::Release);
+                    if more {
+                        bump_fast_timer(&timer_tick, &timer_fast_tick);
+                        schedule_host_tick();
+                    }
+                    return;
+                }
+                let scale = ui.window().scale_factor().max(0.5) as f32;
+                let width = (lw * scale).ceil().max(1.0) as u32;
+                let height = (lh * scale).ceil().max(1.0) as u32;
+                ui.set_viewport_page_w(width as f32);
+                ui.set_viewport_page_h(height as f32);
+
+                // Caret overlay tracks focus/tab/running even when the Image is idle.
+                let was_visible = ui.get_caret_visible();
+                let now_visible = sync_terminal_caret(&ui, &eng, width, height, scale);
+                // Shell often becomes ready after first focus — re-arm blink when caret appears.
+                if now_visible && !was_visible {
+                    ui.set_caret_blink_on(true);
+                }
+
+                if !dirty {
+                    let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
+                    drop(eng);
+                    ticking.store(false, Ordering::Release);
+                    if more {
+                        bump_fast_timer(&timer_tick, &timer_fast_tick);
+                        schedule_host_tick();
+                    }
+                    return;
+                }
+                force_tick.set(false);
+
+                let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+                if let Err(err) = eng.render(width, height, buffer.make_mut_bytes()) {
+                    ui.set_status_text(SharedString::from(format!("render: {err}")));
+                    drop(eng);
+                    ticking.store(false, Ordering::Release);
+                    return;
+                }
+                // Position may change with scroll/follow after paint.
+                let was_visible = ui.get_caret_visible();
+                let now_visible = sync_terminal_caret(&ui, &eng, width, height, scale);
+                if now_visible && !was_visible {
+                    ui.set_caret_blink_on(true);
+                }
+                let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
+                drop(eng);
+                ui.set_viewport_image(Image::from_rgba8(buffer));
+                if !presented_tick.get() {
+                    presented_tick.set(true);
+                    ui.window().request_redraw();
+                }
+
                 ticking.store(false, Ordering::Release);
+                if more {
+                    bump_fast_timer(&timer_tick, &timer_fast_tick);
+                    schedule_host_tick();
+                }
             }));
         });
     }
@@ -1529,24 +1568,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ticking = ticking.clone();
         let needs_retick = needs_retick.clone();
-        let pending = Arc::new(AtomicBool::new(false));
+        let schedule_host_tick = schedule_host_tick.clone();
         engine.borrow_mut().set_pty_activity_wake(Arc::new(move || {
             if ticking.load(Ordering::Acquire) {
+                // Reader wake during tick: finish this frame, then schedule after yield.
                 needs_retick.store(true, Ordering::Release);
                 return;
             }
-            if pending.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            let pending = pending.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                pending.store(false, Ordering::Release);
-                HOST_TICK.with(|slot| {
-                    if let Some(f) = slot.borrow_mut().as_mut() {
-                        f();
-                    }
-                });
-            });
+            schedule_host_tick();
         }));
     }
 

@@ -45,6 +45,8 @@ export component AppWindow inherits Window {
 
     in-out property <image> viewport-image;
     in-out property <string> status-text: "ready";
+    // Live "current / total" line counter (right side of status bar).
+    in-out property <string> line-position-text: "";
     in-out property <[TabInfo]> tabs-model;
     in-out property <int> active-tab-index: 0;
     in-out property <bool> can-restore-tab: false;
@@ -1144,8 +1146,8 @@ export component AppWindow inherits Window {
                 Rectangle {
                     background: Theme.bg-panel;
 
-                    // Pad T/B; TERMINALS header + FILTERS keep 12px L/R. term-list is flush
-                    // left so selection reaches the panel edge (row content keeps its own pad).
+                    // Pad T/B; TERMINALS/FILES headers keep 8–12px L. Rows indent via
+                    // TerminalRow padding so ● aligns under section titles (not chevrons).
                     VerticalLayout {
                         padding-left: 0px;
                         padding-top: 12px;
@@ -1953,6 +1955,14 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // Clip so the V-scrollbar cannot paint over the status bar below
+                // (layout rounding otherwise leaves a 1px track under the footer).
+                Rectangle {
+                    clip: true;
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    background: Theme.bg-window;
+
                 VerticalLayout {
                     spacing: 0px;
                     vertical-stretch: 1;
@@ -2341,10 +2351,12 @@ export component AppWindow inherits Window {
 
                         // Always reserve the V-scrollbar track so the viewport width
                         // does not jump when content first becomes scrollable.
+                        // Fixed width; height comes only from this row (above status).
                         EngineScrollBar {
                             horizontal: false;
                             width: 10px;
                             vertical-stretch: 1;
+                            clip: true;
                             value <=> root.scroll-y;
                             maximum: root.max-scroll-y;
                             page-size: root.viewport-page-h;
@@ -2354,6 +2366,7 @@ export component AppWindow inherits Window {
 
                     if root.show-hscroll && root.max-scroll-x > 0.5: HorizontalLayout {
                         height: 10px;
+                        vertical-stretch: 0;
                         spacing: 0px;
 
                         EngineScrollBar {
@@ -2372,25 +2385,40 @@ export component AppWindow inherits Window {
                             background: Theme.bg-input;
                         }
                     }
-                }
-            }
 
-            Rectangle {
-                height: 22px;
-                background: Theme.bg-bar;
+                    // Status lives in the same clipped column as the V-scrollbar so the
+                    // track cannot paint into/under the footer (layout overflow).
+                    Rectangle {
+                        height: 22px;
+                        vertical-stretch: 0;
+                        background: Theme.bg-bar;
 
-                HorizontalLayout {
-                    padding-left: 8px;
-                    padding-right: 8px;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 12px;
 
-                    Text {
-                        text: root.status-text;
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        vertical-alignment: center;
-                        overflow: elide;
+                            Text {
+                                text: root.status-text;
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+
+                            if root.line-position-text != "": Text {
+                                text: root.line-position-text;
+                                color: Theme.text-muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                horizontal-stretch: 0;
+                            }
+                        }
                     }
                 }
+                } // clip Rectangle
             }
         }
     }

@@ -1,8 +1,10 @@
+use std::collections::VecDeque;
+
 use crate::core::types::LogRecord;
 
 pub struct RecordBuffer {
-    records: Vec<LogRecord>,
-    raw_lines: Vec<String>,
+    records: VecDeque<LogRecord>,
+    raw_lines: VecDeque<String>,
     dropped: usize,
     max_records: usize,
 }
@@ -10,8 +12,8 @@ pub struct RecordBuffer {
 impl RecordBuffer {
     pub fn new(max_records: usize) -> Self {
         Self {
-            records: Vec::new(),
-            raw_lines: Vec::new(),
+            records: VecDeque::new(),
+            raw_lines: VecDeque::new(),
             dropped: 0,
             max_records,
         }
@@ -19,34 +21,51 @@ impl RecordBuffer {
 
     /// Drop oldest records (and their raw lines) when over `max_records`.
     /// Returns the number of raw lines removed from the front.
+    ///
+    /// Uses `pop_front` so cost is O(dropped), not O(capacity).
     fn trim_overflow(&mut self) -> usize {
         if self.records.len() <= self.max_records {
             return 0;
         }
         let overflow = self.records.len() - self.max_records;
-        let shifted_lines: usize = self.records[..overflow]
-            .iter()
-            .map(|r| r.lines.len())
-            .sum();
-        self.records.drain(0..overflow);
-        self.raw_lines.drain(0..shifted_lines);
-        self.dropped += overflow;
+        let mut shifted_lines = 0usize;
+        for _ in 0..overflow {
+            let Some(rec) = self.records.pop_front() else {
+                break;
+            };
+            let line_count = rec.lines.len();
+            shifted_lines += line_count;
+            for _ in 0..line_count {
+                self.raw_lines.pop_front();
+            }
+            self.dropped += 1;
+        }
         shifted_lines
     }
 
     /// Returns the number of raw lines dropped from the front when the cap is exceeded.
     pub fn add(&mut self, record: LogRecord) -> usize {
         self.raw_lines.extend(record.lines.iter().cloned());
-        self.records.push(record);
+        self.records.push_back(record);
         self.trim_overflow()
     }
 
-    pub fn records(&self) -> &[LogRecord] {
-        &self.records
+    /// Contiguous record slice (compacts the ring if needed).
+    pub fn records(&mut self) -> &[LogRecord] {
+        self.records.make_contiguous()
     }
 
-    pub fn raw_lines(&self) -> &[String] {
-        &self.raw_lines
+    /// Contiguous raw-line slice (compacts the ring if needed).
+    pub fn raw_lines(&mut self) -> &[String] {
+        self.raw_lines.make_contiguous()
+    }
+
+    pub fn records_len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn raw_lines_len(&self) -> usize {
+        self.raw_lines.len()
     }
 
     pub fn dropped_count(&self) -> usize {
@@ -77,7 +96,7 @@ impl RecordBuffer {
         self.dropped = 0;
         for record in records {
             self.raw_lines.extend(record.lines.iter().cloned());
-            self.records.push(record);
+            self.records.push_back(record);
         }
         self.trim_overflow();
     }
@@ -86,23 +105,24 @@ impl RecordBuffer {
     /// volatile terminal tail before re-committing / re-rendering it.
     pub fn pop_last(&mut self, n: usize) {
         for _ in 0..n {
-            let Some(rec) = self.records.pop() else {
+            let Some(rec) = self.records.pop_back() else {
                 break;
             };
             let line_count = rec.lines.len();
-            let start = self.raw_lines.len().saturating_sub(line_count);
-            self.raw_lines.truncate(start);
+            for _ in 0..line_count {
+                self.raw_lines.pop_back();
+            }
         }
     }
 
     pub fn last_is_overwrite_single_line(&self) -> bool {
         self.records
-            .last()
+            .back()
             .is_some_and(|r| r.lines.len() == 1 && r.overwrite)
     }
 
     pub fn set_last_overwrite(&mut self, overwrite: bool) {
-        if let Some(last) = self.records.last_mut() {
+        if let Some(last) = self.records.back_mut() {
             last.overwrite = overwrite;
         }
     }
@@ -111,10 +131,11 @@ impl RecordBuffer {
     /// Returns true if a record was replaced.
     pub fn replace_last_single_line(&mut self, record: LogRecord) -> bool {
         if self.last_is_overwrite_single_line() {
-            let removed = self.records.pop().expect("last exists");
+            let removed = self.records.pop_back().expect("last exists");
             let line_count = removed.lines.len();
-            let start = self.raw_lines.len().saturating_sub(line_count);
-            self.raw_lines.truncate(start);
+            for _ in 0..line_count {
+                self.raw_lines.pop_back();
+            }
             self.add(record);
             return true;
         }
@@ -146,20 +167,31 @@ mod tests {
         assert_eq!(buf.add(rec(1, "a")), 0);
         assert_eq!(buf.add(rec(2, "b")), 0);
         assert_eq!(buf.add(rec(3, "c")), 0);
-        assert_eq!(buf.records().len(), 3);
+        assert_eq!(buf.records_len(), 3);
         assert_eq!(buf.dropped_count(), 0);
 
         let shifted = buf.add(rec(4, "d"));
         assert_eq!(shifted, 1);
-        assert_eq!(buf.records().len(), 3);
+        assert_eq!(buf.records_len(), 3);
         assert_eq!(buf.dropped_count(), 1);
         assert_eq!(
-            buf.records()
-                .iter()
-                .map(|r| r.id)
-                .collect::<Vec<_>>(),
+            buf.records().iter().map(|r| r.id).collect::<Vec<_>>(),
             vec![2, 3, 4]
         );
-        assert_eq!(buf.raw_lines(), &["b".to_string(), "c".to_string(), "d".to_string()]);
+        assert_eq!(
+            buf.raw_lines(),
+            &["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+    }
+
+    #[test]
+    fn trim_many_at_cap_is_linear_in_overflow() {
+        // Smoke: filling far past cap must not hang (old Vec::drain was O(cap) per line).
+        let mut buf = RecordBuffer::new(1_000);
+        for i in 0..50_000u64 {
+            buf.add(rec(i, "x"));
+        }
+        assert_eq!(buf.records_len(), 1_000);
+        assert_eq!(buf.dropped_count(), 49_000);
     }
 }

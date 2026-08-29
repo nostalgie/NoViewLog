@@ -94,7 +94,7 @@ impl Engine {
             return;
         };
 
-        let was_empty = self.active_terminal().buffer.raw_lines().is_empty();
+        let was_empty = self.active_terminal().buffer.raw_lines_len() == 0;
         let (lines, content_done, index_done) = match load.tick() {
             Ok(result) => result,
             Err(message) => {
@@ -189,26 +189,34 @@ impl Engine {
 
         let metrics = self.renderer.metrics();
         let row_stride = metrics.row_stride;
-        let (need_up, need_down, scroll_y, _content_h, window_start, window_end, total_lines) = {
+        let window_lines = self.file_view_window_lines() as u64;
+        // Never slide farther than half a window — PREFETCH_RAW_LINES can exceed
+        // FILE_VIEW_WINDOW_LINES and would drop the visible region (black frames).
+        let step = (PREFETCH_RAW_LINES as u64)
+            .min(window_lines / 2)
+            .max(1);
+        let (need_up, need_down, scroll_y, content_h, window_start, _window_end, total_lines) = {
             let terminal = self.active_terminal();
             let Some(backed) = &terminal.file_backed else {
                 return;
             };
             let view = terminal.active_view();
-            // Cached row count — never allocate a full wrap layout on every tick.
             let rows = view.cached_visual_rows(
                 self.viewport_width,
                 metrics.cell_width,
                 count_visual_rows,
             );
             let content_h = rows as f32 * row_stride;
-            let near_top = terminal.scroll_offset_y <= PREFETCH_SCROLL_PX;
+            let local_max = (content_h - self.viewport_height as f32).max(0.0);
+            // Clamp: a stale global offset must not look like "near bottom".
+            let scroll_y = terminal.scroll_offset_y.clamp(0.0, local_max);
+            let near_top = scroll_y <= PREFETCH_SCROLL_PX;
             let near_bottom =
-                terminal.scroll_offset_y + self.viewport_height as f32 >= content_h - PREFETCH_SCROLL_PX;
+                scroll_y + self.viewport_height as f32 >= content_h - PREFETCH_SCROLL_PX;
             (
                 near_top && terminal.buffer_line_start > 0,
                 near_bottom && terminal.buffer_line_end < backed.index.total_lines(),
-                terminal.scroll_offset_y,
+                scroll_y,
                 content_h,
                 terminal.buffer_line_start,
                 terminal.buffer_line_end,
@@ -217,14 +225,139 @@ impl Engine {
         };
 
         if need_up {
-            let new_start = window_start.saturating_sub(PREFETCH_RAW_LINES as u64);
-            let scroll_adjust = (window_start - new_start) as f32 * row_stride;
-            self.request_file_window_at(new_start, scroll_y + scroll_adjust);
+            let new_start = window_start.saturating_sub(step);
+            let dropped = window_start - new_start;
+            let scroll_adjust = if self.active_view().wrap_lines && dropped > 0 {
+                let view = self.active_view();
+                let n = dropped.min(view.flat_lines.len() as u64) as usize;
+                count_visual_rows(
+                    &view.flat_lines[..n],
+                    true,
+                    self.viewport_width,
+                    metrics.cell_width,
+                ) as f32
+                    * row_stride
+            } else {
+                dropped as f32 * row_stride
+            };
+            let local_max_guess = content_h + scroll_adjust;
+            let new_local = (scroll_y + scroll_adjust).clamp(0.0, local_max_guess);
+            self.request_file_window_at(new_start, new_local);
         } else if need_down {
-            let window = self.file_view_window_lines() as u64;
-            let new_start = window_end.min(total_lines.saturating_sub(window));
-            self.request_file_window_at(new_start, 0.0);
+            let new_start = (window_start + step).min(total_lines.saturating_sub(window_lines));
+            if new_start <= window_start {
+                return;
+            }
+            let advanced = new_start - window_start;
+            let scroll_adjust = if self.active_view().wrap_lines && advanced > 0 {
+                let view = self.active_view();
+                let n = advanced.min(view.flat_lines.len() as u64) as usize;
+                count_visual_rows(
+                    &view.flat_lines[..n],
+                    true,
+                    self.viewport_width,
+                    metrics.cell_width,
+                ) as f32
+                    * row_stride
+            } else {
+                advanced as f32 * row_stride
+            };
+            let new_local = (scroll_y - scroll_adjust).max(0.0);
+            self.request_file_window_at(new_start, new_local);
         }
+    }
+
+    /// Map a whole-file scrollbar offset to a loaded window + local scroll.
+    ///
+    /// Never applies a local `scroll_offset_y` past the current window (that painted black).
+    pub(crate) fn scroll_file_to_global_offset(&mut self, global_offset: f32) {
+        if !self.has_active_terminal() || self.active_terminal().file_backed.is_none() {
+            return;
+        }
+        let stride = self.renderer.metrics().row_stride;
+        let viewport_h = self.viewport_height as f32;
+        let max_scroll = self.max_scroll_offset();
+        let global_offset = global_offset.clamp(0.0, max_scroll);
+
+        let (total, start, end) = {
+            let terminal = self.active_terminal();
+            let backed = terminal.file_backed.as_ref().unwrap();
+            let start = terminal.buffer_line_start;
+            let loaded = terminal.buffer.records_len() as u64;
+            let end = if loaded > 0 {
+                start.saturating_add(loaded).min(
+                    terminal
+                        .buffer_line_end
+                        .max(start.saturating_add(loaded)),
+                )
+            } else {
+                terminal.buffer_line_end
+            };
+            let end = end.max(start);
+            (backed.index.total_lines(), start, end)
+        };
+        if total == 0 {
+            self.active_terminal_mut().scroll_offset_y = 0.0;
+            self.mark_viewport_dirty();
+            return;
+        }
+
+        let window = self.file_view_window_lines() as u64;
+        let max_start = total.saturating_sub(window);
+        let target_line = ((global_offset / stride).floor() as u64).min(total.saturating_sub(1));
+
+        // Pin the last window when the thumb is at / near EOF.
+        let near_eof = max_scroll <= 0.5
+            || global_offset + viewport_h >= max_scroll
+            || target_line >= max_start;
+
+        let (new_start, local_raw) = if near_eof {
+            let local = (global_offset - max_start as f32 * stride).max(0.0);
+            (max_start, local)
+        } else {
+            let win_len = end.saturating_sub(start).max(1);
+            let margin = (win_len / 5).max(1);
+            let comfortably_inside =
+                target_line >= start.saturating_add(margin) && target_line + margin < end;
+            if comfortably_inside {
+                let local = global_offset - start as f32 * stride;
+                let local_max = self.local_window_max_scroll();
+                self.active_terminal_mut().scroll_offset_y = local.clamp(0.0, local_max);
+                self.maybe_prefetch_file_window();
+                self.mark_viewport_dirty();
+                return;
+            }
+            let new_start = target_line.saturating_sub(window / 3).min(max_start);
+            let local = (global_offset - new_start as f32 * stride).max(0.0);
+            (new_start, local)
+        };
+
+        let local_cap = window as f32 * stride;
+        let local = local_raw.min(local_cap);
+
+        if new_start == start && end > start {
+            let local_max = self.local_window_max_scroll();
+            let local = if near_eof {
+                local_max
+            } else {
+                local.clamp(0.0, local_max)
+            };
+            self.active_terminal_mut().scroll_offset_y = local;
+            self.maybe_prefetch_file_window();
+            self.mark_viewport_dirty();
+            return;
+        }
+
+        // Keep showing the current window until the new chunk lands (no black flash).
+        // Near EOF: ask for the bottom of the window; finish clamps to real local_max
+        // (Wrap ON can make visual height > raw window * stride).
+        let pending_local = if near_eof {
+            f32::MAX
+        } else {
+            local
+        };
+        self.request_file_window_at(new_start, pending_local);
+        self.mark_viewport_dirty();
     }
 
     pub(crate) fn file_view_window_lines(&self) -> usize {
@@ -236,20 +369,25 @@ impl Engine {
 
     pub(crate) fn request_file_window_at(&mut self, new_start: u64, scroll_y: f32) {
         let window = self.file_view_window_lines() as u64;
-        let end_line = {
+        let (end_line, same_pending) = {
             let terminal = self.active_terminal();
             let Some(backed) = &terminal.file_backed else {
                 return;
             };
-            if terminal
+            let same = terminal
                 .pending_file_window
                 .as_ref()
-                .is_some_and(|p| p.new_start == new_start)
-            {
-                return;
-            }
-            (new_start + window).min(backed.index.total_lines())
+                .is_some_and(|p| p.new_start == new_start);
+            let end_line = (new_start + window).min(backed.index.total_lines());
+            (end_line, same)
         };
+        if same_pending {
+            if let Some(pending) = self.active_terminal_mut().pending_file_window.as_mut() {
+                pending.scroll_y = scroll_y;
+            }
+            self.mark_viewport_dirty();
+            return;
+        }
         if end_line <= new_start {
             return;
         }
@@ -326,6 +464,7 @@ impl Engine {
     pub(crate) fn finish_file_window(&mut self, pending: PendingFileWindow) {
         let format = self.current_format();
         let raw_count = pending.lines.len() as u64;
+        let desired_scroll = pending.scroll_y;
         {
             let terminal = self.active_terminal_mut();
             terminal.parser = RecordParser::new(format);
@@ -339,11 +478,17 @@ impl Engine {
             terminal.buffer.replace_all(records);
             terminal.buffer_line_start = pending.new_start;
             terminal.buffer_line_end = pending.new_start + raw_count;
-            terminal.scroll_offset_y = pending.scroll_y;
+            terminal.scroll_offset_y = desired_scroll;
             terminal.selection = None;
             terminal.pending_file_window = None;
         }
         self.mark_all_views_dirty();
+        let _ = self.rebuild_if_needed();
+        let local_max = self.local_window_max_scroll();
+        {
+            let terminal = self.active_terminal_mut();
+            terminal.scroll_offset_y = terminal.scroll_offset_y.clamp(0.0, local_max);
+        }
         self.mark_viewport_dirty();
     }
 

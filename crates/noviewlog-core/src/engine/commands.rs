@@ -267,12 +267,18 @@ impl Engine {
                 }
             }
             Command::Scroll { offset } => {
-                let max_scroll = self.max_scroll_offset();
-                self.active_terminal_mut().scroll_offset_y =
-                    offset.clamp(0.0, max_scroll);
-                self.sync_follow_from_scroll();
-                self.maybe_prefetch_file_window();
-                self.mark_viewport_dirty();
+                if self.active_terminal().is_file_session()
+                    && self.active_terminal().file_backed.is_some()
+                {
+                    self.scroll_file_to_global_offset(offset);
+                } else {
+                    let max_scroll = self.max_scroll_offset();
+                    self.active_terminal_mut().scroll_offset_y =
+                        offset.clamp(0.0, max_scroll);
+                    self.sync_follow_from_scroll();
+                    self.maybe_prefetch_file_window();
+                    self.mark_viewport_dirty();
+                }
             }
             Command::ScrollLines { delta } => self.scroll_by_lines(delta),
             Command::ScrollPage { direction } => self.scroll_page(direction),

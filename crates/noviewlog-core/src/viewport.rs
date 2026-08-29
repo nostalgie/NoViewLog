@@ -14,7 +14,8 @@ use crate::core::types::{
 };
 use crate::core::visible::{highlight_search_in_segments, SearchPattern};
 use crate::viewport_layout::{
-    collect_visible_visual_lines, selection_slice_range, slice_segments, TextSelection, LEFT_PAD,
+    collect_visible_visual_lines_with_total, selection_slice_range, slice_segments, TextSelection,
+    LEFT_PAD,
 };
 
 const BG: [u8; 4] = [0, 0, 0, 255];
@@ -203,6 +204,41 @@ impl ViewportRenderer {
         active_match: Option<SearchMatch>,
         caret: Option<ViewportCaret>,
     ) -> Result<(), String> {
+        self.render_with_total(
+            out,
+            width,
+            height,
+            lines,
+            scroll_y,
+            scroll_x,
+            wrap_lines,
+            selection,
+            search_pattern,
+            filter_draft_pattern,
+            active_match,
+            caret,
+            None,
+            None,
+        )
+    }
+
+    pub fn render_with_total(
+        &mut self,
+        out: &mut [u8],
+        width: u32,
+        height: u32,
+        lines: &[FlatLine],
+        scroll_y: f32,
+        scroll_x: f32,
+        wrap_lines: bool,
+        selection: Option<&TextSelection>,
+        search_pattern: Option<&SearchPattern>,
+        filter_draft_pattern: Option<&SearchPattern>,
+        active_match: Option<SearchMatch>,
+        caret: Option<ViewportCaret>,
+        total_visual_rows: Option<usize>,
+        visual_row_index: Option<&crate::viewport_layout::VisualRowIndex>,
+    ) -> Result<(), String> {
         let expected = (width as usize) * (height as usize) * 4;
         if out.len() < expected {
             return Err(format!("buffer too small: need {expected}, got {}", out.len()));
@@ -216,13 +252,15 @@ impl ViewportRenderer {
         let mut row_top = -y_offset;
 
         let max_rows = (height as f32 / self.metrics.row_stride).ceil() as usize + 1;
-        let visual_lines = collect_visible_visual_lines(
+        let visual_lines = collect_visible_visual_lines_with_total(
             lines,
             wrap_lines,
             width,
             self.metrics.cell_width,
             first_row,
             max_rows,
+            total_visual_rows,
+            visual_row_index,
         );
         let x_base = if wrap_lines {
             LEFT_PAD as i32
