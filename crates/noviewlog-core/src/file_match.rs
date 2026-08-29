@@ -68,7 +68,7 @@ pub fn scan_match_chunk(
                     }
                 }
                 let record = line_record(&line);
-                if severity.allows(record.level) && filters.is_visible(&record) {
+                if severity.allows(record.effective_level()) && filters.is_visible(&record) {
                     offsets.push(line_start);
                 }
                 if pos >= end_byte {

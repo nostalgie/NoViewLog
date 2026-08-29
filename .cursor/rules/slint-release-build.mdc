@@ -13,8 +13,8 @@ ask the user to rebuild.
 
 | Path | Role |
 |------|------|
-| `bash scripts/run-slint.sh` | Dev build + run `noviewlog-slint` (Linux) |
-| `cargo build --release -p noviewlog-slint` | Release binary |
+| `bash scripts/run-slint.sh` | `cargo run --release` + run `noviewlog-slint` (Linux) |
+| `cargo build --release -p noviewlog-slint` | Release binary only |
 | `bash scripts/publish-slint-windows.sh` | Windows MSVC → `dist/noviewlog-slint-win-x64/NoViewLog.exe` |
 
 ## Required commands (Linux)
@@ -24,6 +24,9 @@ bash scripts/run-slint.sh
 # or
 cargo build --release -p noviewlog-slint
 ```
+
+`run-slint.sh` MUST use `--release`. A debug `cargo run` pegs ~100% CPU on
+PTY flood even when release is fine — do not treat debug as the product path.
 
 ## Windows release folder
 
@@ -38,3 +41,6 @@ bash scripts/publish-slint-windows.sh
 1. Run the appropriate command(s) yourself — do **not** tell the user to rebuild.
 2. Do **not** claim Slint work is done until the build (or publish on Windows) succeeds when those surfaces changed.
 3. Linux fontconfig helper: `scripts/setup-slint-deps.sh` (used by `run-slint.sh`) — do not port to Windows.
+4. PTY / Follow / Viewport / HOST_TICK changes: a green compile is **not**
+   acceptance. Run the release GUI and measure `cat` per
+   [terminal-flood-verify.mdc](terminal-flood-verify.mdc).

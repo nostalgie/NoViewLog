@@ -28,7 +28,9 @@ TerminalState
 Slint UI  --Command (typed or JSON)-->  Engine
           <--stats / events JSON-----
           <--RGBA pixels (render)----  ViewportRenderer
-PTY bytes --> Engine --> TerminalIngest --> RecordBuffer --> flat lines --> render
+PTY bytes --> Engine --> TerminalIngest (VTE grid)
+                         ├── committed rows --> RecordBuffer --> filter tabs / scroll-up Terminal tab
+                         └── Follow Terminal tab paints the cell grid (not LogView overlay)
 ```
 
 ### Host API (Slint)
@@ -49,8 +51,8 @@ so the first map never composites the desktop through an empty cell.
 
 | Layer | Module | Role |
 |-------|--------|------|
-| Live VT | `core/terminal.rs` | `vte` screen + scrollback; re-emits SGR ANSI for records |
-| Line SGR | `core/ansi.rs` | Parse/strip/overlay ANSI on stored lines (non-VT) |
+| Live VT | `core/terminal.rs` | `vte` grid; Follow paints grid rows; scroll-up overlay `FlatLine`s from cells; committed rows serialized to ANSI for Records |
+| Line SGR | `core/ansi.rs` | Parse/strip/overlay SGR on stored record lines (non-VT) |
 
 When fixing coloring or escape handling, identify which layer owns the bug
 before changing code.

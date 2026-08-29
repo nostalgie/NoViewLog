@@ -7,9 +7,10 @@
 //! | **Live VT** (this file) | `core::terminal` | `vte` grid + scrollback; cursor, erase, OSC 7 |
 //! | **Line SGR** | [`crate::core::ansi`] | Parse/strip/overlay SGR on stored record lines |
 //!
-//! This module re-serializes each committed / live row to ANSI so
-//! [`crate::core::ansi::parse_ansi_line`] can style records. Fix live-screen
-//! bugs here; fix filter/display coloring of stored lines in `ansi.rs`.
+//! This module owns the live cell grid. Committed (scrolled-off) rows are
+//! serialized to ANSI for the Record buffer. The live screen is exposed as
+//! overlay [`FlatLine`]s built from cells (no Record round-trip). Filter/display
+//! coloring of stored lines lives in `ansi.rs`.
 //!
 //! ora / listr2 / ink render progress by manipulating the terminal *screen*
 //! (cursor up/down, erase line, carriage return, redraw a block of lines).
@@ -24,10 +25,10 @@
 
 use vte::{Params, Parser, Perform};
 
-use crate::core::ansi::strip_ansi;
+use crate::core::ansi::{ansi_256_color, ansi_basic_color};
 use crate::core::buffer::RecordBuffer;
 use crate::core::parser::RecordParser;
-use crate::core::types::{detect_level, LogRecord};
+use crate::core::types::{FlatLine, TextSegment, TextStyle};
 
 const DEFAULT_COLS: usize = 120;
 const DEFAULT_ROWS: usize = 40;
@@ -172,6 +173,60 @@ impl Row {
         }
         out
     }
+}
+
+fn color_rgb(c: &Color) -> (u8, u8, u8) {
+    match *c {
+        Color::Basic(n) => {
+            let n = n as u32;
+            if (30..=37).contains(&n) {
+                ansi_basic_color(n - 30, false)
+            } else if (90..=97).contains(&n) {
+                ansi_basic_color(n - 90, true)
+            } else if (40..=47).contains(&n) {
+                ansi_basic_color(n - 40, false)
+            } else if (100..=107).contains(&n) {
+                ansi_basic_color(n - 100, true)
+            } else {
+                (230, 237, 243)
+            }
+        }
+        Color::Ext(n) => ansi_256_color(n as u32),
+        Color::Rgb(r, g, b) => (r, g, b),
+    }
+}
+
+fn pen_to_style(pen: &Pen) -> Option<TextStyle> {
+    if pen.is_default() {
+        return None;
+    }
+    Some(TextStyle {
+        fg: pen.fg.as_ref().map(color_rgb),
+        bg: pen.bg.as_ref().map(color_rgb),
+        bold: pen.bold,
+        dim: pen.dim,
+        underline: pen.underline,
+        search: false,
+        search_current: false,
+        selected: false,
+    })
+}
+
+fn overlay_id(line: usize) -> u64 {
+    (u64::MAX / 2).wrapping_add(line as u64)
+}
+
+fn push_overlay_line(out: &mut Vec<FlatLine>, segments: Vec<TextSegment>, raw: String) {
+    out.push(FlatLine {
+        record_id: overlay_id(out.len()),
+        line_index: 0,
+        segments,
+        raw,
+        level: None,
+        collapsible: false,
+        collapsed: false,
+        hidden_line_count: 0,
+    });
 }
 
 /// Caret position within [`TerminalEmulator::screen_lines`] (logical rows).
@@ -408,6 +463,148 @@ impl TerminalEmulator {
         }
         while out.len() > keep_through + 1
             && out.last().map(|s| s.is_empty()).unwrap_or(false)
+        {
+            out.pop();
+        }
+        out
+    }
+
+    fn row_to_segments(row: &Row) -> (Vec<TextSegment>, String) {
+        let last = if row.wrapped {
+            row.cells.len()
+        } else {
+            row.cells
+                .iter()
+                .rposition(|c| !c.is_blank())
+                .map(|i| i + 1)
+                .unwrap_or(0)
+        };
+        let mut segments: Vec<TextSegment> = Vec::new();
+        let mut raw = String::new();
+        let mut cur_pen = Pen::default();
+        let mut cur_text = String::new();
+        let flush_seg =
+            |segments: &mut Vec<TextSegment>, cur_pen: &Pen, cur_text: &mut String| {
+                if cur_text.is_empty() {
+                    return;
+                }
+                segments.push(TextSegment {
+                    text: std::mem::take(cur_text),
+                    style: pen_to_style(cur_pen),
+                });
+            };
+        for cell in &row.cells[..last] {
+            if cell.pen != cur_pen {
+                flush_seg(&mut segments, &cur_pen, &mut cur_text);
+                cur_pen = cell.pen.clone();
+            }
+            cur_text.push(cell.ch);
+            raw.push(cell.ch);
+        }
+        flush_seg(&mut segments, &cur_pen, &mut cur_text);
+        if segments.is_empty() {
+            segments.push(TextSegment {
+                text: String::new(),
+                style: None,
+            });
+        }
+        (segments, raw)
+    }
+
+    /// Physical screen rows as FlatLines (one per grid row, no wrap-join).
+    /// Used to paint Follow like a native terminal: the viewport *is* the grid.
+    pub fn grid_flat_lines(&self) -> Vec<FlatLine> {
+        let mut out: Vec<FlatLine> = Vec::with_capacity(self.rows);
+        for row in &self.screen {
+            let (segments, raw) = Self::row_to_segments(row);
+            push_overlay_line(&mut out, segments, raw);
+        }
+        out
+    }
+
+    pub fn grid_cursor(&self) -> (usize, usize) {
+        (
+            self.cursor_row,
+            self.cursor_col.min(self.cols.saturating_sub(1)),
+        )
+    }
+
+    /// Live screen as Terminal tab overlay lines (cells → segments, no Records).
+    pub fn overlay_flat_lines(&self) -> Vec<FlatLine> {
+        let mut out: Vec<FlatLine> = Vec::new();
+        let mut segments: Vec<TextSegment> = Vec::new();
+        let mut raw = String::new();
+        let mut cur_pen = Pen::default();
+        let mut cur_text = String::new();
+
+        let flush_seg =
+            |segments: &mut Vec<TextSegment>, cur_pen: &Pen, cur_text: &mut String| {
+                if cur_text.is_empty() {
+                    return;
+                }
+                segments.push(TextSegment {
+                    text: std::mem::take(cur_text),
+                    style: pen_to_style(cur_pen),
+                });
+            };
+
+        for row in &self.screen {
+            let last = if row.wrapped {
+                row.cells.len()
+            } else {
+                row.cells
+                    .iter()
+                    .rposition(|c| !c.is_blank())
+                    .map(|i| i + 1)
+                    .unwrap_or(0)
+            };
+            for cell in &row.cells[..last] {
+                if cell.pen != cur_pen {
+                    flush_seg(&mut segments, &cur_pen, &mut cur_text);
+                    cur_pen = cell.pen.clone();
+                }
+                cur_text.push(cell.ch);
+                raw.push(cell.ch);
+            }
+            if !row.wrapped {
+                flush_seg(&mut segments, &cur_pen, &mut cur_text);
+                if segments.is_empty() {
+                    segments.push(TextSegment {
+                        text: String::new(),
+                        style: None,
+                    });
+                }
+                push_overlay_line(
+                    &mut out,
+                    std::mem::take(&mut segments),
+                    std::mem::take(&mut raw),
+                );
+                cur_pen = Pen::default();
+            }
+        }
+        if !raw.is_empty() || !cur_text.is_empty() || !segments.is_empty() {
+            flush_seg(&mut segments, &cur_pen, &mut cur_text);
+            if segments.is_empty() {
+                segments.push(TextSegment {
+                    text: String::new(),
+                    style: None,
+                });
+            }
+            push_overlay_line(&mut out, segments, raw);
+        }
+        let keep_through = self.screen_cursor().line;
+        while out.len() <= keep_through {
+            push_overlay_line(
+                &mut out,
+                vec![TextSegment {
+                    text: String::new(),
+                    style: None,
+                }],
+                String::new(),
+            );
+        }
+        while out.len() > keep_through + 1
+            && out.last().map(|l| l.raw.is_empty()).unwrap_or(false)
         {
             out.pop();
         }
@@ -858,31 +1055,16 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
-fn make_volatile_record(id: u64, ansi_line: &str) -> LogRecord {
-    let text = strip_ansi(ansi_line);
-    let level = detect_level(&text);
-    LogRecord {
-        id,
-        lines: vec![ansi_line.to_string()],
-        text,
-        received_at: chrono::Utc::now(),
-        level,
-        overwrite: true,
-    }
-}
-
 /// Drives the [`TerminalEmulator`] into a [`RecordBuffer`] + [`RecordParser`].
 ///
 /// Committed (scrolled-off) rows flow through the parser so multiline records
-/// (stack traces) still group and filters apply. The live on-screen
-/// region is appended as a *volatile tail* of single-line records that are
-/// replaced on every update — that is what makes spinners repaint in place
-/// without gluing or losing finalized lines.
+/// (stack traces) still group and filters apply. The live on-screen region
+/// stays in the emulator grid. Follow paints that grid directly; overlay
+/// [`FlatLine`]s are built only when the Terminal tab must show scrollback
+/// (scrolled up, search, process exit).
 pub struct TerminalIngest {
     parser: Parser,
     emu: TerminalEmulator,
-    volatile_count: usize,
-    volatile_id: u64,
 }
 
 impl Default for TerminalIngest {
@@ -896,8 +1078,6 @@ impl TerminalIngest {
         TerminalIngest {
             parser: Parser::new(),
             emu: TerminalEmulator::default(),
-            volatile_count: 0,
-            volatile_id: u64::MAX / 2,
         }
     }
 
@@ -905,13 +1085,10 @@ impl TerminalIngest {
         TerminalIngest {
             parser: Parser::new(),
             emu: TerminalEmulator::new(cols, rows),
-            volatile_count: 0,
-            volatile_id: u64::MAX / 2,
         }
     }
 
-    /// Match emulator geometry to the viewport / PTY. Refreshes the volatile
-    /// tail so live screen lines reflect the new grid.
+    /// Match emulator geometry to the viewport / PTY. May commit rows that scroll off.
     pub fn resize(
         &mut self,
         cols: usize,
@@ -922,28 +1099,9 @@ impl TerminalIngest {
         if cols == self.emu.cols() && rows == self.emu.rows() {
             return;
         }
-        self.strip_volatile(buffer);
+        parser.begin_chunk();
         self.emu.resize(cols, rows);
         let _ = self.commit_available(buffer, parser);
-        let _ = self.restore_volatile(buffer);
-    }
-
-    fn strip_volatile(&mut self, buffer: &mut RecordBuffer) {
-        if self.volatile_count > 0 {
-            buffer.pop_last(self.volatile_count);
-            self.volatile_count = 0;
-        }
-    }
-
-    fn restore_volatile(&mut self, buffer: &mut RecordBuffer) -> usize {
-        let lines = self.emu.screen_lines();
-        self.volatile_count = lines.len();
-        let mut shifted = 0usize;
-        for line in lines {
-            self.volatile_id = self.volatile_id.wrapping_add(1);
-            shifted += buffer.add(make_volatile_record(self.volatile_id, &line));
-        }
-        shifted
     }
 
     fn commit_available(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) -> usize {
@@ -969,34 +1127,31 @@ impl TerminalIngest {
         buffer: &mut RecordBuffer,
         parser: &mut RecordParser,
     ) -> usize {
-        self.strip_volatile(buffer);
+        parser.begin_chunk();
         self.parser.advance(&mut self.emu, bytes);
-        let mut shifted = self.commit_available(buffer, parser);
-        shifted += self.restore_volatile(buffer);
-        shifted
+        self.commit_available(buffer, parser)
     }
 
     pub fn take_cwd_update(&mut self) -> Option<String> {
         self.emu.take_pending_cwd()
     }
 
-    /// Flush a still-pending parser record while keeping the volatile tail last.
-    /// Called on idle so the most-recently-scrolled-off line is not stuck pending.
+    /// Flush a still-pending parser record. Called on idle so the
+    /// most-recently-scrolled-off line is not stuck pending.
     pub fn idle_flush(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) -> bool {
         if !parser.has_pending() {
             return false;
         }
-        self.strip_volatile(buffer);
+        parser.begin_chunk();
         if let Some(rec) = parser.flush_pending() {
             buffer.add(rec);
         }
-        let _ = self.restore_volatile(buffer);
         true
     }
 
     /// Finalize at process exit: commit the whole screen permanently.
     pub fn finish(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) {
-        self.strip_volatile(buffer);
+        parser.begin_chunk();
         self.emu.flush_all();
         let _ = self.commit_available(buffer, parser);
         if let Some(rec) = parser.flush_pending() {
@@ -1011,28 +1166,40 @@ impl TerminalIngest {
     pub fn reset_with_size(&mut self, cols: usize, rows: usize) {
         self.parser = Parser::new();
         self.emu = TerminalEmulator::new(cols, rows);
-        self.volatile_count = 0;
     }
 
     pub fn size(&self) -> (usize, usize) {
         (self.emu.cols(), self.emu.rows())
     }
 
-    /// Ensure the volatile tail exists even before the first PTY byte (empty
-    /// screen with a visible caret at 0,0).
-    pub fn ensure_live_screen(&mut self, buffer: &mut RecordBuffer) {
-        if self.volatile_count > 0 {
-            return;
-        }
-        let _ = self.restore_volatile(buffer);
-    }
+    /// Ensure the live screen exists even before the first PTY byte (empty
+    /// grid with a visible caret at 0,0). Does not write Records.
+    pub fn ensure_live_screen(&mut self, _buffer: &mut RecordBuffer) {}
 
-    /// Number of live (volatile) records currently appended to the buffer.
+    /// Number of live overlay lines (not stored in the Record buffer).
     pub fn volatile_count(&self) -> usize {
-        self.volatile_count
+        self.emu.overlay_flat_lines().len()
     }
 
-    /// Caret for the Terminal tab viewport, relative to the volatile tail.
+    /// Live overlay `FlatLine`s for scrollback composition (not the Follow paint path).
+    pub fn overlay_flat_lines(&self) -> Vec<FlatLine> {
+        self.emu.overlay_flat_lines()
+    }
+
+    /// Physical VT grid as FlatLines — Follow Viewport paint.
+    pub fn grid_flat_lines(&self) -> Vec<FlatLine> {
+        self.emu.grid_flat_lines()
+    }
+
+    /// Caret cell on the physical grid (`row`, `col`).
+    pub fn grid_caret(&self) -> Option<(usize, usize)> {
+        if !self.emu.cursor_visible() {
+            return None;
+        }
+        Some(self.emu.grid_cursor())
+    }
+
+    /// Caret for scrolled-up overlay mapping (logical screen lines).
     /// `None` when the cursor is hidden (`CSI ?25l`).
     pub fn viewport_caret(&self) -> Option<ScreenCursor> {
         if !self.emu.cursor_visible() {
@@ -1196,11 +1363,9 @@ mod tests {
             !parser.has_pending(),
             "scrolled-off lines must not remain only in parser pending"
         );
-        let volatile_floor = u64::MAX / 2;
         let committed: Vec<String> = buffer
             .records()
             .iter()
-            .filter(|r| r.id < volatile_floor)
             .flat_map(|r| r.lines.iter().cloned())
             .map(|l| crate::core::ansi::strip_ansi(&l))
             .collect();
@@ -1212,5 +1377,22 @@ mod tests {
             committed.iter().any(|l| l.contains("[LOG] second")),
             "expected second line committed, got {committed:?}"
         );
+        assert!(
+            !committed.iter().any(|l| l.contains("[LOG] third")),
+            "live screen line must not be a Record, got {committed:?}"
+        );
+        assert_eq!(ingest.volatile_count(), ingest.overlay_flat_lines().len());
+        assert_eq!(ingest.grid_flat_lines().len(), ingest.size().1);
+    }
+
+    #[test]
+    fn echo_does_not_create_records() {
+        let mut ingest = TerminalIngest::new_with_size(80, 24);
+        let mut buffer = RecordBuffer::new(1000);
+        let mut parser = RecordParser::new(get_builtin_format("node-default"));
+        ingest.feed(b"$ hello", &mut buffer, &mut parser);
+        assert_eq!(buffer.records_len(), 0, "live prompt must stay out of RecordBuffer");
+        assert!(ingest.volatile_count() >= 1);
+        assert!(ingest.overlay_flat_lines()[0].raw.contains("hello"));
     }
 }

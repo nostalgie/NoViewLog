@@ -72,6 +72,13 @@ pub struct LogRecord {
     pub overwrite: bool,
 }
 
+impl LogRecord {
+    /// Level stored at ingest, or classified from `text` (PTY firehose leaves `level` unset).
+    pub fn effective_level(&self) -> Option<LogLevel> {
+        self.level.or_else(|| detect_level(&self.text))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterType {

@@ -84,7 +84,19 @@ impl Engine {
                 terminal.id.clone(),
                 terminal.label(),
                 terminal.launch.has_process_launch(),
-                view.flat_lines.len(),
+                if !terminal.is_file_session()
+                    && terminal.running
+                    && terminal.active_view == 0
+                    && view.auto_follow
+                    && view.search_query.is_empty()
+                {
+                    // Same monotonic total as viewport_line_position (not ring-capped).
+                    terminal.buffer.dropped_count()
+                        + terminal.buffer.records_len()
+                        + terminal.ingest.size().1
+                } else {
+                    view.flat_lines.len()
+                },
                 terminal.running,
                 terminal.exit_code,
                 terminal.active_view,

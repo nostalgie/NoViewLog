@@ -126,7 +126,16 @@ impl Engine {
                         continue;
                     };
                     let is_active = active_id.as_ref() == Some(&id);
-                    let old_volatile = self.terminals[term_idx].ingest.volatile_count();
+                    let skip_logview_patch = is_active && self.paints_live_vt_grid();
+                    let old_overlay = if skip_logview_patch {
+                        0
+                    } else {
+                        self.terminals[term_idx]
+                            .views
+                            .first()
+                            .map(|v| v.overlay_len())
+                            .unwrap_or(0)
+                    };
                     let old_total = self.terminals[term_idx].buffer.records_len();
 
                     let shifted = {
@@ -144,17 +153,29 @@ impl Engine {
 
                     if is_active {
                         active_changed = true;
-                        let new_volatile = self.terminals[term_idx].ingest.volatile_count();
-                        let new_total = self.terminals[term_idx].buffer.records_len();
-                        self.apply_active_pty_bytes_to_views(
-                            term_idx,
-                            old_volatile,
-                            old_total,
-                            new_volatile,
-                            new_total,
-                            shifted,
-                        );
-                        self.snap_follow_scroll_after_ingest(term_idx);
+                        if skip_logview_patch {
+                            if shifted > 0 {
+                                let terminal = &mut self.terminals[term_idx];
+                                for (i, view) in terminal.views.iter_mut().enumerate() {
+                                    if i != 0 {
+                                        view.mark_flat_lines_dirty();
+                                    }
+                                }
+                            }
+                            self.snap_follow_scroll_after_ingest(term_idx);
+                        } else {
+                            let overlay = self.terminals[term_idx].ingest.overlay_flat_lines();
+                            let new_total = self.terminals[term_idx].buffer.records_len();
+                            self.apply_active_pty_bytes_to_views(
+                                term_idx,
+                                old_overlay,
+                                old_total,
+                                overlay,
+                                new_total,
+                                shifted,
+                            );
+                            self.snap_follow_scroll_after_ingest(term_idx);
+                        }
                     } else if shifted > 0 {
                         for view in &mut self.terminals[term_idx].views {
                             view.mark_flat_lines_dirty();
@@ -204,18 +225,19 @@ impl Engine {
             self.last_stats_at = None;
         }
         if active_changed {
-            // Always dirty on active ingest — paint throttle under flood made Follow
-            // and scroll look jumpy (content advanced between skipped frames).
-            self.mark_viewport_dirty();
+            // Follow is snapped in apply_active_pty_bytes / snap_follow_scroll_after_ingest
+            // on every chunk. Paint dirty only at display cadence while more PTY work
+            // remains — full paint per 256 KB made cat feel hitchy vs a native terminal.
+            self.mark_viewport_dirty_after_pty_ingest(more_pending);
         }
 
         if more_pending {
-            // Do NOT call pty_activity_wake here. Wake while HOST_TICK is running sets
-            // needs_retick and the host used to tight-loop ingest+paint until the flood
-            // ended — UI freeze at ~70% CPU with a black viewport. The host schedules
-            // the next tick via its fast timer after seeing `pty_work_pending()`.
+            // Host must NOT immediate-retick. TICK_FAST (~33 ms) continues the drain.
+            // Immediate schedule_host_tick + reader wake was a 1-core busy ingest loop.
             self.pty_drain_pending = true;
         }
+
+        self.last_pty_poll_at = Some(Instant::now());
 
         for id in respawn_shell_ids {
             self.start_interactive_shell_for(&id);
@@ -231,9 +253,9 @@ impl Engine {
     fn apply_active_pty_bytes_to_views(
         &mut self,
         term_idx: usize,
-        old_volatile: usize,
+        old_overlay: usize,
         old_total: usize,
-        new_volatile: usize,
+        overlay: Vec<crate::core::types::FlatLine>,
         new_total: usize,
         shifted_raw_lines: usize,
     ) {
@@ -268,7 +290,7 @@ impl Engine {
         } else if !wrap {
             shifted_raw_lines as f32 * row_stride
         } else if let Some(tab) = terminal.views.first() {
-            let n = shifted_raw_lines.min(tab.flat_lines.len().saturating_sub(old_volatile));
+            let n = shifted_raw_lines.min(tab.flat_lines.len().saturating_sub(old_overlay));
             if n == 0 {
                 0.0
             } else {
@@ -290,16 +312,18 @@ impl Engine {
         let Some(terminal_tab) = views.get_mut(0) else {
             return;
         };
-        let patched = terminal_tab.try_patch_volatile_tail(
+        let patched = terminal_tab.try_patch_committed_and_overlay(
             buffer,
-            old_volatile,
+            old_overlay,
             old_total,
-            new_volatile,
+            &overlay,
             new_total,
             shifted_raw_lines,
         );
         if !patched {
             terminal_tab.mark_flat_lines_dirty();
+            terminal_tab.rebuild(buffer);
+            terminal_tab.set_live_overlay(overlay);
         }
 
         // Anchor even if patch falls back to dirty rebuild — buffer already trimmed by `shifted`.
@@ -313,9 +337,39 @@ impl Engine {
         }
     }
 
+    /// Follow + Terminal tab + running PTY: paint the VTE cell grid, not LogView overlay.
+    pub(crate) fn paints_live_vt_grid(&self) -> bool {
+        if !self.has_active_terminal() {
+            return false;
+        }
+        let term = self.active_terminal();
+        if term.is_file_session() || !term.running || term.active_view != 0 {
+            return false;
+        }
+        let view = term.active_view();
+        view.auto_follow && view.search_query.is_empty()
+    }
+
+    /// Rebuild Terminal tab committed prefix + overlay after leaving live-grid Follow.
+    pub(crate) fn materialize_live_terminal_tab(&mut self) {
+        if !self.has_active_terminal() {
+            return;
+        }
+        let terminal = self.active_terminal_mut();
+        if terminal.is_file_session() || terminal.active_view != 0 {
+            return;
+        }
+        let overlay = terminal.ingest.overlay_flat_lines();
+        let TerminalState { views, buffer, .. } = terminal;
+        let view = &mut views[0];
+        view.mark_flat_lines_dirty();
+        view.rebuild(buffer);
+        view.set_live_overlay(overlay);
+    }
+
     /// Pin Follow to the content bottom immediately after ingest (not only in `render`),
     /// so stats/scrollbar do not lag a frame behind growing `max_scroll`.
-    fn snap_follow_scroll_after_ingest(&mut self, term_idx: usize) {
+    pub(crate) fn snap_follow_scroll_after_ingest(&mut self, term_idx: usize) {
         let Some(term) = self.terminals.get(term_idx) else {
             return;
         };

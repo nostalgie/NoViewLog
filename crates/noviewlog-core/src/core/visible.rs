@@ -35,21 +35,22 @@ pub fn rebuild_flat_lines_for_records(
     let mut flat = Vec::new();
 
     for record in visible {
-        if !severity.allows(record.level) {
+        let level = record.effective_level();
+        if !severity.allows(level) {
             continue;
         }
         let collapsible = record.lines.len() >= 2;
         let collapsed = collapsible && !expanded_record_ids.contains(&record.id);
         if collapsed {
             let colored = &record.lines[0];
-            let plain = strip_ansi(colored);
             let segments = parse_ansi_line(colored);
+            let plain: String = segments.iter().map(|s| s.text.as_str()).collect();
             flat.push(FlatLine {
                 record_id: record.id,
                 line_index: 0,
                 segments,
                 raw: plain,
-                level: record.level,
+                level,
                 collapsible: true,
                 collapsed: true,
                 hidden_line_count: record.lines.len() - 1,
@@ -57,18 +58,14 @@ pub fn rebuild_flat_lines_for_records(
             continue;
         }
         for (line_index, colored) in record.lines.iter().enumerate() {
-            let plain = strip_ansi(colored);
             let segments = parse_ansi_line(colored);
+            let plain: String = segments.iter().map(|s| s.text.as_str()).collect();
             flat.push(FlatLine {
                 record_id: record.id,
                 line_index,
                 segments,
                 raw: plain,
-                level: if line_index == 0 {
-                    record.level
-                } else {
-                    None
-                },
+                level: if line_index == 0 { level } else { None },
                 collapsible,
                 collapsed: false,
                 hidden_line_count: 0,
@@ -109,7 +106,7 @@ pub fn record_ids_needing_expand_for_search(
 ) -> Vec<u64> {
     let mut need = Vec::new();
     for record in filter_engine.filter_records(records) {
-        if !severity.allows(record.level) {
+        if !severity.allows(record.effective_level()) {
             continue;
         }
         if record.lines.len() < 2 || expanded_record_ids.contains(&record.id) {

@@ -1354,16 +1354,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let find_debounce_tick = find_debounce.clone();
     let find_stats_tab_tick = find_stats_tab.clone();
 
+    // Reused RGBA buffer across paints (recreate only on size change).
+    let viewport_pixels: Rc<RefCell<Option<(u32, u32, SharedPixelBuffer<Rgba8Pixel>)>>> =
+        Rc::new(RefCell::new(None));
+
     // Shared tick body so the PTY reader can wake the UI without waiting for TICK_FAST.
     //
-    // Terminal-first: under flood we must drain promptly *and* stay interactive like a
-    // normal OS terminal. Never tight-loop ingest+paint inside one HOST_TICK entry —
-    // that starved Slint's event loop (`cat ~/big.log` → ~70% CPU, black viewport).
-    // One pass, then yield; if more PTY work remains, schedule the next tick on the
-    // event loop (input/redraw get a turn between chunks).
+    // Terminal-first: under flood drain at display cadence (~33 ms), not as fast as
+    // the event loop. Immediate schedule_host_tick while pty_work_pending pinned a
+    // core (`cat` → 100% CPU). Flood continuation: bump_fast_timer only. Echo
+    // (no flood pacing) still wakes immediately.
     let ticking = Arc::new(AtomicBool::new(false));
     let needs_retick = Arc::new(AtomicBool::new(false));
     let host_tick_queued = Arc::new(AtomicBool::new(false));
+    let flood_pacing = Arc::new(AtomicBool::new(false));
 
     let schedule_host_tick: Arc<dyn Fn() + Send + Sync> = {
         let host_tick_queued = host_tick_queued.clone();
@@ -1386,7 +1390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ticking = ticking.clone();
         let needs_retick = needs_retick.clone();
-        let schedule_host_tick = schedule_host_tick.clone();
+        let flood_pacing = flood_pacing.clone();
         let ui_weak = ui_weak.clone();
         let engine_tick = engine_tick.clone();
         let logical_tick = logical_tick.clone();
@@ -1410,6 +1414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let find_pending_tick = find_pending_tick.clone();
         let find_debounce_tick = find_debounce_tick.clone();
         let find_stats_tab_tick = find_stats_tab_tick.clone();
+        let viewport_pixels = viewport_pixels.clone();
 
         HOST_TICK.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move || {
@@ -1447,10 +1452,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
                     drop(eng);
                     ticking.store(false, Ordering::Release);
-                    if more {
-                        bump_fast_timer(&timer_tick, &timer_fast_tick);
-                        schedule_host_tick();
-                    }
+                    flood_pacing.store(more, Ordering::Release);
                     return;
                 }
 
@@ -1493,9 +1495,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Keep fast cadence while flooding even if this frame was not dirty yet.
                 if dirty || pty_pending {
                     bump_fast_timer(&timer_tick, &timer_fast_tick);
+                    flood_pacing.store(pty_pending, Ordering::Release);
                 } else if timer_fast_tick.get() {
                     timer_tick.set_interval(TICK_IDLE);
                     timer_fast_tick.set(false);
+                    flood_pacing.store(false, Ordering::Release);
                 }
 
                 let (lw, lh) = *logical_tick.borrow();
@@ -1503,9 +1507,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
                     drop(eng);
                     ticking.store(false, Ordering::Release);
+                    flood_pacing.store(more, Ordering::Release);
                     if more {
                         bump_fast_timer(&timer_tick, &timer_fast_tick);
-                        schedule_host_tick();
                     }
                     return;
                 }
@@ -1524,18 +1528,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if !dirty {
+                    // Ingest-only: wait for TICK_FAST. Do not schedule_host_tick (busy drain).
                     let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
                     drop(eng);
                     ticking.store(false, Ordering::Release);
+                    flood_pacing.store(more, Ordering::Release);
                     if more {
                         bump_fast_timer(&timer_tick, &timer_fast_tick);
-                        schedule_host_tick();
                     }
                     return;
                 }
                 force_tick.set(false);
 
-                let mut buffer = SharedPixelBuffer::<Rgba8Pixel>::new(width, height);
+                let mut pixels = viewport_pixels.borrow_mut();
+                let reuse = matches!(
+                    pixels.as_ref(),
+                    Some((w, h, _)) if *w == width && *h == height
+                );
+                if !reuse {
+                    *pixels = Some((width, height, SharedPixelBuffer::<Rgba8Pixel>::new(width, height)));
+                }
+                let buffer = &mut pixels.as_mut().expect("viewport buffer").2;
                 if let Err(err) = eng.render(width, height, buffer.make_mut_bytes()) {
                     ui.set_status_text(SharedString::from(format!("render: {err}")));
                     drop(eng);
@@ -1550,16 +1563,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
                 drop(eng);
-                ui.set_viewport_image(Image::from_rgba8(buffer));
+                ui.set_viewport_image(Image::from_rgba8(buffer.clone()));
                 if !presented_tick.get() {
                     presented_tick.set(true);
                     ui.window().request_redraw();
                 }
 
                 ticking.store(false, Ordering::Release);
+                flood_pacing.store(more, Ordering::Release);
                 if more {
                     bump_fast_timer(&timer_tick, &timer_fast_tick);
-                    schedule_host_tick();
                 }
             }));
         });
@@ -1568,11 +1581,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let ticking = ticking.clone();
         let needs_retick = needs_retick.clone();
+        let flood_pacing = flood_pacing.clone();
         let schedule_host_tick = schedule_host_tick.clone();
         engine.borrow_mut().set_pty_activity_wake(Arc::new(move || {
             if ticking.load(Ordering::Acquire) {
-                // Reader wake during tick: finish this frame, then schedule after yield.
                 needs_retick.store(true, Ordering::Release);
+                return;
+            }
+            // Flood: TICK_FAST owns polling. Echo (pacing off) wakes immediately.
+            if flood_pacing.load(Ordering::Acquire) {
                 return;
             }
             schedule_host_tick();

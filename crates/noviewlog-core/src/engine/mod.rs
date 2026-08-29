@@ -27,7 +27,8 @@ use crate::spawn_resolve::{resolve_interactive_shell, resolve_process_launch};
 use crate::viewport::ViewportRenderer;
 use crate::viewport_layout::{
     build_visual_lines, content_width, count_visual_rows, max_cols, max_scroll_x, pos_at_pixel,
-    selection_plain_text, record_selection_at, word_selection_at, TextSelection, LEFT_PAD,
+    selection_plain_text, record_selection_at, word_selection_at, TextSelection, VisualRowIndex,
+    LEFT_PAD,
 };
 use crate::core::visible::SearchPattern;
 use portable_pty::PtySize;
@@ -54,6 +55,9 @@ pub(crate) const PTY_QUEUE_CAPACITY: usize = 384;
 /// Max PTY bytes fed through VTE / scrollback on a single UI tick.
 /// Kept below ~512 KB so Follow paints stay smooth while still draining floods promptly.
 pub(crate) const PTY_INGEST_BYTES_PER_TICK: usize = 256 * 1024;
+/// Minimum time between Viewport paint dirty marks under continuous PTY flood.
+/// Matches host `TICK_FAST` (~30 Hz) so Follow updates at display cadence, not per ingest chunk.
+pub(crate) const VIEWPORT_PAINT_MIN_INTERVAL: Duration = Duration::from_millis(33);
 
 
 mod commands;
@@ -95,6 +99,10 @@ pub struct Engine {
     pub(crate) renderer: ViewportRenderer,
     pub(crate) last_stats_at: Option<Instant>,
     pub(crate) viewport_dirty: bool,
+    /// Last successful Viewport rasterize (host paint). Used to throttle dirty under flood.
+    pub(crate) last_viewport_paint_at: Option<Instant>,
+    /// Last `poll_pty` (ingest). Host must not busy-wake the reader within the paint interval.
+    pub(crate) last_pty_poll_at: Option<Instant>,
     /// When true, the first tick auto-starts the active program (CLI launch only).
     pub(crate) auto_start_launch: bool,
     /// Terminal tab block-caret blink: visible when true; toggled on [`CARET_BLINK_PERIOD`].
@@ -162,6 +170,8 @@ impl Engine {
             renderer: ViewportRenderer::with_font_size(viewport_font_size),
             last_stats_at: None,
             viewport_dirty: true,
+            last_viewport_paint_at: None,
+            last_pty_poll_at: None,
             auto_start_launch: false,
             caret_blink_on: true,
             caret_blink_at: Instant::now(),
@@ -265,6 +275,10 @@ impl Engine {
         self.maybe_prefetch_file_window();
         if self.rebuild_if_needed() {
             self.mark_viewport_dirty();
+            if self.has_active_terminal() {
+                let idx = self.active_terminal;
+                self.snap_follow_scroll_after_ingest(idx);
+            }
         }
         self.tick_caret_blink();
         self.emit_stats();
@@ -283,6 +297,47 @@ impl Engine {
     pub fn terminal_caret_rect(&self, width: u32, height: u32) -> Option<(f32, f32, f32, f32)> {
         if !self.terminal_caret_active() || width == 0 || height == 0 {
             return None;
+        }
+        let metrics = self.renderer.metrics();
+        if self.paints_live_vt_grid() {
+            // Same wrap + caret-pinned scroll as live-grid paint. Bare `row * stride`
+            // ignored scroll_y after WRAP, so the overlay crawled above the prompt.
+            let wrap = self.active_view().wrap_lines;
+            let (row, col) = self.active_terminal().ingest.grid_caret()?;
+            let lines = self.active_terminal().ingest.grid_flat_lines();
+            let (scroll_y, visual_rows) =
+                self.live_vt_grid_follow_scroll(&lines, wrap, width, height, row);
+            let first_row = (scroll_y / metrics.row_stride).floor() as usize;
+            let y_offset = scroll_y - first_row as f32 * metrics.row_stride;
+            let max_rows = (height as f32 / metrics.row_stride).ceil() as usize + 1;
+            let visual = crate::viewport_layout::collect_visible_visual_lines_with_total(
+                &lines,
+                wrap,
+                width,
+                metrics.cell_width,
+                first_row,
+                max_rows,
+                Some(visual_rows),
+                None,
+            );
+            let caret = crate::viewport::ViewportCaret {
+                flat_index: row,
+                col,
+            };
+            let (cx, cy) = crate::viewport::caret_pixel_pos(
+                &lines,
+                &visual,
+                caret,
+                0,
+                y_offset,
+                LEFT_PAD as i32,
+                metrics.row_stride,
+                metrics.cell_width,
+                height,
+            )?;
+            let w = metrics.cell_width.max(1) as f32;
+            let h = metrics.row_height.max(1.0);
+            return Some((cx as f32, cy, w, h));
         }
         let terminal = self.active_terminal();
         let view = terminal.active_view();
@@ -343,6 +398,30 @@ impl Engine {
         Some((cx as f32, cy, w, h))
     }
 
+    /// Scroll Y for Follow live-grid paint/caret: pin so the caret's flat line
+    /// stays in view (bottom-aligned). Avoids scrolling blank PTY rows below a
+    /// home cursor off the top of the viewport.
+    fn live_vt_grid_follow_scroll(
+        &self,
+        lines: &[crate::core::types::FlatLine],
+        wrap: bool,
+        width: u32,
+        height: u32,
+        caret_row: usize,
+    ) -> (f32, usize) {
+        let metrics = self.renderer.metrics();
+        let stride = metrics.row_stride;
+        let index = VisualRowIndex::rebuild(lines, wrap, width, metrics.cell_width);
+        let visual_rows = index.total_rows();
+        let max_scroll = (visual_rows as f32 * stride - height as f32).max(0.0);
+        let caret_line = caret_row.min(lines.len().saturating_sub(1));
+        let line_end = index.visual_end_of_flat(caret_line).max(1);
+        let scroll_y = (line_end as f32 * stride - height as f32)
+            .max(0.0)
+            .min(max_scroll);
+        (scroll_y, visual_rows)
+    }
+
     /// Register a host wake when PTY bytes or exit are posted (from the reader thread).
     pub fn set_pty_activity_wake(&mut self, wake: PtyActivityWake) {
         self.pty_activity_wake = Some(wake);
@@ -358,6 +437,21 @@ impl Engine {
         let pending = self.pty_drain_pending || self.pty_hold.is_some();
         self.pty_drain_pending = false;
         pending
+    }
+
+    /// True when the PTY reader must **not** force an immediate UI tick: flood
+    /// work is already queued and the last ingest (or paint) was within the
+    /// display interval. The host timer (~33 ms) will poll. Echo (empty of
+    /// pending flood) must still wake immediately.
+    pub fn defer_pty_reader_wake(&self) -> bool {
+        if !self.pty_work_pending() {
+            return false;
+        }
+        let last = match self.last_pty_poll_at.or(self.last_viewport_paint_at) {
+            Some(t) => t,
+            None => return false,
+        };
+        last.elapsed() < VIEWPORT_PAINT_MIN_INTERVAL
     }
 
     pub(crate) fn set_viewport_focus(&mut self, focused: bool) {
@@ -391,6 +485,34 @@ impl Engine {
 
     pub(crate) fn mark_viewport_dirty(&mut self) {
         self.viewport_dirty = true;
+    }
+
+    /// Under continuous PTY flood, dirty at most once per [`VIEWPORT_PAINT_MIN_INTERVAL`]
+    /// since the last paint. When the flood queue is empty after ingest (echo / catch-up),
+    /// always dirty so the tail becomes visible promptly.
+    ///
+    /// Follow scroll MUST already have been snapped on this ingest — skipping paint must
+    /// not leave a stale `scroll_offset_y`.
+    pub(crate) fn mark_viewport_dirty_after_pty_ingest(&mut self, more_pending: bool) {
+        if !more_pending {
+            self.mark_viewport_dirty();
+            return;
+        }
+        if self.viewport_dirty {
+            return;
+        }
+        let due = match self.last_viewport_paint_at {
+            None => true,
+            Some(t) => t.elapsed() >= VIEWPORT_PAINT_MIN_INTERVAL,
+        };
+        if due {
+            self.mark_viewport_dirty();
+        }
+    }
+
+    /// Host calls after a successful Viewport Image upload (or after `render` in tests).
+    pub fn note_viewport_painted(&mut self) {
+        self.last_viewport_paint_at = Some(Instant::now());
     }
 
     /// Character grid size for the PTY / VT emulator.
@@ -463,6 +585,7 @@ impl Engine {
                 "No terminal",
             )?;
             self.viewport_dirty = false;
+            self.note_viewport_painted();
             return Ok(());
         }
 
@@ -482,6 +605,42 @@ impl Engine {
             if terminal.scroll_offset_y > local_max {
                 terminal.scroll_offset_y = local_max;
             }
+        }
+
+        if self.paints_live_vt_grid() {
+            // Native Follow: paint the live screen only. Scroll keeps the caret
+            // in view (WRAP may grow visual height); never the capped scrollback ring.
+            let wrap = self.active_view().wrap_lines;
+            let lines = self.active_terminal().ingest.grid_flat_lines();
+            let caret_row = self
+                .active_terminal()
+                .ingest
+                .grid_caret()
+                .map(|(r, _)| r)
+                .unwrap_or(0);
+            let (scroll_y, visual_rows) =
+                self.live_vt_grid_follow_scroll(&lines, wrap, width, height, caret_row);
+            self.renderer.render_with_total(
+                out,
+                width,
+                height,
+                &lines,
+                scroll_y,
+                0.0,
+                wrap,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(visual_rows),
+                None,
+            )?;
+            let max = self.max_scroll_offset();
+            self.active_terminal_mut().scroll_offset_y = max;
+            self.viewport_dirty = false;
+            self.note_viewport_painted();
+            return Ok(());
         }
 
         let (auto_follow, wrap_lines, flat_lines, search_pattern, active_match, running, scroll_offset_y, scroll_x, selection) = {
@@ -532,6 +691,7 @@ impl Engine {
             };
             self.renderer.render_center_message(out, width, height, msg)?;
             self.viewport_dirty = false;
+            self.note_viewport_painted();
             return Ok(());
         }
         let effective_scroll_x = if wrap_lines { 0.0 } else { scroll_x };
@@ -560,6 +720,7 @@ impl Engine {
             Some(index.as_ref()),
         )?;
         self.viewport_dirty = false;
+        self.note_viewport_painted();
         Ok(())
     }
 
@@ -740,20 +901,38 @@ impl Engine {
             return search_was_dirty || scroll_row.is_some();
         }
 
+        if self.paints_live_vt_grid() {
+            return false;
+        }
+
         let terminal = self.active_terminal_mut();
+        let is_file = terminal.is_file_session();
         let active = terminal.active_view;
+        let is_live_terminal_tab = active == 0 && !is_file;
+        let records_len = terminal.buffer.records_len();
         let Some(view) = terminal.views.get_mut(active) else {
             return false;
         };
         let before_records = view.flat_lines_record_cursor;
         let before_lines = view.flat_lines.len();
         let search_was_dirty = view.is_search_dirty();
+        let rebuild_committed = is_live_terminal_tab
+            && (view.is_flat_lines_dirty() || view.flat_lines_record_cursor < records_len);
+        if rebuild_committed {
+            view.strip_live_overlay();
+        }
         // Partial borrow: view + buffer are distinct fields.
         let scroll_row = {
             let TerminalState { views, buffer, .. } = terminal;
             let view = views.get_mut(active).expect("active view");
             view.rebuild(buffer)
         };
+        if is_live_terminal_tab
+            && (rebuild_committed || terminal.views[0].overlay_len() == 0)
+        {
+            let overlay = terminal.ingest.overlay_flat_lines();
+            terminal.views[0].set_live_overlay(overlay);
+        }
         let view = terminal.views.get_mut(active).expect("active view");
         let changed = search_was_dirty
             || view.flat_lines_record_cursor != before_records
@@ -901,8 +1080,12 @@ impl Engine {
         view.search_case_sensitive = case_sensitive;
         view.search_whole_word = whole_word;
         view.mark_search_changed();
+        let need_scrollback = !query.is_empty();
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+        if need_scrollback {
+            self.materialize_live_terminal_tab();
+        }
     }
 
     pub(crate) fn filter_draft_set(&mut self, pattern: &str, use_regex: bool) {
@@ -1114,7 +1297,7 @@ impl Engine {
             if let Some(rec) = terminal.parser.flush_pending() {
                 terminal.buffer.add(rec);
             }
-            let lines = terminal.buffer.raw_lines().to_vec();
+            let lines = terminal.buffer.raw_lines();
             let records = reparse_lines(&lines, format.clone());
             terminal.buffer.replace_all(records);
             terminal.parser = RecordParser::new(format);

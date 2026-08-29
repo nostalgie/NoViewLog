@@ -1,12 +1,14 @@
 use chrono::Utc;
 
 use crate::core::ansi::strip_ansi;
-use crate::core::types::{detect_level, LogFormat, LogRecord};
+use crate::core::types::{LogFormat, LogRecord};
 
 pub struct RecordParser {
     format: LogFormat,
     pending_lines: Vec<String>,
     next_id: u64,
+    /// Shared stamp for every record flushed in the current ingest chunk.
+    chunk_received_at: chrono::DateTime<Utc>,
 }
 
 impl RecordParser {
@@ -15,7 +17,13 @@ impl RecordParser {
             format,
             pending_lines: Vec::new(),
             next_id: 1,
+            chunk_received_at: Utc::now(),
         }
+    }
+
+    /// Call once per PTY ingest chunk so flushed records share one timestamp.
+    pub fn begin_chunk(&mut self) {
+        self.chunk_received_at = Utc::now();
     }
 
     pub fn set_format(&mut self, format: LogFormat) {
@@ -75,13 +83,12 @@ impl RecordParser {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        let level = detect_level(&text);
         let record = LogRecord {
             id: self.next_id,
             lines,
             text,
-            received_at: Utc::now(),
-            level,
+            received_at: self.chunk_received_at,
+            level: None,
             overwrite: false,
         };
         self.next_id += 1;
