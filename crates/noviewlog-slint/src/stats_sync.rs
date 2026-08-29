@@ -111,11 +111,22 @@ fn apply_stats_to_scroll(stats: &StatsSnapshot, ui: &AppWindow, syncing: &Rc<Cel
     let show_h = !wrap_lines && max_scroll_x > 0.5;
 
     syncing.set(true);
-    ui.set_max_scroll_y(max_scroll_y.max(0.0));
-    ui.set_scroll_y(scroll_y.clamp(0.0, max_scroll_y.max(0.0)));
-    ui.set_max_scroll_x(max_scroll_x.max(0.0));
-    ui.set_scroll_x(scroll_x.clamp(0.0, max_scroll_x.max(0.0)));
-    ui.set_show_hscroll(show_h);
+    let max_y = max_scroll_y.max(0.0);
+    let max_x = max_scroll_x.max(0.0);
+    let next_y = scroll_y.clamp(0.0, max_y);
+    let next_x = scroll_x.clamp(0.0, max_x);
+    // Always refresh extents (thumb size); skip scroll position if unchanged to avoid churn.
+    ui.set_max_scroll_y(max_y);
+    ui.set_max_scroll_x(max_x);
+    if (ui.get_scroll_y() - next_y).abs() > 0.5 {
+        ui.set_scroll_y(next_y);
+    }
+    if (ui.get_scroll_x() - next_x).abs() > 0.5 {
+        ui.set_scroll_x(next_x);
+    }
+    if ui.get_show_hscroll() != show_h {
+        ui.set_show_hscroll(show_h);
+    }
     syncing.set(false);
 }
 
@@ -398,6 +409,18 @@ fn apply_stats_to_view_chrome(
     syncing_follow: &Rc<Cell<bool>>,
 ) {
     viewport_font_size.set(stats.viewport_font_size);
+
+    let line_pos = if stats.viewport_line_total > 0 && stats.viewport_line > 0 {
+        SharedString::from(format!(
+            "{} / {}",
+            stats.viewport_line, stats.viewport_line_total
+        ))
+    } else {
+        SharedString::default()
+    };
+    if ui.get_line_position_text() != line_pos {
+        ui.set_line_position_text(line_pos);
+    }
 
     let capped = clamp_max_scrollback_lines(stats.max_scrollback_lines) as i32;
     if ui.get_max_scrollback_lines() != capped {

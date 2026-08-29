@@ -3,7 +3,7 @@ use crate::spawn_resolve::prepare_spawn;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -82,7 +82,7 @@ impl PtyManager {
     /// Start a process in this PTY. Stops any previous child of **this** manager only.
     pub fn start(
         &mut self,
-        tx: Sender<PtyEvent>,
+        tx: SyncSender<PtyEvent>,
         id: String,
         command: String,
         args: Vec<String>,

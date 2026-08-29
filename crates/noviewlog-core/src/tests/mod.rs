@@ -40,3 +40,4 @@ mod terminals_files;
 mod viewport_wrap;
 mod volatile_patch;
 mod terminal_caret;
+mod pty_flood;

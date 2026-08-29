@@ -49,7 +49,7 @@ impl Engine {
             dropped,
             can_restore,
             scroll_x,
-            scroll_y,
+            _local_scroll_y,
             has_selection,
             auto_follow,
             tab_name,
@@ -161,6 +161,9 @@ impl Engine {
                 false,
             )
         };
+        // FILES scrollbar uses whole-file coordinates.
+        let scroll_y = self.stats_scroll_y();
+        let (viewport_line, viewport_line_total) = self.viewport_line_position();
         let max_scroll_x = if self.has_active_terminal() {
             self.current_max_scroll_x()
         } else {
@@ -225,6 +228,8 @@ impl Engine {
             file_window_start,
             file_lines_before,
             file_loading,
+            viewport_line,
+            viewport_line_total,
             max_scrollback_lines: self.config.max_scrollback_lines,
             viewport_font_size: self.renderer.font_size(),
             severity_filter,

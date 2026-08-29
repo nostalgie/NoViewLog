@@ -492,7 +492,7 @@ fn search_incremental_append_extends_matches() {
     let mut view = LogView::from_runtime("All", Vec::new());
     view.search_query = "boom".to_string();
     view.mark_search_changed();
-    view.rebuild(&buffer);
+    view.rebuild(&mut buffer);
     assert_eq!(view.search_matches.len(), 1);
     assert_eq!(view.search_match_scan_end_for_test(), 1);
 
@@ -504,7 +504,7 @@ fn search_incremental_append_extends_matches() {
         level: None,
         overwrite: false,
     });
-    view.rebuild(&buffer);
+    view.rebuild(&mut buffer);
     assert_eq!(view.search_matches.len(), 2);
     assert_eq!(view.search_matches[1].line_index, 1);
     assert_eq!(view.search_match_scan_end_for_test(), 2);

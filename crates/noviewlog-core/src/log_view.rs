@@ -3,7 +3,7 @@
 //! `Command::Tab*` and stats field `tabs` refer to `LogView` instances.
 //! Index 0 is the Terminal tab (not filter-editable in the UI).
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::core::visible::{
     append_search_matches, collect_search_matches, compile_search_pattern, rebuild_flat_lines,
     rebuild_flat_lines_for_records,     record_ids_needing_expand_for_search, SearchPattern,
 };
+use crate::viewport_layout::VisualRowIndex;
 
 /// Display name of the pinned first tab (index 0).
 pub const TERMINAL_TAB_NAME: &str = "Terminal";
@@ -45,8 +46,8 @@ pub struct LogView {
     pub flat_lines: Arc<Vec<FlatLine>>,
     flat_lines_dirty: bool,
     pub(crate) flat_lines_record_cursor: usize,
-    /// Cached `count_visual_rows` key: (viewport_width, cell_width, wrap, row_count).
-    visual_rows_cache: Cell<Option<(u32, u32, bool, usize)>>,
+    /// Maintained visual-row prefix index for Wrap ON scroll (invalidated on geometry/flat change).
+    visual_row_index: RefCell<Arc<VisualRowIndex>>,
     filter_engine: FilterEngine,
     /// Whole-file match byte offsets for file-session filter tabs (`None` scan = idle).
     pub match_offsets: Vec<u64>,
@@ -80,7 +81,7 @@ impl LogView {
             flat_lines: Arc::new(Vec::new()),
             flat_lines_dirty: true,
             flat_lines_record_cursor: 0,
-            visual_rows_cache: Cell::new(None),
+            visual_row_index: RefCell::new(Arc::new(VisualRowIndex::invalid())),
             filter_engine: FilterEngine::new(tab.filters),
             match_offsets: Vec::new(),
             match_scan_pos: None,
@@ -265,7 +266,7 @@ impl LogView {
         }
     }
 
-    pub fn rebuild(&mut self, buffer: &RecordBuffer) -> Option<usize> {
+    pub fn rebuild(&mut self, buffer: &mut RecordBuffer) -> Option<usize> {
         if self.flat_lines_dirty {
             self.flat_lines = Arc::new(rebuild_flat_lines(
                 buffer,
@@ -273,26 +274,27 @@ impl LogView {
                 self.severity_filter,
                 &self.expanded_record_ids,
             ));
-            self.flat_lines_record_cursor = buffer.records().len();
+            self.flat_lines_record_cursor = buffer.records_len();
             self.flat_lines_dirty = false;
             self.search_dirty = true;
             self.search_full_rescan = true;
             self.search_match_scan_end = 0;
-            self.visual_rows_cache.set(None);
-        } else if self.flat_lines_record_cursor < buffer.records().len() {
-            let records = &buffer.records()[self.flat_lines_record_cursor..];
+            self.invalidate_visual_row_index();
+        } else if self.flat_lines_record_cursor < buffer.records_len() {
+            let cursor = self.flat_lines_record_cursor;
             let appended = rebuild_flat_lines_for_records(
-                records,
+                &buffer.records()[cursor..],
                 &self.filter_engine,
                 self.severity_filter,
                 &self.expanded_record_ids,
             );
             if !appended.is_empty() {
+                let start = self.flat_lines.len();
                 Arc::make_mut(&mut self.flat_lines).extend(appended);
+                self.extend_visual_row_index_from(start);
                 self.search_dirty = true;
-                self.visual_rows_cache.set(None);
             }
-            self.flat_lines_record_cursor = buffer.records().len();
+            self.flat_lines_record_cursor = buffer.records_len();
         }
         if self.search_dirty {
             self.search_dirty = false;
@@ -301,7 +303,7 @@ impl LogView {
         None
     }
 
-    fn refresh_search_with_buffer(&mut self, buffer: &RecordBuffer) -> Option<usize> {
+    fn refresh_search_with_buffer(&mut self, buffer: &mut RecordBuffer) -> Option<usize> {
         // Auto-expand collapsed Records that match only on hidden lines.
         if !self.search_query.is_empty() {
             let pattern = if let Some(p) = self.search_pattern.clone() {
@@ -347,10 +349,10 @@ impl LogView {
                         self.severity_filter,
                         &self.expanded_record_ids,
                     ));
-                    self.flat_lines_record_cursor = buffer.records().len();
+                    self.flat_lines_record_cursor = buffer.records_len();
                     self.search_full_rescan = true;
                     self.search_match_scan_end = 0;
-                    self.visual_rows_cache.set(None);
+                    self.invalidate_visual_row_index();
                 }
             }
         }
@@ -387,37 +389,77 @@ impl LogView {
         self.flat_lines = Arc::new(lines);
         self.flat_lines_dirty = false;
         self.flat_lines_record_cursor = 0;
-        self.visual_rows_cache.set(None);
+        self.invalidate_visual_row_index();
         self.search_dirty = true;
         self.search_full_rescan = true;
         self.search_match_scan_end = 0;
     }
 
-    /// Cached visual row count for scroll/prefetch (invalidated when flat lines change).
-    pub fn cached_visual_rows(
+    /// Ensure the visual-row index matches current flat lines + geometry; return shared handle.
+    pub fn ensure_visual_row_index(
         &self,
         viewport_width: u32,
         cell_width: u32,
-        count_fn: impl FnOnce(&[FlatLine], bool, u32, u32) -> usize,
-    ) -> usize {
-        if let Some((w, c, wrap, rows)) = self.visual_rows_cache.get() {
-            if w == viewport_width && c == cell_width && wrap == self.wrap_lines {
-                return rows;
+    ) -> Arc<VisualRowIndex> {
+        {
+            let slot = self.visual_row_index.borrow();
+            if slot.is_valid_for(
+                self.flat_lines.len(),
+                self.wrap_lines,
+                viewport_width,
+                cell_width,
+            ) {
+                return Arc::clone(&slot);
             }
         }
-        let rows = count_fn(
+        let rebuilt = Arc::new(VisualRowIndex::rebuild(
             &self.flat_lines,
             self.wrap_lines,
             viewport_width,
             cell_width,
-        );
-        self.visual_rows_cache
-            .set(Some((viewport_width, cell_width, self.wrap_lines, rows)));
-        rows
+        ));
+        *self.visual_row_index.borrow_mut() = Arc::clone(&rebuilt);
+        rebuilt
+    }
+
+    /// Cached visual row count for scroll/prefetch (backed by [`VisualRowIndex`]).
+    pub fn cached_visual_rows(
+        &self,
+        viewport_width: u32,
+        cell_width: u32,
+        _count_fn: impl FnOnce(&[FlatLine], bool, u32, u32) -> usize,
+    ) -> usize {
+        self.ensure_visual_row_index(viewport_width, cell_width)
+            .total_rows()
     }
 
     pub fn invalidate_visual_rows_cache(&self) {
-        self.visual_rows_cache.set(None);
+        self.invalidate_visual_row_index();
+    }
+
+    fn invalidate_visual_row_index(&self) {
+        *self.visual_row_index.borrow_mut() = Arc::new(VisualRowIndex::invalid());
+    }
+
+    /// Extend a still-valid index after flat lines were appended from `from_flat`.
+    fn extend_visual_row_index_from(&mut self, from_flat: usize) {
+        let mut slot = self.visual_row_index.borrow_mut();
+        if !slot.valid_geometry_only(self.wrap_lines) || slot.flat_len() != from_flat {
+            *slot = Arc::new(VisualRowIndex::invalid());
+            return;
+        }
+        let lines = &self.flat_lines[from_flat..];
+        if lines.is_empty() {
+            return;
+        }
+        match Arc::get_mut(&mut *slot) {
+            Some(idx) => idx.extend_lines(lines),
+            None => {
+                let mut owned = (**slot).clone();
+                owned.extend_lines(lines);
+                *slot = Arc::new(owned);
+            }
+        }
     }
 
     pub fn request_match_rebuild(&mut self) {
@@ -432,14 +474,14 @@ impl LogView {
         self.flat_lines = Arc::new(Vec::new());
         self.flat_lines_record_cursor = 0;
         self.flat_lines_dirty = true;
-        self.visual_rows_cache.set(None);
+        self.invalidate_visual_row_index();
         self.search_full_rescan = true;
         self.search_match_scan_end = 0;
     }
 
     pub fn mark_flat_lines_dirty(&mut self) {
         self.flat_lines_dirty = true;
-        self.visual_rows_cache.set(None);
+        self.invalidate_visual_row_index();
         self.search_dirty = true;
         self.search_full_rescan = true;
         self.search_match_scan_end = 0;
@@ -447,15 +489,19 @@ impl LogView {
 
     /// Replace the volatile VT tail in `flat_lines` without a full scrollback rebuild.
     ///
+    /// When the ring drops a stable prefix (`shifted_raw_lines` > 0), drops the matching
+    /// flat-line prefix instead of failing into a full rebuild.
+    ///
     /// Returns `false` when the view must fall back to a full dirty rebuild
     /// (filters, search, severity, or inconsistent cursors).
     pub fn try_patch_volatile_tail(
         &mut self,
-        buffer: &RecordBuffer,
+        buffer: &mut RecordBuffer,
         old_volatile: usize,
         old_total: usize,
         new_volatile: usize,
         new_total: usize,
+        shifted_raw_lines: usize,
     ) -> bool {
         if self.flat_lines_dirty {
             return false;
@@ -471,7 +517,10 @@ impl LogView {
         }
         let stable_before = old_total.saturating_sub(old_volatile);
         let stable_after = new_total.saturating_sub(new_volatile);
-        if stable_after < stable_before || new_total < new_volatile {
+        if new_total < new_volatile {
+            return false;
+        }
+        if shifted_raw_lines == 0 && stable_after < stable_before {
             return false;
         }
 
@@ -480,12 +529,27 @@ impl LogView {
             return false;
         }
         // Volatile records are single-line → one flat line each.
-        lines.truncate(lines.len() - old_volatile);
+        let stable_flat_before = lines.len() - old_volatile;
+        lines.truncate(stable_flat_before);
+
+        if shifted_raw_lines > 0 {
+            if lines.len() < shifted_raw_lines {
+                return false;
+            }
+            lines.drain(0..shifted_raw_lines);
+        }
+
+        // Unfiltered Terminal tab: one flat line per record for typical PTY commits.
+        // After prefix drop, `lines` aligns with `records[0..lines.len()]`.
+        let k = lines.len();
+        if k > stable_after {
+            return false;
+        }
 
         let records = buffer.records();
-        if stable_after > stable_before {
+        if k < stable_after {
             let appended = rebuild_flat_lines_for_records(
-                &records[stable_before..stable_after],
+                &records[k..stable_after],
                 &self.filter_engine,
                 self.severity_filter,
                 &self.expanded_record_ids,
@@ -502,7 +566,39 @@ impl LogView {
             lines.extend(vol);
         }
         self.flat_lines_record_cursor = new_total;
-        self.visual_rows_cache.set(None);
+
+        // Incremental index: truncate volatile, drop ring prefix, re-extend tail.
+        {
+            let mut slot = self.visual_row_index.borrow_mut();
+            if slot.valid_geometry_only(self.wrap_lines) && slot.flat_len() >= stable_flat_before {
+                match Arc::get_mut(&mut *slot) {
+                    Some(idx) => {
+                        idx.truncate_flat(stable_flat_before);
+                        if shifted_raw_lines > 0 {
+                            idx.drop_prefix(shifted_raw_lines);
+                        }
+                        let from = idx.flat_len();
+                        if from < self.flat_lines.len() {
+                            idx.extend_lines(&self.flat_lines[from..]);
+                        }
+                    }
+                    None => {
+                        let mut owned = (**slot).clone();
+                        owned.truncate_flat(stable_flat_before);
+                        if shifted_raw_lines > 0 {
+                            owned.drop_prefix(shifted_raw_lines);
+                        }
+                        let from = owned.flat_len();
+                        if from < self.flat_lines.len() {
+                            owned.extend_lines(&self.flat_lines[from..]);
+                        }
+                        *slot = Arc::new(owned);
+                    }
+                }
+            } else {
+                *slot = Arc::new(VisualRowIndex::invalid());
+            }
+        }
         true
     }
 

@@ -25,6 +25,14 @@ Multiple sessions can run **at the same time**. Switching the active session onl
 - Ring-buffer scrollback (`max_scrollback_lines`, default 10k, max 30k)
 - Follow mode, keyboard → stdin, interactive shell / launched process
 - Primary tab display name: **Terminal**
+- Live PTY output uses a **bounded queue** and per-tick ingest budget so floods
+  (`cat` of tens of MB, chatty builds) stall the writer instead of freezing the UI.
+  Scrollback still caps at 10–30k — open large logs via **FILES** / `load_file`
+  to browse the whole file.
+- When the ring drops oldest lines and Follow is off, scroll position is **anchored**
+  (offset shrinks with the dropped height) so scrolled-up content does not slide.
+  Diagnosis / residual risks for remaining jank:
+  [`openspec/changes/pty-flood-resilience/DIAGNOSIS.md`](../openspec/changes/pty-flood-resilience/DIAGNOSIS.md).
 
 ### File sessions
 

@@ -11,7 +11,7 @@ use crate::core::types::{
 };
 
 pub fn rebuild_flat_lines(
-    buffer: &RecordBuffer,
+    buffer: &mut RecordBuffer,
     filter_engine: &FilterEngine,
     severity: SeverityFilter,
     expanded_record_ids: &HashSet<u64>,

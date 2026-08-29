@@ -127,6 +127,12 @@ pub struct StatsSnapshot {
     pub file_lines_before: u64,
     #[serde(default)]
     pub file_loading: bool,
+    /// 1-based line at the top of the viewport (file line or scrollback flat line).
+    #[serde(default)]
+    pub viewport_line: u64,
+    /// Total lines for the status bar counter (file index or flat scrollback length).
+    #[serde(default)]
+    pub viewport_line_total: u64,
     #[serde(default)]
     pub max_scrollback_lines: usize,
     #[serde(default)]

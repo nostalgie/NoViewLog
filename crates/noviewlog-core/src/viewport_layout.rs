@@ -50,6 +50,169 @@ pub fn max_cols(content_width: u32, cell_width: u32) -> usize {
     (content_width / cell_width.max(1)).max(1) as usize
 }
 
+/// Visual rows contributed by one flat line under wrap (empty → 1).
+pub fn visual_rows_for_line(raw: &str, cols: usize) -> usize {
+    let cols = cols.max(1);
+    let cells = display_cell_count(raw);
+    if cells == 0 {
+        1
+    } else {
+        cells.div_ceil(cols)
+    }
+}
+
+/// Prefix sums of visual rows per flat line for the current wrap geometry.
+///
+/// `prefix[i]` = cumulative visual rows after flat lines `0..=i`.
+/// Enables O(1) totals and O(log n) jump to the flat line at a visual row.
+#[derive(Clone, Debug, Default)]
+pub struct VisualRowIndex {
+    prefix: Vec<u32>,
+    viewport_width: u32,
+    cell_width: u32,
+    wrap: bool,
+    /// When false, callers must rebuild before use.
+    valid: bool,
+}
+
+impl VisualRowIndex {
+    pub fn invalid() -> Self {
+        Self {
+            prefix: Vec::new(),
+            viewport_width: 0,
+            cell_width: 0,
+            wrap: false,
+            valid: false,
+        }
+    }
+
+    pub fn is_valid_for(
+        &self,
+        flat_len: usize,
+        wrap: bool,
+        viewport_width: u32,
+        cell_width: u32,
+    ) -> bool {
+        self.valid
+            && self.prefix.len() == flat_len
+            && self.wrap == wrap
+            && self.viewport_width == viewport_width
+            && self.cell_width == cell_width
+    }
+
+    /// Valid index for incremental mutate (append/trim) at the same wrap mode.
+    /// Geometry (width/cell) must already match whatever was used to build it.
+    pub fn valid_geometry_only(&self, wrap: bool) -> bool {
+        self.valid && self.wrap == wrap
+    }
+
+    pub fn rebuild(
+        lines: &[FlatLine],
+        wrap: bool,
+        viewport_width: u32,
+        cell_width: u32,
+    ) -> Self {
+        let mut prefix = Vec::with_capacity(lines.len());
+        let mut sum = 0u32;
+        if !wrap {
+            for _ in 0..lines.len() {
+                sum += 1;
+                prefix.push(sum);
+            }
+        } else {
+            let cols = max_cols(content_width(viewport_width), cell_width).max(1);
+            for line in lines {
+                sum = sum.saturating_add(visual_rows_for_line(&line.raw, cols) as u32);
+                prefix.push(sum);
+            }
+        }
+        Self {
+            prefix,
+            viewport_width,
+            cell_width,
+            wrap,
+            valid: true,
+        }
+    }
+
+    pub fn total_rows(&self) -> usize {
+        self.prefix.last().copied().unwrap_or(0) as usize
+    }
+
+    /// Flat index and the absolute visual-row start of that flat line for `row`.
+    /// Returns `None` when `row` is past the end (or the index is empty).
+    pub fn flat_at_visual_row(&self, row: usize) -> Option<(usize, usize)> {
+        if self.prefix.is_empty() {
+            return None;
+        }
+        let row_u = row as u32;
+        let i = self.prefix.partition_point(|&p| p <= row_u);
+        if i >= self.prefix.len() {
+            return None;
+        }
+        let start = if i == 0 {
+            0
+        } else {
+            self.prefix[i - 1] as usize
+        };
+        Some((i, start))
+    }
+
+    pub fn invalidate(&mut self) {
+        self.prefix.clear();
+        self.valid = false;
+    }
+
+    /// Drop the first `n` flat lines (ring trim).
+    pub fn drop_prefix(&mut self, n: usize) {
+        if !self.valid || n == 0 {
+            return;
+        }
+        if n >= self.prefix.len() {
+            self.prefix.clear();
+            return;
+        }
+        let base = self.prefix[n - 1];
+        self.prefix.drain(0..n);
+        for p in &mut self.prefix {
+            *p = p.saturating_sub(base);
+        }
+    }
+
+    /// Keep only the first `n` flat-line prefix entries.
+    pub fn truncate_flat(&mut self, n: usize) {
+        if !self.valid {
+            return;
+        }
+        self.prefix.truncate(n);
+    }
+
+    /// Append prefix entries for newly added flat lines (same geometry).
+    pub fn extend_lines(&mut self, lines: &[FlatLine]) {
+        if !self.valid || lines.is_empty() {
+            return;
+        }
+        let mut sum = self.prefix.last().copied().unwrap_or(0);
+        if !self.wrap {
+            for _ in lines {
+                sum += 1;
+                self.prefix.push(sum);
+            }
+            return;
+        }
+        let cols = max_cols(content_width(self.viewport_width), self.cell_width).max(1);
+        for line in lines {
+            sum = sum.saturating_add(visual_rows_for_line(&line.raw, cols) as u32);
+            self.prefix.push(sum);
+        }
+    }
+
+    /// Number of flat lines covered (for sync checks).
+    pub fn flat_len(&self) -> usize {
+        self.prefix.len()
+    }
+}
+
 pub fn build_visual_lines(
     lines: &[FlatLine],
     wrap: bool,
@@ -83,25 +246,14 @@ pub fn count_visual_rows(
     viewport_width: u32,
     cell_width: u32,
 ) -> usize {
-    if !wrap {
-        return lines.len();
-    }
-    let cols = max_cols(content_width(viewport_width), cell_width).max(1);
-    lines
-        .iter()
-        .map(|line| {
-            let cells = display_cell_count(&line.raw);
-            if cells == 0 {
-                1
-            } else {
-                cells.div_ceil(cols)
-            }
-        })
-        .sum()
+    VisualRowIndex::rebuild(lines, wrap, viewport_width, cell_width).total_rows()
 }
 
 /// Materialize only the visual rows needed to paint `[first_row, first_row + max_rows)`.
 /// Avoids allocating a full wrap layout for multi-thousand-line file windows.
+///
+/// Prefer passing a maintained [`VisualRowIndex`] so mid-buffer Wrap ON is
+/// O(log n + viewport) instead of O(scrollback).
 pub fn collect_visible_visual_lines(
     lines: &[FlatLine],
     wrap: bool,
@@ -110,6 +262,54 @@ pub fn collect_visible_visual_lines(
     first_row: usize,
     max_rows: usize,
 ) -> Vec<VisualLine> {
+    collect_visible_visual_lines_with_total(
+        lines,
+        wrap,
+        viewport_width,
+        cell_width,
+        first_row,
+        max_rows,
+        None,
+        None,
+    )
+}
+
+pub fn collect_visible_visual_lines_with_total(
+    lines: &[FlatLine],
+    wrap: bool,
+    viewport_width: u32,
+    cell_width: u32,
+    first_row: usize,
+    max_rows: usize,
+    total_visual_rows: Option<usize>,
+    visual_row_index: Option<&VisualRowIndex>,
+) -> Vec<VisualLine> {
+    collect_visible_visual_lines_counted(
+        lines,
+        wrap,
+        viewport_width,
+        cell_width,
+        first_row,
+        max_rows,
+        total_visual_rows,
+        visual_row_index,
+        None,
+    )
+}
+
+/// Like [`collect_visible_visual_lines_with_total`], optionally recording how many
+/// flat lines were examined (for complexity tests).
+pub fn collect_visible_visual_lines_counted(
+    lines: &[FlatLine],
+    wrap: bool,
+    viewport_width: u32,
+    cell_width: u32,
+    first_row: usize,
+    max_rows: usize,
+    total_visual_rows: Option<usize>,
+    visual_row_index: Option<&VisualRowIndex>,
+    visited_flat: Option<&mut usize>,
+) -> Vec<VisualLine> {
     if max_rows == 0 || lines.is_empty() {
         return Vec::new();
     }
@@ -117,6 +317,9 @@ pub fn collect_visible_visual_lines(
         let end = (first_row + max_rows).min(lines.len());
         if first_row >= end {
             return Vec::new();
+        }
+        if let Some(v) = visited_flat {
+            *v = end - first_row;
         }
         return (first_row..end)
             .map(|flat_index| VisualLine {
@@ -128,21 +331,52 @@ pub fn collect_visible_visual_lines(
     }
 
     let cols = max_cols(content_width(viewport_width), cell_width).max(1);
-    let mut out = Vec::with_capacity(max_rows.min(256));
-    let mut skipped = 0usize;
+    let owned_index;
+    let index = if let Some(idx) = visual_row_index.filter(|i| {
+        i.is_valid_for(lines.len(), true, viewport_width, cell_width)
+    }) {
+        idx
+    } else {
+        owned_index = VisualRowIndex::rebuild(lines, true, viewport_width, cell_width);
+        &owned_index
+    };
+    let total = total_visual_rows.unwrap_or_else(|| index.total_rows());
 
-    for (flat_index, line) in lines.iter().enumerate() {
+    // Near the bottom (Follow): walk from the end (O(viewport)).
+    if first_row > 0 && first_row + max_rows + 1 >= total {
+        let out = collect_visible_from_end(lines, cols, first_row, max_rows, total);
+        if let Some(v) = visited_flat {
+            *v = out
+                .first()
+                .map(|vl| lines.len() - vl.flat_index)
+                .unwrap_or(0);
+        }
+        return out;
+    }
+
+    let Some((flat_start, line_visual_start)) = index.flat_at_visual_row(first_row) else {
+        if let Some(v) = visited_flat {
+            *v = 0;
+        }
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(max_rows.min(256));
+    let mut skipped = line_visual_start;
+    let mut visited = 0usize;
+
+    for flat_index in flat_start..lines.len() {
         if out.len() >= max_rows {
             break;
         }
-        let cells = display_cell_count(&line.raw);
-        let rows = if cells == 0 { 1 } else { cells.div_ceil(cols) };
+        visited += 1;
+        let line = &lines[flat_index];
+        let rows = visual_rows_for_line(&line.raw, cols);
         let line_end = skipped + rows;
         if line_end <= first_row {
             skipped = line_end;
             continue;
         }
-        // This flat line contributes at least one visible visual row.
         let wraps = wrap_flat_line(flat_index, &line.raw, cols);
         for (local, visual) in wraps.into_iter().enumerate() {
             let abs = skipped + local;
@@ -156,7 +390,45 @@ pub fn collect_visible_visual_lines(
         }
         skipped = line_end;
     }
+    if let Some(v) = visited_flat {
+        *v = visited;
+    }
     out
+}
+
+fn collect_visible_from_end(
+    lines: &[FlatLine],
+    cols: usize,
+    first_row: usize,
+    max_rows: usize,
+    total: usize,
+) -> Vec<VisualLine> {
+    let end = (first_row + max_rows).min(total);
+    let start = first_row.min(total);
+    if start >= end {
+        return Vec::new();
+    }
+    let mut stack = Vec::with_capacity(max_rows.min(256));
+    let mut visual_end = total;
+    for flat_index in (0..lines.len()).rev() {
+        let wraps = wrap_flat_line(flat_index, &lines[flat_index].raw, cols);
+        let rows = wraps.len();
+        let visual_start = visual_end.saturating_sub(rows);
+        if visual_end > start && visual_start < end {
+            for (local, visual) in wraps.into_iter().enumerate() {
+                let abs = visual_start + local;
+                if abs >= start && abs < end {
+                    stack.push(visual);
+                }
+            }
+        }
+        visual_end = visual_start;
+        if visual_end <= start {
+            break;
+        }
+    }
+    stack.reverse();
+    stack
 }
 
 fn wrap_flat_line(flat_index: usize, raw: &str, max_cols: usize) -> Vec<VisualLine> {
@@ -475,6 +747,79 @@ mod tests {
             collapsed: false,
             hidden_line_count: 0,
         }
+    }
+
+    #[test]
+    fn visual_row_index_matches_naive_count() {
+        let lines: Vec<_> = (0..100)
+            .map(|i| flat_line(&format!("line-{i}-{}", "x".repeat(i % 40))))
+            .collect();
+        let idx = VisualRowIndex::rebuild(&lines, true, 80, 8);
+        assert_eq!(
+            idx.total_rows(),
+            count_visual_rows(&lines, true, 80, 8)
+        );
+        assert_eq!(
+            idx.total_rows(),
+            build_visual_lines(&lines, true, 80, 8).len()
+        );
+    }
+
+    #[test]
+    fn mid_scroll_collect_with_index_does_not_visit_all_lines() {
+        let lines: Vec<_> = (0..20_000)
+            .map(|i| flat_line(&format!("row-{i}-{}", "abcdefghij".repeat(5))))
+            .collect();
+        let idx = VisualRowIndex::rebuild(&lines, true, 80, 8);
+        let total = idx.total_rows();
+        let first_row = total / 2;
+        let mut visited = 0usize;
+        let out = collect_visible_visual_lines_counted(
+            &lines,
+            true,
+            80,
+            8,
+            first_row,
+            40,
+            Some(total),
+            Some(&idx),
+            Some(&mut visited),
+        );
+        assert!(!out.is_empty());
+        assert!(
+            visited < 200,
+            "mid-scroll must not walk scrollback; visited={visited}"
+        );
+        assert!(
+            visited < lines.len() / 10,
+            "visited {visited} of {}",
+            lines.len()
+        );
+        // Sanity: same slice as full build
+        let full = build_visual_lines(&lines, true, 80, 8);
+        assert_eq!(out, full[first_row..first_row + out.len()]);
+    }
+
+    #[test]
+    fn index_drop_prefix_and_extend_stay_coherent() {
+        let mut lines: Vec<_> = (0..100).map(|i| flat_line(&format!("L{i}"))).collect();
+        let mut idx = VisualRowIndex::rebuild(&lines, true, 200, 8);
+        let before = idx.total_rows();
+        idx.drop_prefix(10);
+        lines.drain(0..10);
+        assert_eq!(idx.flat_len(), lines.len());
+        assert_eq!(
+            idx.total_rows(),
+            count_visual_rows(&lines, true, 200, 8)
+        );
+        assert!(idx.total_rows() < before);
+        let extra = vec![flat_line("new-a"), flat_line("new-b")];
+        idx.extend_lines(&extra);
+        lines.extend(extra);
+        assert_eq!(
+            idx.total_rows(),
+            VisualRowIndex::rebuild(&lines, true, 200, 8).total_rows()
+        );
     }
 
     #[test]

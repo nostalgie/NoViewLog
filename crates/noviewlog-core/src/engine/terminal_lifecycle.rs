@@ -39,9 +39,35 @@ impl Engine {
         }
 
         let mut coalesced: Vec<Coalesced> = Vec::new();
-        while let Ok(event) = self.pty_rx.try_recv() {
+        let mut byte_budget = PTY_INGEST_BYTES_PER_TICK;
+        let mut more_pending = false;
+
+        let mut pending_events: Vec<PtyEvent> = Vec::new();
+        if let Some(held) = self.pty_hold.take() {
+            pending_events.push(held);
+        }
+        loop {
+            if byte_budget == 0 && pending_events.is_empty() {
+                break;
+            }
+            let event = if let Some(ev) = pending_events.pop() {
+                ev
+            } else if byte_budget == 0 {
+                break;
+            } else {
+                match self.pty_rx.try_recv() {
+                    Ok(ev) => ev,
+                    Err(_) => break,
+                }
+            };
             match event {
                 PtyEvent::Bytes { id, data } => {
+                    if data.len() > byte_budget && !coalesced.is_empty() {
+                        self.pty_hold = Some(PtyEvent::Bytes { id, data });
+                        more_pending = true;
+                        break;
+                    }
+                    byte_budget = byte_budget.saturating_sub(data.len());
                     if let Some(Coalesced::Bytes {
                         id: last_id,
                         data: buf,
@@ -49,21 +75,40 @@ impl Engine {
                     {
                         if *last_id == id {
                             buf.extend_from_slice(&data);
-                            continue;
+                        } else {
+                            coalesced.push(Coalesced::Bytes { id, data });
                         }
+                    } else {
+                        coalesced.push(Coalesced::Bytes { id, data });
                     }
-                    coalesced.push(Coalesced::Bytes { id, data });
+                    if byte_budget == 0 {
+                        if let Ok(ev) = self.pty_rx.try_recv() {
+                            self.pty_hold = Some(ev);
+                            more_pending = true;
+                        }
+                        break;
+                    }
                 }
                 PtyEvent::Exit {
                     id,
                     code,
                     generation,
-                } => coalesced.push(Coalesced::Exit {
-                    id,
-                    code,
-                    generation,
-                }),
+                } => {
+                    coalesced.push(Coalesced::Exit {
+                        id,
+                        code,
+                        generation,
+                    });
+                }
             }
+        }
+        if self.pty_hold.is_none() {
+            if let Ok(ev) = self.pty_rx.try_recv() {
+                self.pty_hold = Some(ev);
+                more_pending = true;
+            }
+        } else {
+            more_pending = true;
         }
 
         let mut active_changed = false;
@@ -82,30 +127,38 @@ impl Engine {
                     };
                     let is_active = active_id.as_ref() == Some(&id);
                     let old_volatile = self.terminals[term_idx].ingest.volatile_count();
-                    let old_total = self.terminals[term_idx].buffer.records().len();
+                    let old_total = self.terminals[term_idx].buffer.records_len();
 
-                    {
+                    let shifted = {
                         let term = &mut self.terminals[term_idx];
-                        term.ingest
-                            .feed(&data, &mut term.buffer, &mut term.parser);
+                        let shifted =
+                            term.ingest
+                                .feed(&data, &mut term.buffer, &mut term.parser);
                         if let Some(cwd) = term.ingest.take_cwd_update() {
                             term.cwd = cwd;
                             chrome_changed = true;
                         }
                         term.last_line_at = Some(Instant::now());
-                    }
+                        shifted
+                    };
 
                     if is_active {
                         active_changed = true;
                         let new_volatile = self.terminals[term_idx].ingest.volatile_count();
-                        let new_total = self.terminals[term_idx].buffer.records().len();
+                        let new_total = self.terminals[term_idx].buffer.records_len();
                         self.apply_active_pty_bytes_to_views(
                             term_idx,
                             old_volatile,
                             old_total,
                             new_volatile,
                             new_total,
+                            shifted,
                         );
+                        self.snap_follow_scroll_after_ingest(term_idx);
+                    } else if shifted > 0 {
+                        for view in &mut self.terminals[term_idx].views {
+                            view.mark_flat_lines_dirty();
+                        }
                     }
                 }
                 Coalesced::Exit {
@@ -148,11 +201,20 @@ impl Engine {
         }
 
         if chrome_changed {
-            // Cwd / exit / running — refresh sidebar chrome promptly.
             self.last_stats_at = None;
         }
         if active_changed {
+            // Always dirty on active ingest — paint throttle under flood made Follow
+            // and scroll look jumpy (content advanced between skipped frames).
             self.mark_viewport_dirty();
+        }
+
+        if more_pending {
+            // Do NOT call pty_activity_wake here. Wake while HOST_TICK is running sets
+            // needs_retick and the host used to tight-loop ingest+paint until the flood
+            // ended — UI freeze at ~70% CPU with a black viewport. The host schedules
+            // the next tick via its fast timer after seeing `pty_work_pending()`.
+            self.pty_drain_pending = true;
         }
 
         for id in respawn_shell_ids {
@@ -162,6 +224,10 @@ impl Engine {
     }
 
     /// Patch Terminal tab flat lines for a volatile VT update; dirty other views.
+    ///
+    /// When the ring drops a flat-line prefix, anchors `scroll_offset_y` (and selection)
+    /// so scrolled-up content does not slide under the viewport — same idea as FILES
+    /// window `scroll_adjust`.
     fn apply_active_pty_bytes_to_views(
         &mut self,
         term_idx: usize,
@@ -169,27 +235,105 @@ impl Engine {
         old_total: usize,
         new_volatile: usize,
         new_total: usize,
+        shifted_raw_lines: usize,
     ) {
+        let row_stride = self.renderer.metrics().row_stride;
+        let cell_width = self.renderer.metrics().cell_width;
+        let viewport_width = self.viewport_width;
+
         let terminal = &mut self.terminals[term_idx];
-        // Filter tabs catch up on switch.
         for (i, view) in terminal.views.iter_mut().enumerate() {
             if i == 0 {
                 continue;
             }
             view.mark_flat_lines_dirty();
         }
-        let Some(terminal_tab) = terminal.views.get_mut(0) else {
+
+        let follow = terminal
+            .views
+            .first()
+            .map(|v| v.auto_follow)
+            .unwrap_or(false);
+        let wrap = terminal
+            .views
+            .first()
+            .map(|v| v.wrap_lines)
+            .unwrap_or(false);
+
+        // Visual height of the flat prefix that will disappear from the top.
+        // Wrap OFF: 1 flat line == 1 visual row (matches scroll_by_lines).
+        // Wrap ON: measure the prefix about to be drained (stable head only).
+        let dropped_h = if shifted_raw_lines == 0 {
+            0.0
+        } else if !wrap {
+            shifted_raw_lines as f32 * row_stride
+        } else if let Some(tab) = terminal.views.first() {
+            let n = shifted_raw_lines.min(tab.flat_lines.len().saturating_sub(old_volatile));
+            if n == 0 {
+                0.0
+            } else {
+                let rows =
+                    count_visual_rows(&tab.flat_lines[..n], true, viewport_width, cell_width);
+                rows as f32 * row_stride
+            }
+        } else {
+            0.0
+        };
+
+        let TerminalState {
+            views,
+            buffer,
+            scroll_offset_y,
+            selection,
+            ..
+        } = terminal;
+        let Some(terminal_tab) = views.get_mut(0) else {
             return;
         };
-        if !terminal_tab.try_patch_volatile_tail(
-            &terminal.buffer,
+        let patched = terminal_tab.try_patch_volatile_tail(
+            buffer,
             old_volatile,
             old_total,
             new_volatile,
             new_total,
-        ) {
+            shifted_raw_lines,
+        );
+        if !patched {
             terminal_tab.mark_flat_lines_dirty();
         }
+
+        // Anchor even if patch falls back to dirty rebuild — buffer already trimmed by `shifted`.
+        if shifted_raw_lines > 0 {
+            if !follow && dropped_h > 0.0 {
+                *scroll_offset_y = (*scroll_offset_y - dropped_h).max(0.0);
+            }
+            if let Some(sel) = selection.as_mut() {
+                shift_selection_after_prefix_drop(sel, shifted_raw_lines);
+            }
+        }
+    }
+
+    /// Pin Follow to the content bottom immediately after ingest (not only in `render`),
+    /// so stats/scrollbar do not lag a frame behind growing `max_scroll`.
+    fn snap_follow_scroll_after_ingest(&mut self, term_idx: usize) {
+        let Some(term) = self.terminals.get(term_idx) else {
+            return;
+        };
+        if term.is_file_session() {
+            return;
+        }
+        let Some(view) = term.views.first() else {
+            return;
+        };
+        if !view.auto_follow || !view.search_query.is_empty() {
+            return;
+        }
+        // max_scroll_offset uses active terminal — only snap when this term is active.
+        if self.active_terminal != term_idx {
+            return;
+        }
+        let max = self.max_scroll_offset();
+        self.terminals[term_idx].scroll_offset_y = max;
     }
 
     pub(crate) fn start_launch_process(&mut self) {
@@ -480,4 +624,20 @@ impl Engine {
         self.mark_viewport_dirty();
         self.last_stats_at = None;
     }
+}
+
+fn shift_selection_after_prefix_drop(sel: &mut TextSelection, dropped_flat: usize) {
+    if dropped_flat == 0 {
+        return;
+    }
+    let shift = |pos: &mut crate::viewport_layout::TextPos| {
+        if pos.line_index < dropped_flat {
+            pos.line_index = 0;
+            pos.byte_offset = 0;
+        } else {
+            pos.line_index -= dropped_flat;
+        }
+    };
+    shift(&mut sel.anchor);
+    shift(&mut sel.caret);
 }

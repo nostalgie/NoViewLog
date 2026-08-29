@@ -35,12 +35,14 @@ pub mod pty;
 pub mod spawn_resolve;
 pub mod viewport;
 pub mod viewport_layout;
+pub mod scrollbar_math;
 
 pub use engine::{
     parse_engine_event, Command, Engine, EngineEvent, StatsSnapshot, StatsTab, StatsTerminal,
     CARET_BLINK_PERIOD,
 };
 pub use log_view::TERMINAL_TAB_NAME;
+pub use scrollbar_math::{thumb_offset_len, MIN_THUMB_PX};
 
 #[cfg(test)]
 mod tests;

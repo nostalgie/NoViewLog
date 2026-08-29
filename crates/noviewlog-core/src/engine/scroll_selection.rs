@@ -6,7 +6,13 @@ impl Engine {
             return;
         }
         let row_stride = self.renderer.metrics().row_stride;
-        let max_scroll = self.max_scroll_offset();
+        let max_scroll = if self.active_terminal().is_file_session()
+            && self.active_terminal().file_backed.is_some()
+        {
+            self.local_window_max_scroll()
+        } else {
+            self.max_scroll_offset()
+        };
         let terminal = self.active_terminal_mut();
         terminal.scroll_offset_y =
             (terminal.scroll_offset_y + delta as f32 * row_stride).clamp(0.0, max_scroll);
@@ -23,7 +29,13 @@ impl Engine {
             return;
         }
         let page = self.viewport_height as f32 * 0.9;
-        let max_scroll = self.max_scroll_offset();
+        let max_scroll = if self.active_terminal().is_file_session()
+            && self.active_terminal().file_backed.is_some()
+        {
+            self.local_window_max_scroll()
+        } else {
+            self.max_scroll_offset()
+        };
         let terminal = self.active_terminal_mut();
         terminal.scroll_offset_y =
             (terminal.scroll_offset_y + direction.signum() as f32 * page).clamp(0.0, max_scroll);
@@ -47,6 +59,13 @@ impl Engine {
     }
 
     pub(crate) fn scroll_to_end(&mut self) {
+        if self.active_terminal().file_backed.is_some() {
+            let max = self.max_scroll_offset();
+            self.scroll_file_to_global_offset(max);
+            self.last_stats_at = None;
+            self.mark_viewport_dirty();
+            return;
+        }
         self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
         if !self.active_terminal().is_file_session() {
             self.active_view_mut().auto_follow = true;
@@ -93,13 +112,7 @@ impl Engine {
 
     pub(crate) fn max_scroll_offset(&self) -> f32 {
         let metrics = self.renderer.metrics();
-        let view = self.active_view();
-        let rows = view.cached_visual_rows(
-            self.viewport_width,
-            metrics.cell_width,
-            count_visual_rows,
-        );
-        let mut content_h = rows as f32 * metrics.row_stride;
+        let stride = metrics.row_stride;
 
         if self.has_active_terminal() {
             let terminal = self.active_terminal();
@@ -109,19 +122,170 @@ impl Engine {
                 && view.match_scan_pos.is_none()
             {
                 let total = view.match_offsets.len();
-                let after = total.saturating_sub(view.match_window_start + view.flat_lines.len());
-                let before = view.match_window_start;
-                content_h += (before + after) as f32 * metrics.row_stride;
-            } else if let Some(backed) = &terminal.file_backed {
-                let lines_after = backed
-                    .index
-                    .total_lines()
-                    .saturating_sub(terminal.buffer_line_end);
-                content_h += lines_after as f32 * metrics.row_stride;
+                let content_h = total as f32 * stride;
+                return (content_h - self.viewport_height as f32).max(0.0);
+            }
+            if let Some(backed) = &terminal.file_backed {
+                // Whole-file scrollbar range (1 file line ≈ 1 visual row for unread spans).
+                // When the last window is resident, raise the range to the real visual
+                // height so Wrap ON can still scroll to the true bottom.
+                let total = backed.index.total_lines();
+                let window = self.file_view_window_lines() as u64;
+                let max_start = total.saturating_sub(window);
+                let mut content_h = total as f32 * stride;
+                let (start, local_rows_h) = if let Some(pending) = &terminal.pending_file_window {
+                    if pending.new_start >= max_start {
+                        let rows = view.cached_visual_rows(
+                            self.viewport_width,
+                            metrics.cell_width,
+                            count_visual_rows,
+                        );
+                        // Pending EOF: estimate at least raw window height; after load
+                        // the resident branch below will refine.
+                        (
+                            pending.new_start,
+                            (window as f32 * stride).max(rows as f32 * stride),
+                        )
+                    } else {
+                        (pending.new_start, 0.0)
+                    }
+                } else if terminal.buffer_line_start >= max_start {
+                    let rows = view.cached_visual_rows(
+                        self.viewport_width,
+                        metrics.cell_width,
+                        count_visual_rows,
+                    );
+                    (terminal.buffer_line_start, rows as f32 * stride)
+                } else {
+                    (0, 0.0)
+                };
+                if local_rows_h > 0.0 {
+                    content_h = content_h.max(start as f32 * stride + local_rows_h);
+                }
+                return (content_h - self.viewport_height as f32).max(0.0);
             }
         }
 
+        let view = self.active_view();
+        let rows = view.cached_visual_rows(
+            self.viewport_width,
+            metrics.cell_width,
+            count_visual_rows,
+        );
+        let content_h = rows as f32 * stride;
         (content_h - self.viewport_height as f32).max(0.0)
+    }
+
+    /// Max local scroll within the currently loaded file/match window.
+    pub(crate) fn local_window_max_scroll(&self) -> f32 {
+        let metrics = self.renderer.metrics();
+        let view = self.active_view();
+        let rows = view.cached_visual_rows(
+            self.viewport_width,
+            metrics.cell_width,
+            count_visual_rows,
+        );
+        (rows as f32 * metrics.row_stride - self.viewport_height as f32).max(0.0)
+    }
+
+    /// Scrollbar / stats Y for the active session (global for FILES).
+    pub(crate) fn stats_scroll_y(&self) -> f32 {
+        if !self.has_active_terminal() {
+            return 0.0;
+        }
+        let terminal = self.active_terminal();
+        let stride = self.renderer.metrics().row_stride;
+        let max_y = self.max_scroll_offset();
+        // While a window jump is in flight, report the target so the thumb does not spring back.
+        if terminal.is_file_session() {
+            if let Some(pending) = &terminal.pending_file_window {
+                let raw = pending.new_start as f32 * stride + pending.scroll_y;
+                return raw.clamp(0.0, max_y);
+            }
+        }
+        let local = terminal.scroll_offset_y;
+        if !terminal.is_file_session() {
+            return local.clamp(0.0, max_y);
+        }
+        let view = terminal.active_view();
+        let y = if view.uses_match_index() && view.match_scan_pos.is_none() {
+            view.match_window_start as f32 * stride + local
+        } else if terminal.file_backed.is_some() {
+            terminal.buffer_line_start as f32 * stride + local
+        } else {
+            local
+        };
+        y.clamp(0.0, max_y)
+    }
+
+    /// 1-based line at the **bottom** of the viewport and total lines for the status bar.
+    ///
+    /// Using the top line left EOF looking short by roughly one screen (`363177 / 363194`).
+    pub(crate) fn viewport_line_position(&self) -> (u64, u64) {
+        if !self.has_active_terminal() {
+            return (0, 0);
+        }
+        let metrics = self.renderer.metrics();
+        let stride = metrics.row_stride.max(0.001);
+        let terminal = self.active_terminal();
+        let view = terminal.active_view();
+        let viewport_h = self.viewport_height as f32;
+
+        if terminal.is_file_session() {
+            if let Some(backed) = &terminal.file_backed {
+                let total = backed.index.total_lines();
+                if total == 0 {
+                    return (0, 0);
+                }
+                let (base, local_y, pin_end) = if let Some(pending) = &terminal.pending_file_window
+                {
+                    (
+                        pending.new_start,
+                        pending.scroll_y,
+                        pending.scroll_y >= 1.0e20,
+                    )
+                } else {
+                    (terminal.buffer_line_start, terminal.scroll_offset_y, false)
+                };
+                if pin_end {
+                    return (total, total);
+                }
+                let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
+                let bottom_visual = ((local_y + viewport_h - 0.01) / stride)
+                    .floor()
+                    .max(0.0) as usize;
+                let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
+                let flat = index
+                    .flat_at_visual_row(bottom_visual)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let cur = (base + flat as u64 + 1).min(total.max(1));
+                // At (or past) max scroll, snap to last file line so EOF reads `N / N`.
+                let at_eof = self.stats_scroll_y() + 1.0 >= self.max_scroll_offset();
+                let cur = if at_eof { total } else { cur };
+                return (cur, total);
+            }
+            return (0, 0);
+        }
+
+        let total = view.flat_lines.len() as u64;
+        if total == 0 {
+            return (0, 0);
+        }
+        let local_y = terminal.scroll_offset_y;
+        let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
+        let bottom_visual = ((local_y + viewport_h - 0.01) / stride)
+            .floor()
+            .max(0.0) as usize;
+        let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
+        let flat = index
+            .flat_at_visual_row(bottom_visual)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let cur = (flat as u64 + 1).min(total);
+        let at_eof = local_y + 1.0 >= self.local_window_max_scroll() || total <= 1;
+        let cur = if at_eof { total } else { cur };
+        (cur, total)
     }
 
     pub(crate) fn current_max_scroll_x(&self) -> f32 {
