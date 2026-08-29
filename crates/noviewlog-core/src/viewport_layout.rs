@@ -139,6 +139,11 @@ impl VisualRowIndex {
         self.prefix.last().copied().unwrap_or(0) as usize
     }
 
+    /// Exclusive visual-row end of flat line `flat_index` (0 if out of range).
+    pub fn visual_end_of_flat(&self, flat_index: usize) -> usize {
+        self.prefix.get(flat_index).copied().unwrap_or(0) as usize
+    }
+
     /// Flat index and the absolute visual-row start of that flat line for `row`.
     /// Returns `None` when `row` is past the end (or the index is empty).
     pub fn flat_at_visual_row(&self, row: usize) -> Option<(usize, usize)> {

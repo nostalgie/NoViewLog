@@ -305,6 +305,8 @@ impl Engine {
                     if follow {
                         self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
                         self.mark_viewport_dirty();
+                    } else {
+                        self.materialize_live_terminal_tab();
                     }
                     self.last_stats_at = None;
                 }

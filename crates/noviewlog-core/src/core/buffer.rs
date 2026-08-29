@@ -4,7 +4,6 @@ use crate::core::types::LogRecord;
 
 pub struct RecordBuffer {
     records: VecDeque<LogRecord>,
-    raw_lines: VecDeque<String>,
     dropped: usize,
     max_records: usize,
 }
@@ -13,13 +12,12 @@ impl RecordBuffer {
     pub fn new(max_records: usize) -> Self {
         Self {
             records: VecDeque::new(),
-            raw_lines: VecDeque::new(),
             dropped: 0,
             max_records,
         }
     }
 
-    /// Drop oldest records (and their raw lines) when over `max_records`.
+    /// Drop oldest records when over `max_records`.
     /// Returns the number of raw lines removed from the front.
     ///
     /// Uses `pop_front` so cost is O(dropped), not O(capacity).
@@ -33,11 +31,7 @@ impl RecordBuffer {
             let Some(rec) = self.records.pop_front() else {
                 break;
             };
-            let line_count = rec.lines.len();
-            shifted_lines += line_count;
-            for _ in 0..line_count {
-                self.raw_lines.pop_front();
-            }
+            shifted_lines += rec.lines.len();
             self.dropped += 1;
         }
         shifted_lines
@@ -45,7 +39,6 @@ impl RecordBuffer {
 
     /// Returns the number of raw lines dropped from the front when the cap is exceeded.
     pub fn add(&mut self, record: LogRecord) -> usize {
-        self.raw_lines.extend(record.lines.iter().cloned());
         self.records.push_back(record);
         self.trim_overflow()
     }
@@ -55,9 +48,12 @@ impl RecordBuffer {
         self.records.make_contiguous()
     }
 
-    /// Contiguous raw-line slice (compacts the ring if needed).
-    pub fn raw_lines(&mut self) -> &[String] {
-        self.raw_lines.make_contiguous()
+    /// All physical lines from records (cloned). Used for format reparse.
+    pub fn raw_lines(&self) -> Vec<String> {
+        self.records
+            .iter()
+            .flat_map(|r| r.lines.iter().cloned())
+            .collect()
     }
 
     pub fn records_len(&self) -> usize {
@@ -65,7 +61,7 @@ impl RecordBuffer {
     }
 
     pub fn raw_lines_len(&self) -> usize {
-        self.raw_lines.len()
+        self.records.iter().map(|r| r.lines.len()).sum()
     }
 
     pub fn dropped_count(&self) -> usize {
@@ -85,32 +81,24 @@ impl RecordBuffer {
 
     pub fn clear(&mut self) {
         self.records.clear();
-        self.raw_lines.clear();
         self.dropped = 0;
     }
 
     /// Replace all records (file window swap). Resets dropped count.
     pub fn replace_all(&mut self, records: Vec<LogRecord>) {
         self.records.clear();
-        self.raw_lines.clear();
         self.dropped = 0;
         for record in records {
-            self.raw_lines.extend(record.lines.iter().cloned());
             self.records.push_back(record);
         }
         self.trim_overflow();
     }
 
-    /// Remove the last `n` records (and their raw lines). Used to strip the
-    /// volatile terminal tail before re-committing / re-rendering it.
+    /// Remove the last `n` records. Used by tests / leftover callers.
     pub fn pop_last(&mut self, n: usize) {
         for _ in 0..n {
-            let Some(rec) = self.records.pop_back() else {
+            if self.records.pop_back().is_none() {
                 break;
-            };
-            let line_count = rec.lines.len();
-            for _ in 0..line_count {
-                self.raw_lines.pop_back();
             }
         }
     }
@@ -131,11 +119,7 @@ impl RecordBuffer {
     /// Returns true if a record was replaced.
     pub fn replace_last_single_line(&mut self, record: LogRecord) -> bool {
         if self.last_is_overwrite_single_line() {
-            let removed = self.records.pop_back().expect("last exists");
-            let line_count = removed.lines.len();
-            for _ in 0..line_count {
-                self.raw_lines.pop_back();
-            }
+            let _ = self.records.pop_back();
             self.add(record);
             return true;
         }
@@ -178,10 +162,7 @@ mod tests {
             buf.records().iter().map(|r| r.id).collect::<Vec<_>>(),
             vec![2, 3, 4]
         );
-        assert_eq!(
-            buf.raw_lines(),
-            &["b".to_string(), "c".to_string(), "d".to_string()]
-        );
+        assert_eq!(buf.raw_lines(), vec!["b".to_string(), "c".to_string(), "d".to_string()]);
     }
 
     #[test]

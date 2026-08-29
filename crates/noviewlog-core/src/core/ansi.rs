@@ -195,7 +195,7 @@ fn apply_sgr(style: &mut TextStyle, params: &str) {
     }
 }
 
-fn ansi_basic_color(index: u32, bright: bool) -> (u8, u8, u8) {
+pub(crate) fn ansi_basic_color(index: u32, bright: bool) -> (u8, u8, u8) {
     // GitHub-dark-ish palette close to common terminal themes.
     let colors = if bright {
         [
@@ -223,7 +223,7 @@ fn ansi_basic_color(index: u32, bright: bool) -> (u8, u8, u8) {
     colors[index as usize % 8]
 }
 
-fn ansi_256_color(index: u32) -> (u8, u8, u8) {
+pub(crate) fn ansi_256_color(index: u32) -> (u8, u8, u8) {
     match index {
         0..=7 => ansi_basic_color(index, false),
         8..=15 => ansi_basic_color(index - 8, true),

@@ -24,6 +24,10 @@ Multiple sessions can run **at the same time**. Switching the active session onl
 
 - Ring-buffer scrollback (`max_scrollback_lines`, default 10k, max 30k)
 - Follow mode, keyboard → stdin, interactive shell / launched process
+- While Follow is on, the Terminal tab Viewport paints the live VT cell grid
+  (not a LogView overlay). Scrollback is composed into the Terminal tab only
+  when Follow is off (scroll up, search, process exit). Filter tabs see
+  committed Records only.
 - Primary tab display name: **Terminal**
 - Live PTY output uses a **bounded queue** and per-tick ingest budget so floods
   (`cat` of tens of MB, chatty builds) stall the writer instead of freezing the UI.

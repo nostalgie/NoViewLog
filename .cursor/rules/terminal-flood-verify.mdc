@@ -1,0 +1,36 @@
+---
+description: MANDATORY — in-app PTY flood / Follow verify; cargo test is not enough
+alwaysApply: true
+---
+
+# Terminal flood / Follow: run the app
+
+`cargo test` and `cargo build --release` do **not** prove `cat` is smooth.
+Ingest can busy-loop the event loop at 100% CPU while tests still pass.
+A **debug** binary (`cargo run` without `--release`) also pegs ~100% of a
+core on the same flood even when release sits ~25% — measuring the wrong
+binary is how false “fixed” reports happen.
+
+After **any** change to PTY ingest, HOST_TICK, Follow, WRAP, Viewport paint,
+or live Terminal rendering:
+
+1. Do **not** tell the user to rebuild or "try cat again".
+2. Kill leftover `noviewlog-slint` PIDs (stale process = stale 100% CPU).
+3. Build **release**: `cargo build --release -p noviewlog-slint`
+   (or `bash scripts/run-slint.sh`, which MUST be `cargo run --release`).
+4. Run **that** binary (`target/release/noviewlog-slint`), not
+   `target/debug/noviewlog-slint`.
+5. After launch, print `readlink -f /proc/<pid>/exe` — it MUST contain
+   `target/release/`. If it contains `target/debug/`, **fail** — you are
+   measuring the wrong binary.
+6. Reproduce with a **visible** window, Follow **on**, WRAP **on** and WRAP
+   **off**: interactive Terminal (in-app shell) or the same flood via CLI
+   launch — `cat` a large access-log style file (long URLs). Sample CPU
+   (`pidstat` / `top` for that PID) for several seconds while `cat` runs.
+7. **Fail the task** if that release PID pegs ~100% of a core, the tail
+   teleports, WRAP-on Follow is unusable, or the status line counter sticks
+   at `max_scrollback` (~1000/1000) and “pages” every ring trim — Follow
+   must look like a native terminal (monotonic line total, live screen).
+   `cargo test` passing is not acceptance. Report PID, `%CPU`, and
+   `/proc/<pid>/exe`.
+8. If there is no `DISPLAY`, say so and do **not** claim the hitch is fixed.

@@ -9,8 +9,8 @@ use crate::color_emoji::{
 };
 use crate::core::ansi::strip_ansi;
 use crate::core::types::{
-    clamp_viewport_font_size, FlatLine, LogLevel, SearchMatch, TextSegment, TextStyle as LineStyle,
-    DEFAULT_VIEWPORT_FONT_SIZE,
+    clamp_viewport_font_size, detect_level, FlatLine, LogLevel, SearchMatch, TextSegment,
+    TextStyle as LineStyle, DEFAULT_VIEWPORT_FONT_SIZE,
 };
 use crate::core::visible::{highlight_search_in_segments, SearchPattern};
 use crate::viewport_layout::{
@@ -622,8 +622,9 @@ fn draw_visual_line(
     // Does not insert characters into `raw` / selection / copy text.
     // Sit in LEFT_PAD with a few pixels of gap so the bar does not glue to glyphs.
     const SEVERITY_TEXT_GAP: i32 = 3;
+    let paint_level = line.level.or_else(|| detect_level(&line.raw));
     if slice_start == 0 {
-        if let Some(level) = line.level {
+        if let Some(level) = paint_level {
             let color = severity_cue_color(level);
             let gutter_w = ((cell_width / 3).max(2).min(4)) as usize;
             let y = row_top.floor() as i32;
@@ -653,7 +654,7 @@ fn draw_visual_line(
             let h = row_height.ceil().max(1.0) as usize;
             // Keep disclosure in the pad, left of text (and left of severity when both exist).
             let gutter_w = ((cell_width / 3).max(2).min(4)) as i32;
-            let cue_x = if line.level.is_some() {
+            let cue_x = if paint_level.is_some() {
                 x_base - SEVERITY_TEXT_GAP - gutter_w - 1 - cue_w as i32
             } else {
                 x_base - SEVERITY_TEXT_GAP - cue_w as i32

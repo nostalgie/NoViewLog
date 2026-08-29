@@ -54,6 +54,7 @@ impl Engine {
             self.request_file_window_at(0, 0.0);
         } else {
             self.active_terminal_mut().scroll_offset_y = 0.0;
+            self.materialize_live_terminal_tab();
         }
         self.mark_viewport_dirty();
     }
@@ -66,10 +67,10 @@ impl Engine {
             self.mark_viewport_dirty();
             return;
         }
-        self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
         if !self.active_terminal().is_file_session() {
             self.active_view_mut().auto_follow = true;
         }
+        self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
         self.last_stats_at = None;
         self.mark_viewport_dirty();
     }
@@ -102,12 +103,16 @@ impl Engine {
         let max_scroll = self.max_scroll_offset();
         let scroll_y = self.active_terminal().scroll_offset_y;
         let at_bottom = max_scroll <= 0.5 || scroll_y >= max_scroll - 1.0;
+        let was_follow = self.active_view().auto_follow;
         let view = self.active_view_mut();
         if view.auto_follow == at_bottom {
             return;
         }
         view.auto_follow = at_bottom;
         self.last_stats_at = None;
+        if was_follow && !at_bottom {
+            self.materialize_live_terminal_tab();
+        }
     }
 
     pub(crate) fn max_scroll_offset(&self) -> f32 {
@@ -164,6 +169,28 @@ impl Engine {
                 }
                 return (content_h - self.viewport_height as f32).max(0.0);
             }
+        }
+
+        if self.paints_live_vt_grid() {
+            // Paint is live-screen only; scrollbar range is retained ring + screen
+            // so the thumb stays small (~viewport / (cap+rows)). Screen-only max
+            // made the thumb ~half the track under WRAP while the line counter
+            // correctly showed ever-seen hundreds of thousands.
+            let wrap = self.active_view().wrap_lines;
+            let committed = self.active_terminal().buffer.records_len();
+            let grid_visual = if wrap {
+                let lines = self.active_terminal().ingest.grid_flat_lines();
+                count_visual_rows(
+                    &lines,
+                    true,
+                    self.viewport_width,
+                    metrics.cell_width,
+                )
+            } else {
+                self.active_terminal().ingest.size().1
+            };
+            let content_h = (committed + grid_visual) as f32 * stride;
+            return (content_h - self.viewport_height as f32).max(0.0);
         }
 
         let view = self.active_view();
@@ -266,6 +293,19 @@ impl Engine {
                 return (cur, total);
             }
             return (0, 0);
+        }
+
+        if self.paints_live_vt_grid() {
+            // Monotonic lines-ever-seen (dropped + retained + live rows), not the
+            // capped ring size — otherwise Follow shows ~1000/1000 forever and
+            // looks like paging through 1000-line chunks.
+            let ever = terminal.buffer.dropped_count() as u64
+                + terminal.buffer.records_len() as u64
+                + terminal.ingest.size().1 as u64;
+            if ever == 0 {
+                return (0, 0);
+            }
+            return (ever, ever);
         }
 
         let total = view.flat_lines.len() as u64;

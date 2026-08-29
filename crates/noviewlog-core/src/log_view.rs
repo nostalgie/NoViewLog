@@ -49,6 +49,8 @@ pub struct LogView {
     /// Maintained visual-row prefix index for Wrap ON scroll (invalidated on geometry/flat change).
     visual_row_index: RefCell<Arc<VisualRowIndex>>,
     filter_engine: FilterEngine,
+    /// Live VT overlay line count at the end of `flat_lines` (Terminal tab only).
+    overlay_len: usize,
     /// Whole-file match byte offsets for file-session filter tabs (`None` scan = idle).
     pub match_offsets: Vec<u64>,
     /// Next file byte to scan; `None` means scan complete or not required.
@@ -83,6 +85,7 @@ impl LogView {
             flat_lines_record_cursor: 0,
             visual_row_index: RefCell::new(Arc::new(VisualRowIndex::invalid())),
             filter_engine: FilterEngine::new(tab.filters),
+            overlay_len: 0,
             match_offsets: Vec::new(),
             match_scan_pos: None,
             match_window_start: 0,
@@ -108,7 +111,7 @@ impl LogView {
 
     pub fn expand_all_multiline(&mut self, records: &[crate::core::types::LogRecord]) {
         for record in self.filter_engine.filter_records(records) {
-            if !self.severity_filter.allows(record.level) {
+            if !self.severity_filter.allows(record.effective_level()) {
                 continue;
             }
             if record.lines.len() >= 2 {
@@ -276,6 +279,7 @@ impl LogView {
             ));
             self.flat_lines_record_cursor = buffer.records_len();
             self.flat_lines_dirty = false;
+            self.overlay_len = 0;
             self.search_dirty = true;
             self.search_full_rescan = true;
             self.search_match_scan_end = 0;
@@ -374,6 +378,11 @@ impl LogView {
 
     pub fn is_flat_lines_dirty(&self) -> bool {
         self.flat_lines_dirty
+    }
+
+    /// Live VT overlay line count at the end of `flat_lines` (0 if none applied).
+    pub fn overlay_len(&self) -> usize {
+        self.overlay_len
     }
 
     pub fn refresh_search_if_dirty(&mut self) -> Option<usize> {
@@ -487,19 +496,62 @@ impl LogView {
         self.search_match_scan_end = 0;
     }
 
-    /// Replace the volatile VT tail in `flat_lines` without a full scrollback rebuild.
+    /// Drop the live VT overlay from the end of `flat_lines`.
+    pub fn strip_live_overlay(&mut self) {
+        if self.overlay_len == 0 {
+            return;
+        }
+        let keep = self.flat_lines.len().saturating_sub(self.overlay_len);
+        Arc::make_mut(&mut self.flat_lines).truncate(keep);
+        {
+            let mut slot = self.visual_row_index.borrow_mut();
+            if slot.valid_geometry_only(self.wrap_lines) && slot.flat_len() >= keep {
+                match Arc::get_mut(&mut *slot) {
+                    Some(idx) => idx.truncate_flat(keep),
+                    None => {
+                        let mut owned = (**slot).clone();
+                        owned.truncate_flat(keep);
+                        *slot = Arc::new(owned);
+                    }
+                }
+            } else {
+                *slot = Arc::new(VisualRowIndex::invalid());
+            }
+        }
+        self.overlay_len = 0;
+    }
+
+    /// Replace the live VT overlay at the end of `flat_lines`.
+    pub fn set_live_overlay(&mut self, overlay: Vec<FlatLine>) {
+        self.strip_live_overlay();
+        if overlay.is_empty() {
+            return;
+        }
+        if !self.search_query.is_empty() {
+            self.search_dirty = true;
+        }
+        let start = self.flat_lines.len();
+        self.overlay_len = overlay.len();
+        Arc::make_mut(&mut self.flat_lines).extend(overlay);
+        self.extend_visual_row_index_from(start);
+    }
+
+    /// Patch committed prefix + replace live overlay without a full scrollback rebuild.
+    ///
+    /// `old_total` / `new_total` are committed Record counts (live screen is not in the buffer).
+    /// `old_overlay` is the previous overlay line count at the end of `flat_lines`.
     ///
     /// When the ring drops a stable prefix (`shifted_raw_lines` > 0), drops the matching
     /// flat-line prefix instead of failing into a full rebuild.
     ///
     /// Returns `false` when the view must fall back to a full dirty rebuild
     /// (filters, search, severity, or inconsistent cursors).
-    pub fn try_patch_volatile_tail(
+    pub fn try_patch_committed_and_overlay(
         &mut self,
         buffer: &mut RecordBuffer,
-        old_volatile: usize,
+        old_overlay: usize,
         old_total: usize,
-        new_volatile: usize,
+        overlay: &[FlatLine],
         new_total: usize,
         shifted_raw_lines: usize,
     ) -> bool {
@@ -515,36 +567,33 @@ impl LogView {
         if self.flat_lines_record_cursor != old_total {
             return false;
         }
-        let stable_before = old_total.saturating_sub(old_volatile);
-        let stable_after = new_total.saturating_sub(new_volatile);
-        if new_total < new_volatile {
-            return false;
-        }
+        let stable_before = old_total;
+        let stable_after = new_total;
         if shifted_raw_lines == 0 && stable_after < stable_before {
             return false;
         }
 
-        let lines = Arc::make_mut(&mut self.flat_lines);
-        if lines.len() < old_volatile {
+        let len = self.flat_lines.len();
+        if len < old_overlay {
             return false;
         }
-        // Volatile records are single-line → one flat line each.
-        let stable_flat_before = lines.len() - old_volatile;
-        lines.truncate(stable_flat_before);
-
-        if shifted_raw_lines > 0 {
-            if lines.len() < shifted_raw_lines {
-                return false;
-            }
-            lines.drain(0..shifted_raw_lines);
+        let stable_flat_before = len - old_overlay;
+        if shifted_raw_lines > 0 && stable_flat_before < shifted_raw_lines {
+            return false;
         }
-
-        // Unfiltered Terminal tab: one flat line per record for typical PTY commits.
-        // After prefix drop, `lines` aligns with `records[0..lines.len()]`.
-        let k = lines.len();
+        let k = stable_flat_before - shifted_raw_lines;
         if k > stable_after {
             return false;
         }
+
+        let lines = Arc::make_mut(&mut self.flat_lines);
+        lines.truncate(stable_flat_before);
+
+        if shifted_raw_lines > 0 {
+            lines.drain(0..shifted_raw_lines);
+        }
+
+        debug_assert_eq!(lines.len(), k);
 
         let records = buffer.records();
         if k < stable_after {
@@ -556,18 +605,10 @@ impl LogView {
             );
             lines.extend(appended);
         }
-        if new_volatile > 0 {
-            let vol = rebuild_flat_lines_for_records(
-                &records[stable_after..new_total],
-                &self.filter_engine,
-                self.severity_filter,
-                &self.expanded_record_ids,
-            );
-            lines.extend(vol);
-        }
+        lines.extend(overlay.iter().cloned());
         self.flat_lines_record_cursor = new_total;
+        self.overlay_len = overlay.len();
 
-        // Incremental index: truncate volatile, drop ring prefix, re-extend tail.
         {
             let mut slot = self.visual_row_index.borrow_mut();
             if slot.valid_geometry_only(self.wrap_lines) && slot.flat_len() >= stable_flat_before {

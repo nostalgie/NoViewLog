@@ -18,7 +18,10 @@ fn groups_stack_trace_into_single_record() {
     let last = parser.flush_pending().expect("pending record");
     assert_eq!(last.lines.len(), 3);
     assert!(last.text.contains("Error: something failed"));
-    assert_eq!(last.level, Some(LogLevel::Error));
+    assert!(
+        last.effective_level() == Some(LogLevel::Error),
+        "severity is classified at display/rebuild, not stored on ingest"
+    );
 }
 
 #[test]
