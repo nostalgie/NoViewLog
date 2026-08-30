@@ -26,6 +26,43 @@ pub fn builtin_format_presets() -> HashMap<String, FormatPreset> {
             },
         ),
         (
+            "php-default".to_string(),
+            FormatPreset {
+                start: r#"^(\[|\{|\d{4}-|PHP (Fatal|Parse|Warning|Notice)|Fatal error|Parse error|Uncaught|Stack trace:)"#.to_string(),
+                continuation: vec![
+                    r"^\s+#\d+".to_string(),
+                    r"^Stack trace:".to_string(),
+                    r"^\s+thrown in ".to_string(),
+                    r"^\s+at ".to_string(),
+                    r"^\s*$".to_string(),
+                ],
+            },
+        ),
+        (
+            "python-default".to_string(),
+            FormatPreset {
+                start: r#"^(\d{4}-|\[|\{|Traceback \(most recent call last\):|[A-Za-z_][\w.]*Error:|CRITICAL|ERROR)"#.to_string(),
+                continuation: vec![
+                    r#"^\s+File ""#.to_string(),
+                    r"^\s+".to_string(),
+                    r"^During handling of the above".to_string(),
+                    r"^The above exception was the direct cause".to_string(),
+                    r"^\s*$".to_string(),
+                ],
+            },
+        ),
+        (
+            "go-default".to_string(),
+            FormatPreset {
+                start: r#"^(\d{4}/|\[|\{|panic:|fatal |ERROR|level=)"#.to_string(),
+                continuation: vec![
+                    r"^\t".to_string(),
+                    r"^goroutine ".to_string(),
+                    r"^\s*$".to_string(),
+                ],
+            },
+        ),
+        (
             "raw".to_string(),
             FormatPreset {
                 start: r".*".to_string(),

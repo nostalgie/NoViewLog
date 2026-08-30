@@ -38,7 +38,12 @@ work, but they are not the main development focus yet.
 
 - User config: `~/.config/noviewlog/config.yaml`
 - Settings: maximum scrollback lines
-- Bundled preset [`presets/node-dev.yaml`](presets/node-dev.yaml) at launch with `--preset` / `-p` (no in-app preset manager)
+- Bundled filter presets in [`presets/defaults.yaml`](presets/defaults.yaml)
+  (`node-dev`, `node-errors`, `php-dev`, `php-errors`, `python-dev`,
+  `python-errors`, `go-errors`, `nginx-access`, `docker-compose`). Apply at
+  launch with `--preset` / `-p` (no in-app preset manager yet)
+- Edit or add presets under `presets:` in your user config — same id overrides
+  the bundled definition; new ids are added. Bundled presets you omit still load
 - Other CLI flags: `--file` / `-f`, `--config` / `-c`
 
 ## Run (Ubuntu / Linux)
@@ -65,8 +70,9 @@ tab and filter tabs; switching terminals does not stop background sessions.
 See [`docs/terminals.md`](docs/terminals.md) and
 [`docs/architecture.md`](docs/architecture.md).
 
-The bundled preset is [`presets/node-dev.yaml`](presets/node-dev.yaml). User
-configuration is stored in `~/.config/noviewlog/config.yaml`.
+The bundled presets live in [`presets/defaults.yaml`](presets/defaults.yaml)
+(default `node-dev`). User configuration is stored in
+`~/.config/noviewlog/config.yaml` — add or override entries under `presets:`.
 
 ## Other platforms (best-effort)
 

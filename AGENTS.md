@@ -45,8 +45,8 @@ After upgrading the global CLI: `openspec update` in the repo root.
 | Parser / filters / buffer | `crates/noviewlog-core/src/core/` |
 | PTY | `crates/noviewlog-core/src/pty.rs` |
 | Viewport | `crates/noviewlog-core/src/viewport.rs` |
-| Bundled presets | `presets/*.yaml` |
-| User config (runtime) | `~/.config/noviewlog/config.yaml` |
+| Bundled presets | `presets/defaults.yaml` |
+| User config (runtime) | `~/.config/noviewlog/config.yaml` (edit `presets:` to override/add) |
 
 ## Git workflow
 

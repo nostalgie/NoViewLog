@@ -35,6 +35,7 @@ pub(crate) fn sample_records() -> Vec<LogRecord> {
 }
 
 mod parser_filters;
+mod presets_defaults;
 mod tabs_search;
 mod terminals_files;
 mod viewport_wrap;
