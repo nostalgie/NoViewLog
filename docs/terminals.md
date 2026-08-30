@@ -36,7 +36,7 @@ Multiple sessions can run **at the same time**. Switching the active session onl
 - When the ring drops oldest lines and Follow is off, scroll position is **anchored**
   (offset shrinks with the dropped height) so scrolled-up content does not slide.
   Diagnosis / residual risks for remaining jank:
-  [`openspec/changes/pty-flood-resilience/DIAGNOSIS.md`](../openspec/changes/pty-flood-resilience/DIAGNOSIS.md).
+  [`openspec/changes/archive/2026-08-29-pty-flood-resilience/DIAGNOSIS.md`](../openspec/changes/archive/2026-08-29-pty-flood-resilience/DIAGNOSIS.md).
 
 ### File sessions
 

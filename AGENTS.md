@@ -42,7 +42,10 @@ After upgrading the global CLI: `openspec update` in the repo root.
 |------|----------|
 | Slint UI | `crates/noviewlog-slint/` |
 | Engine | `crates/noviewlog-core/` |
+| Engine façade / commands | `crates/noviewlog-core/src/engine/` |
+| Sessions / tabs | `crates/noviewlog-core/src/terminal_state.rs`, `log_view.rs` |
 | Parser / filters / buffer | `crates/noviewlog-core/src/core/` |
+| FILES (load / index / match) | `crates/noviewlog-core/src/file_load.rs`, `file_index.rs`, `file_match.rs` |
 | PTY | `crates/noviewlog-core/src/pty.rs` |
 | Viewport | `crates/noviewlog-core/src/viewport.rs` |
 | Bundled presets | `presets/defaults.yaml` |
