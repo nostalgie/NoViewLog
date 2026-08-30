@@ -37,7 +37,7 @@ Do **not** ask the user to rebuild manually.
 | Parsing, filters, buffer | `crates/noviewlog-core/src/core/` |
 | Process spawn (PTY) | `crates/noviewlog-core/src/pty.rs` |
 | Bitmap viewport (fontdue) | `crates/noviewlog-core/src/viewport.rs` |
-| Bundled presets | `presets/*.yaml` |
+| Bundled presets | `presets/defaults.yaml` |
 | User config (runtime) | `~/.config/noviewlog/config.yaml` |
 
 ## Agent behavior

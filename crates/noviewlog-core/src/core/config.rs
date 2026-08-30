@@ -13,7 +13,7 @@ use crate::core::types::{
     DEFAULT_VIEWPORT_FONT_SIZE,
 };
 
-const BUNDLED_PRESET_YAML: &str = include_str!("../../../../presets/node-dev.yaml");
+const BUNDLED_PRESET_YAML: &str = include_str!("../../../../presets/defaults.yaml");
 
 pub fn load_bundled_config() -> AppConfig {
     merge_config_sources(&[parse_yaml_config(BUNDLED_PRESET_YAML)])
