@@ -34,7 +34,10 @@ Do **not** ask the user to rebuild manually.
 |------|----------|
 | Slint UI | `crates/noviewlog-slint/` |
 | Shared Rust engine | `crates/noviewlog-core/` |
+| Engine façade / commands | `crates/noviewlog-core/src/engine/` |
+| Sessions / tabs | `crates/noviewlog-core/src/terminal_state.rs`, `log_view.rs` |
 | Parsing, filters, buffer | `crates/noviewlog-core/src/core/` |
+| FILES (load / index / match) | `crates/noviewlog-core/src/file_load.rs`, `file_index.rs`, `file_match.rs` |
 | Process spawn (PTY) | `crates/noviewlog-core/src/pty.rs` |
 | Bitmap viewport (fontdue) | `crates/noviewlog-core/src/viewport.rs` |
 | Bundled presets | `presets/defaults.yaml` |

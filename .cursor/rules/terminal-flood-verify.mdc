@@ -29,7 +29,7 @@ or live Terminal rendering:
    (`pidstat` / `top` for that PID) for several seconds while `cat` runs.
 7. **Fail the task** if that release PID pegs ~100% of a core, the tail
    teleports, WRAP-on Follow is unusable, or the status line counter sticks
-   at `max_scrollback` (~1000/1000) and “pages” every ring trim — Follow
+   at `max_scrollback` (~10000/10000) and “pages” every ring trim — Follow
    must look like a native terminal (monotonic line total, live screen).
    `cargo test` passing is not acceptance. Report PID, `%CPU`, and
    `/proc/<pid>/exe`.
