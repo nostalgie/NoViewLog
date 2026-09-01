@@ -8,13 +8,14 @@ use serde_json::json;
 
 use crate::core::config::{
     build_runtime_config, load_bundled_config, load_config_from_yaml, load_preset,
-    load_user_config, save_user_config,
+    load_projects_store, load_user_config, save_user_config,
 };
 use crate::core::formats::{get_builtin_format, merge_formats};
 use crate::core::parser::{reparse_lines, RecordParser};
 use crate::core::types::{
     clamp_max_scrollback_lines, clamp_viewport_font_size, compile_filter, next_filter_id, AppConfig,
-    FilterRule, FilterType, LaunchConfig, LogFormat, PresetConfig, DEFAULT_MAX_SCROLLBACK_LINES,
+    FilterRule, FilterType, LaunchConfig, LogFormat, PresetConfig, ProjectsStore,
+    DEFAULT_MAX_SCROLLBACK_LINES,
 };
 #[cfg(test)]
 use crate::core::types::TabConfig;
@@ -64,13 +65,16 @@ mod commands;
 mod events;
 mod stats;
 mod file_session;
+mod projects;
 mod scroll_selection;
 mod terminal_lifecycle;
 #[cfg(test)]
 mod test_api;
 
 pub use commands::Command;
-pub use events::{parse_engine_event, EngineEvent, StatsSnapshot, StatsTab, StatsTerminal};
+pub use events::{
+    parse_engine_event, EngineEvent, StatsProject, StatsSnapshot, StatsTab, StatsTerminal,
+};
 
 use terminal_lifecycle::StartAction;
 
@@ -78,6 +82,10 @@ pub struct Engine {
     pub(crate) terminals: Vec<TerminalState>,
     pub(crate) active_terminal: usize,
     pub(crate) config: AppConfig,
+    /// Persisted Projects / Programs (`~/.config/noviewlog/projects.yaml`).
+    pub(crate) projects: ProjectsStore,
+    /// Index into `projects.projects` when a Project is open; `None` = no active Project.
+    pub(crate) active_project: Option<usize>,
     pub(crate) preset_name: String,
     pub(crate) format_id: String,
     pub(crate) formats: HashMap<String, LogFormat>,
@@ -114,6 +122,9 @@ pub struct Engine {
     pub(crate) filter_draft_query: String,
     pub(crate) filter_draft_regex: bool,
     pub(crate) filter_draft_pattern: Option<SearchPattern>,
+    /// When true (tests only), do not write `projects.yaml`.
+    #[cfg(test)]
+    pub(crate) skip_projects_persist: bool,
 }
 
 impl Engine {
@@ -148,12 +159,17 @@ impl Engine {
             max_scrollback,
         );
 
-        // No PTY yet — [`Self::set_launch`] starts the CLI command, log file, or
-        // interactive shell so a leftover boot-shell Exit cannot steal the session.
+        let projects = load_projects_store();
+
+        // Boot terminal is replaced by [`Self::finish_startup`] (CLI launch, project
+        // restore, or interactive shell). No PTY here so a leftover boot-shell Exit
+        // cannot steal the session.
         Self {
             terminals: vec![terminal],
             active_terminal: 0,
             config,
+            projects,
+            active_project: None,
             preset_name,
             format_id,
             formats,
@@ -179,6 +195,8 @@ impl Engine {
             filter_draft_query: String::new(),
             filter_draft_regex: false,
             filter_draft_pattern: None,
+            #[cfg(test)]
+            skip_projects_persist: false,
         }
     }
 
@@ -229,6 +247,12 @@ impl Engine {
                 | Command::TerminalMove { .. }
                 | Command::TerminalRename { .. }
                 | Command::TerminalStart { .. }
+                | Command::Stop { .. }
+                | Command::ProjectOpen { .. }
+                | Command::ProjectCreate { .. }
+                | Command::ProjectRename { .. }
+                | Command::ProjectDelete { .. }
+                | Command::ProgramSetLaunch { .. }
                 | Command::LoadFile { .. }
                 | Command::SetSettings { .. }
                 | Command::SetViewportFontSize { .. }
@@ -968,6 +992,7 @@ impl Engine {
         self.mark_viewport_dirty();
         // Flush tab strip chrome on the next tick (do not wait for the 250ms stats throttle).
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn close_tab(&mut self, index: usize) {
@@ -992,6 +1017,7 @@ impl Engine {
         terminal.selection = None;
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn restore_tab(&mut self) {
@@ -1006,6 +1032,7 @@ impl Engine {
         terminal.selection = None;
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn switch_tab(&mut self, index: usize) {
@@ -1017,6 +1044,7 @@ impl Engine {
             terminal.selection = None;
             self.mark_viewport_dirty();
             self.last_stats_at = None;
+            self.sync_active_project_from_terminals();
         }
     }
 
@@ -1028,6 +1056,7 @@ impl Engine {
             return;
         }
         terminal.views[index].name = name.to_string();
+        self.sync_active_project_from_terminals();
     }
 
     /// Reorder filter tabs. The Terminal tab stays at index 0 (`from`/`to` of 0 are no-ops).
@@ -1055,6 +1084,7 @@ impl Engine {
         // Tab strip chrome; viewport content may change if active moved.
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn search_set(
@@ -1200,6 +1230,7 @@ impl Engine {
             use_regex,
             regex: None,
         }));
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn filter_toggle(&mut self, id: &str, enabled: bool) {
@@ -1214,6 +1245,7 @@ impl Engine {
         {
             filter.enabled = enabled;
         }
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn filter_remove(&mut self, id: &str) {
@@ -1221,6 +1253,7 @@ impl Engine {
             return;
         }
         self.active_view_mut().filters_mut().retain(|f| f.id != id);
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn filter_update(&mut self, id: &str, pattern: &str) {
@@ -1244,6 +1277,7 @@ impl Engine {
         {
             *slot = compile_filter(rule);
         }
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn restart(&mut self) {

@@ -20,7 +20,10 @@ pub enum Command {
         #[serde(default)]
         cwd: Option<String>,
     },
-    Stop,
+    Stop {
+        #[serde(default)]
+        terminal_id: Option<String>,
+    },
     Stdin {
         #[serde(default)]
         text: String,
@@ -173,6 +176,29 @@ pub enum Command {
         #[serde(default)]
         terminal_id: Option<String>,
     },
+    ProjectOpen {
+        project_id: String,
+    },
+    ProjectCreate {
+        name: String,
+    },
+    ProjectRename {
+        project_id: String,
+        name: String,
+    },
+    ProjectDelete {
+        project_id: String,
+    },
+    ProgramSetLaunch {
+        #[serde(default)]
+        terminal_id: Option<String>,
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     SetSettings {
         max_scrollback_lines: usize,
     },
@@ -231,7 +257,7 @@ impl Engine {
                     self.start_launch_process();
                 }
             }
-            Command::Stop => self.stop(),
+            Command::Stop { terminal_id } => self.stop(terminal_id.as_deref()),
             Command::Stdin { text, bytes } => {
                 if let Some(data) = bytes {
                     self.handle_key(&data);
@@ -264,6 +290,7 @@ impl Engine {
                 } else {
                     self.active_view_mut()
                         .set_filters(filters.into_iter().map(compile_filter).collect());
+                    self.sync_active_project_from_terminals();
                 }
             }
             Command::Scroll { offset } => {
@@ -365,6 +392,18 @@ impl Engine {
                 self.terminal_rename(&terminal_id, &name)
             }
             Command::TerminalStart { terminal_id } => self.terminal_start(terminal_id.as_deref()),
+            Command::ProjectOpen { project_id } => self.project_open(&project_id),
+            Command::ProjectCreate { name } => self.project_create(&name),
+            Command::ProjectRename { project_id, name } => {
+                self.project_rename(&project_id, &name)
+            }
+            Command::ProjectDelete { project_id } => self.project_delete(&project_id),
+            Command::ProgramSetLaunch {
+                terminal_id,
+                command,
+                args,
+                cwd,
+            } => self.program_set_launch(terminal_id.as_deref(), command, args, cwd),
             Command::SetSettings {
                 max_scrollback_lines,
             } => self.set_settings(max_scrollback_lines),

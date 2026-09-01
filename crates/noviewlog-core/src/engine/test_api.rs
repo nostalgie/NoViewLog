@@ -281,6 +281,33 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn active_view_name_for_test(&self) -> String {
+        self.active_view().name.clone()
+    }
+
+    #[cfg(test)]
+    pub fn terminal_add_blank_for_test(&mut self) {
+        self.terminal_add_blank();
+    }
+
+    #[cfg(test)]
+    pub fn poll_pty_for_test(&mut self) {
+        self.poll_pty();
+    }
+
+    #[cfg(test)]
+    pub fn has_pty_for_test(&self, terminal_id: &str) -> bool {
+        self.ptys.contains_key(terminal_id)
+    }
+
+    #[cfg(test)]
+    pub fn set_pty_generation_for_test(&mut self, generation: u64) {
+        if self.has_active_terminal() {
+            self.active_terminal_mut().pty_generation = generation;
+        }
+    }
+
+    #[cfg(test)]
     pub fn active_terminal_index_for_test(&self) -> usize {
         self.active_terminal
     }

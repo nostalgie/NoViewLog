@@ -1,0 +1,352 @@
+//! Project / Program persistence and restore.
+
+use super::*;
+use crate::core::config::{
+    program_workspace_snapshot, save_projects_store, workspace_to_tab_configs,
+};
+use crate::core::types::{
+    next_program_id, next_project_id, program_display_name, ProgramConfig, ProjectConfig,
+    WorkspaceConfig,
+};
+use crate::log_view::TERMINAL_TAB_NAME;
+
+impl Engine {
+    /// Complete host startup: CLI launch, last-project restore, or interactive shell.
+    ///
+    /// Returns `true` when the last active project was restored (no shell auto-start).
+    pub fn finish_startup(&mut self, launch: LaunchConfig) -> bool {
+        if launch.has_process_launch() {
+            self.set_launch(launch);
+            return false;
+        }
+        if !self.projects.projects.is_empty() {
+            let idx = self
+                .projects
+                .active_project
+                .min(self.projects.projects.len() - 1);
+            let project_id = self.projects.projects[idx].id.clone();
+            self.project_open(&project_id);
+            return true;
+        }
+        self.set_launch(launch);
+        false
+    }
+
+    pub(crate) fn persist_projects_store(&mut self) {
+        if let Some(idx) = self.active_project {
+            self.projects.active_project = idx;
+        }
+        #[cfg(test)]
+        if self.skip_projects_persist {
+            return;
+        }
+        if let Err(err) = save_projects_store(&self.projects) {
+            self.status_message = format!("Failed to save projects: {err}");
+            self.push_event(json!({"type":"status","message": self.status_message}));
+        }
+    }
+
+    /// Snapshot live TERMINALS into the active Project's Programs (order preserved).
+    pub(crate) fn sync_active_project_from_terminals(&mut self) {
+        let Some(proj_idx) = self.active_project else {
+            return;
+        };
+        if proj_idx >= self.projects.projects.len() {
+            self.active_project = None;
+            return;
+        }
+
+        let mut programs: Vec<ProgramConfig> = Vec::new();
+        for term in self.terminals.iter().filter(|t| !t.is_file_session()) {
+            let tabs: Vec<_> = term.views.iter().map(|v| v.to_tab_config()).collect();
+            let workspace = program_workspace_snapshot(&tabs, term.active_view);
+            let id = term
+                .program_id
+                .clone()
+                .unwrap_or_else(|| next_program_id(&programs));
+            let name = term
+                .custom_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    if term.launch.has_process_launch() {
+                        program_display_name(&term.launch)
+                    } else {
+                        term.label()
+                    }
+                });
+            programs.push(ProgramConfig {
+                id,
+                name,
+                launch: term.launch.clone(),
+                workspace,
+            });
+        }
+
+        // Keep program_id links in sync with newly assigned ids.
+        let mut live_i = 0usize;
+        for term in self.terminals.iter_mut().filter(|t| !t.is_file_session()) {
+            if let Some(p) = programs.get(live_i) {
+                term.program_id = Some(p.id.clone());
+            }
+            live_i += 1;
+        }
+
+        self.projects.projects[proj_idx].programs = programs;
+        self.persist_projects_store();
+    }
+
+    pub(crate) fn project_open(&mut self, project_id: &str) {
+        let Some(proj_idx) = self
+            .projects
+            .projects
+            .iter()
+            .position(|p| p.id == project_id)
+        else {
+            self.status_message = format!("Unknown project: {project_id}");
+            self.push_event(json!({"type":"status","message": self.status_message}));
+            return;
+        };
+
+        // Stop all live PTYs; keep FILES sessions.
+        let live_ids: Vec<String> = self
+            .terminals
+            .iter()
+            .filter(|t| !t.is_file_session())
+            .map(|t| t.id.clone())
+            .collect();
+        for id in &live_ids {
+            if let Some(mut pty) = self.ptys.remove(id) {
+                pty.stop();
+            }
+        }
+
+        let file_sessions: Vec<TerminalState> = self
+            .terminals
+            .drain(..)
+            .filter(|t| t.is_file_session())
+            .collect();
+
+        let runtime = build_runtime_config(&self.config, Some(&self.preset_name));
+        let format = self.current_format();
+        let max_records = self.config.max_scrollback_lines;
+        let programs = self.projects.projects[proj_idx].programs.clone();
+
+        let mut new_live: Vec<TerminalState> = Vec::new();
+        if programs.is_empty() {
+            let id = next_terminal_id(&file_sessions);
+            let mut term =
+                TerminalState::new(id, LaunchConfig::default(), &runtime, &format, max_records);
+            term.running = false;
+            new_live.push(term);
+        } else {
+            for (i, program) in programs.iter().enumerate() {
+                let id = format!(
+                    "terminal-{}-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0),
+                    i
+                );
+                let mut term = TerminalState::new(
+                    id,
+                    program.launch.clone(),
+                    &runtime,
+                    &format,
+                    max_records,
+                );
+                term.program_id = Some(program.id.clone());
+                if !program.name.trim().is_empty() {
+                    term.custom_title = Some(program.name.clone());
+                }
+                apply_workspace_tabs(&mut term, &program.workspace);
+                term.running = false;
+                term.process_started = false;
+                term.exit_code = None;
+                new_live.push(term);
+            }
+        }
+
+        self.terminals = new_live;
+        self.terminals.extend(file_sessions);
+        self.active_terminal = 0;
+        self.active_project = Some(proj_idx);
+        self.projects.active_project = proj_idx;
+        self.persist_projects_store();
+        self.mark_all_views_dirty();
+        self.mark_viewport_dirty();
+        self.last_stats_at = None;
+        self.status_message = format!(
+            "Opened project: {}",
+            self.projects.projects[proj_idx].name
+        );
+        self.push_event(json!({"type":"status","message": self.status_message}));
+    }
+
+    pub(crate) fn project_create(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status_message = "Project name required".to_string();
+            self.push_event(json!({"type":"status","message": self.status_message}));
+            return;
+        }
+
+        let mut programs: Vec<ProgramConfig> = Vec::new();
+        for term in self.terminals.iter().filter(|t| !t.is_file_session()) {
+            let tabs: Vec<_> = term.views.iter().map(|v| v.to_tab_config()).collect();
+            let workspace = program_workspace_snapshot(&tabs, term.active_view);
+            let id = next_program_id(&programs);
+            let prog_name = term
+                .custom_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    if term.launch.has_process_launch() {
+                        program_display_name(&term.launch)
+                    } else {
+                        term.label()
+                    }
+                });
+            programs.push(ProgramConfig {
+                id,
+                name: prog_name,
+                launch: term.launch.clone(),
+                workspace,
+            });
+        }
+
+        let project_id = next_project_id(&self.projects.projects);
+        let project = ProjectConfig {
+            id: project_id.clone(),
+            name: name.to_string(),
+            default_cwd: None,
+            path_hint: None,
+            programs,
+            active_program: 0,
+        };
+        self.projects.projects.push(project);
+        let proj_idx = self.projects.projects.len() - 1;
+        self.active_project = Some(proj_idx);
+
+        // Link program ids on live terminals.
+        let program_ids: Vec<String> = self.projects.projects[proj_idx]
+            .programs
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        let mut i = 0usize;
+        for term in self.terminals.iter_mut().filter(|t| !t.is_file_session()) {
+            if let Some(id) = program_ids.get(i) {
+                term.program_id = Some(id.clone());
+            }
+            i += 1;
+        }
+
+        self.persist_projects_store();
+        self.last_stats_at = None;
+        self.status_message = format!("Created project: {name}");
+        self.push_event(json!({"type":"status","message": self.status_message}));
+    }
+
+    pub(crate) fn project_rename(&mut self, project_id: &str, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Some(proj) = self.projects.projects.iter_mut().find(|p| p.id == project_id) else {
+            return;
+        };
+        proj.name = name.to_string();
+        self.persist_projects_store();
+        self.last_stats_at = None;
+    }
+
+    pub(crate) fn project_delete(&mut self, project_id: &str) {
+        let Some(idx) = self
+            .projects
+            .projects
+            .iter()
+            .position(|p| p.id == project_id)
+        else {
+            return;
+        };
+        self.projects.projects.remove(idx);
+        if let Some(active) = self.active_project {
+            if active == idx {
+                self.active_project = None;
+                for term in self.terminals.iter_mut() {
+                    term.program_id = None;
+                }
+            } else if active > idx {
+                self.active_project = Some(active - 1);
+            }
+        }
+        if self.projects.active_project >= self.projects.projects.len()
+            && !self.projects.projects.is_empty()
+        {
+            self.projects.active_project = self.projects.projects.len() - 1;
+        }
+        self.persist_projects_store();
+        self.last_stats_at = None;
+        self.status_message = "Project deleted".to_string();
+        self.push_event(json!({"type":"status","message": self.status_message}));
+    }
+
+    pub(crate) fn program_set_launch(
+        &mut self,
+        terminal_id: Option<&str>,
+        command: Option<String>,
+        args: Vec<String>,
+        cwd: Option<String>,
+    ) {
+        let id = terminal_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.active_terminal().id.clone());
+        let Some(term) = self.terminals.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
+        if term.is_file_session() {
+            self.status_message = "File terminal is view-only".to_string();
+            self.push_event(json!({"type":"status","message": self.status_message}));
+            return;
+        }
+        let cmd = command
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty());
+        term.launch.command = cmd;
+        term.launch.args = args;
+        term.launch.cwd = cwd.filter(|c| !c.trim().is_empty());
+        term.launch.wsl = false;
+        term.launch.wsl_distro = None;
+        term.launch.log_file = None;
+        if let Some(ref cwd) = term.launch.cwd {
+            term.cwd = cwd.clone();
+        }
+        self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
+    }
+}
+
+fn apply_workspace_tabs(terminal: &mut TerminalState, workspace: &WorkspaceConfig) {
+    let tabs = workspace_to_tab_configs(workspace);
+    if tabs.is_empty() {
+        terminal.views = vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())];
+        terminal.active_view = 0;
+    } else {
+        let mut views: Vec<LogView> = tabs.into_iter().map(LogView::from_tab_config).collect();
+        if let Some(first) = views.first_mut() {
+            if first.name.trim().is_empty() {
+                first.name = TERMINAL_TAB_NAME.to_string();
+            }
+        }
+        let active = workspace.active_tab.min(views.len().saturating_sub(1));
+        terminal.views = views;
+        terminal.active_view = active;
+    }
+    terminal.sync_primary_tab_identity();
+}

@@ -7,7 +7,7 @@ use noviewlog_core::core::types::{clamp_max_scrollback_lines, FilterType};
 use noviewlog_core::{StatsSnapshot, StatsTerminal, TERMINAL_TAB_NAME};
 use slint::{Model, SharedString, Timer, VecModel};
 
-use crate::ui::{AppWindow, FilterInfo, TabInfo, TerminalInfo};
+use crate::ui::{AppWindow, FilterInfo, ProjectInfo, TabInfo, TerminalInfo};
 
 /// Pending debounced find `search_set` payload: query, regex, case, whole-word.
 pub(crate) type FindPending = Option<(String, bool, bool, bool)>;
@@ -20,6 +20,7 @@ pub(crate) fn apply_stats(
     tabs: &Rc<VecModel<TabInfo>>,
     terminals: &Rc<VecModel<TerminalInfo>>,
     files: &Rc<VecModel<TerminalInfo>>,
+    projects: &Rc<VecModel<ProjectInfo>>,
     filters: &Rc<VecModel<FilterInfo>>,
     ui: &AppWindow,
     terminal_tab_active: &Rc<Cell<bool>>,
@@ -34,7 +35,7 @@ pub(crate) fn apply_stats(
     find_debounce: &Rc<Timer>,
 ) -> bool {
     let tabs_changed = apply_stats_to_tabs(stats, tabs, ui, terminal_tab_active);
-    let terms_changed = apply_stats_to_terminals(stats, terminals, files, ui);
+    let terms_changed = apply_stats_to_terminals(stats, terminals, files, projects, ui);
     let filters_changed = apply_stats_to_filters(stats, filters, ui);
     apply_stats_to_find(
         stats,
@@ -134,6 +135,7 @@ fn apply_stats_to_terminals(
     stats: &StatsSnapshot,
     terminals: &Rc<VecModel<TerminalInfo>>,
     files: &Rc<VecModel<TerminalInfo>>,
+    projects: &Rc<VecModel<ProjectInfo>>,
     ui: &AppWindow,
 ) -> bool {
     let active = stats.active_terminal as i32;
@@ -153,6 +155,15 @@ fn apply_stats_to_terminals(
     }
     if ui.get_files_section_expanded() != stats.files_section_expanded {
         ui.set_files_section_expanded(stats.files_section_expanded);
+        changed = true;
+    }
+
+    let active_project_id = stats
+        .active_project_id
+        .as_deref()
+        .unwrap_or("");
+    if ui.get_active_project_id().as_str() != active_project_id {
+        ui.set_active_project_id(SharedString::from(active_project_id));
         changed = true;
     }
 
@@ -176,6 +187,25 @@ fn apply_stats_to_terminals(
         changed = true;
     }
 
+    let next_projects: Vec<ProjectInfo> = stats
+        .projects
+        .iter()
+        .map(|p| ProjectInfo {
+            index: p.index as i32,
+            id: SharedString::from(p.id.as_str()),
+            name: SharedString::from(p.name.as_str()),
+            program_count: p.program_count as i32,
+            active: stats
+                .active_project_id
+                .as_ref()
+                .is_some_and(|id| id == &p.id),
+        })
+        .collect();
+    if projects_model_differs(projects, &next_projects) {
+        projects.set_vec(next_projects);
+        changed = true;
+    }
+
     changed
 }
 
@@ -191,6 +221,9 @@ fn stats_terminal_to_info(term: &StatsTerminal) -> TerminalInfo {
         label: SharedString::from(label),
         cwd: SharedString::from(term.cwd.as_str()),
         running: term.running,
+        has_launch: term.has_launch,
+        launch_command: SharedString::from(term.launch_command.as_str()),
+        launch_args: SharedString::from(term.launch_args.as_str()),
     }
 }
 
@@ -222,6 +255,29 @@ fn terminals_model_differs(model: &VecModel<TerminalInfo>, next: &[TerminalInfo]
             || cur.id != term.id
             || cur.label != term.label
             || cur.cwd != term.cwd
+            || cur.has_launch != term.has_launch
+            || cur.launch_command != term.launch_command
+            || cur.launch_args != term.launch_args
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn projects_model_differs(model: &VecModel<ProjectInfo>, next: &[ProjectInfo]) -> bool {
+    if model.row_count() != next.len() {
+        return true;
+    }
+    for (i, proj) in next.iter().enumerate() {
+        let Some(cur) = model.row_data(i) else {
+            return true;
+        };
+        if cur.index != proj.index
+            || cur.id != proj.id
+            || cur.name != proj.name
+            || cur.program_count != proj.program_count
+            || cur.active != proj.active
         {
             return true;
         }

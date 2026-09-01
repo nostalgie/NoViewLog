@@ -7,7 +7,7 @@
 
 import { Palette, SpinBox, Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
-import { TabInfo, TerminalInfo, FilterInfo } from "types.slint";
+import { TabInfo, TerminalInfo, FilterInfo, ProjectInfo } from "types.slint";
 import {
     CtxAccelMenuItem,
     ModeToggle,
@@ -26,8 +26,9 @@ import {
     TerminalRow,
     EngineScrollBar,
 } from "sidebar.slint";
+import { FormTextField, FormDialogPanel } from "form-dialogs.slint";
 
-export { TabInfo, TerminalInfo, FilterInfo }
+export { TabInfo, TerminalInfo, FilterInfo, ProjectInfo }
 
 export component AppWindow inherits Window {
     title: "NoViewLog";
@@ -52,6 +53,9 @@ export component AppWindow inherits Window {
     in-out property <bool> can-restore-tab: false;
     in-out property <[TerminalInfo]> terminals-model;
     in-out property <[TerminalInfo]> files-model;
+    in-out property <[ProjectInfo]> projects-model;
+    in-out property <string> active-project-id: "";
+    in-out property <bool> projects-section-expanded: true;
     in-out property <int> active-terminal-index: 0;
     // Active session is a read-only log file (hide Follow; primary tab = filename).
     in-out property <bool> is-file-session: false;
@@ -157,7 +161,15 @@ export component AppWindow inherits Window {
     callback terminal-close(id: string);
     callback terminal-move(id: string, to-index: int);
     callback terminal-rename(id: string, name: string);
+    callback terminal-start(id: string);
+    callback terminal-stop(id: string);
     callback set-sidebar-expanded(terminals: bool, files: bool);
+
+    callback project-open(id: string);
+    callback project-create(name: string);
+    callback project-rename(id: string, name: string);
+    callback project-delete(id: string);
+    callback program-set-launch(terminal-id: string, command: string, args-text: string, cwd: string);
 
     // IN/OUT filters → engine filter_add / filter_toggle / filter_remove / filter_update / filter_clear.
     // filter-type is "include" or "exclude"; use-regex is the draft `.*` toggle.
@@ -287,6 +299,64 @@ export component AppWindow inherits Window {
     function toggle-files-section() {
         root.files-section-expanded = !root.files-section-expanded;
         root.set-sidebar-expanded(root.terminals-section-expanded, root.files-section-expanded);
+    }
+
+    function toggle-projects-section() {
+        root.projects-section-expanded = !root.projects-section-expanded;
+    }
+
+    // Create-project / Edit-launch dialog drafts.
+    property <string> project-name-draft: "";
+    property <string> launch-edit-terminal-id: "";
+    property <string> launch-command-draft: "";
+    property <string> launch-args-draft: "";
+    property <string> launch-cwd-draft: "";
+    property <string> project-rename-id: "";
+    property <string> project-rename-draft: "";
+
+    function open-create-project() {
+        root.project-name-draft = "";
+        create-project-dlg.show();
+    }
+
+    function confirm-create-project() {
+        if (root.project-name-draft == "") {
+            return;
+        }
+        root.project-create(root.project-name-draft);
+        create-project-dlg.close();
+    }
+
+    function open-edit-launch(term-id: string, command: string, args-text: string, cwd: string) {
+        root.launch-edit-terminal-id = term-id;
+        root.launch-command-draft = command;
+        root.launch-args-draft = args-text;
+        root.launch-cwd-draft = cwd;
+        edit-launch-dlg.show();
+    }
+
+    function confirm-edit-launch() {
+        root.program-set-launch(
+            root.launch-edit-terminal-id,
+            root.launch-command-draft,
+            root.launch-args-draft,
+            root.launch-cwd-draft
+        );
+        edit-launch-dlg.close();
+    }
+
+    function open-rename-project(id: string, name: string) {
+        root.project-rename-id = id;
+        root.project-rename-draft = name;
+        rename-project-dlg.show();
+    }
+
+    function confirm-rename-project() {
+        if (root.project-rename-draft == "") {
+            return;
+        }
+        root.project-rename(root.project-rename-id, root.project-rename-draft);
+        rename-project-dlg.close();
     }
 
     pure function hit-title-menu-btn(btn-x: length, btn-y: length, btn-w: length, btn-h: length, px: length, py: length) -> bool {
@@ -1155,6 +1225,189 @@ export component AppWindow inherits Window {
                         padding-right: 0px;
                         spacing: 8px;
 
+                        // PROJECTS — saved Project → Program groups
+                        HorizontalLayout {
+                            spacing: 4px;
+                            height: 24px;
+                            padding-left: 8px;
+                            padding-right: 12px;
+
+                            TouchArea {
+                                width: 20px;
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-projects-section(); }
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: root.projects-section-expanded ? "▾" : "▸";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                height: 24px;
+                                horizontal-stretch: 1;
+                                mouse-cursor: pointer;
+                                clicked => { root.toggle-projects-section(); }
+                                Text {
+                                    width: 100%;
+                                    height: 100%;
+                                    text: "PROJECTS";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            TouchArea {
+                                width: 24px;
+                                height: 24px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    root.open-create-project();
+                                }
+
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 4px;
+                                    background: parent.has-hover ? Theme.bg-input : transparent;
+
+                                    Text {
+                                        width: 100%;
+                                        height: 100%;
+                                        text: "+";
+                                        color: Theme.text-primary;
+                                        font-size: 16px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.projects-section-expanded: VerticalLayout {
+                            // Same recipe as TERMINALS/FILES: full-width row fill,
+                            // content indent inside the row (not on the list).
+                            spacing: 3px;
+                            vertical-stretch: 0;
+
+                            if root.projects-model.length == 0: HorizontalLayout {
+                                padding-left: 32px;
+                                padding-right: 16px;
+                                Text {
+                                    text: "No projects — + to save terminals";
+                                    color: Theme.text-muted;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            for proj in root.projects-model: TouchArea {
+                                height: 32px;
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.dismiss-any-rename-if-any();
+                                    root.project-open(proj.id);
+                                }
+
+                                // Selection = full-width fill only — never Theme.accent border.
+                                Rectangle {
+                                    width: 100%;
+                                    height: 100%;
+                                    border-radius: 0px;
+                                    border-width: 0px;
+                                    background: proj.active ? Theme.accent-soft : transparent;
+                                }
+
+                                HorizontalLayout {
+                                    width: 100%;
+                                    height: 100%;
+                                    // Align title under "PROJECTS" text (past chevron).
+                                    padding-left: 32px;
+                                    padding-right: 16px;
+                                    spacing: 8px;
+                                    alignment: stretch;
+
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        min-width: 0px;
+                                        text: proj.name;
+                                        color: proj.active ? Theme.text-primary : Theme.text-secondary;
+                                        font-size: 12px;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 0;
+                                        vertical-stretch: 1;
+                                        alignment: center;
+                                        Text {
+                                            text: proj.program-count;
+                                            color: Theme.text-muted;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        width: 20px;
+                                        horizontal-stretch: 0;
+                                        vertical-stretch: 1;
+                                        alignment: center;
+                                        TouchArea {
+                                            width: 20px;
+                                            height: 20px;
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.open-rename-project(proj.id, proj.name);
+                                            }
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: "✎";
+                                                color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                                                font-size: 11px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        width: 20px;
+                                        horizontal-stretch: 0;
+                                        vertical-stretch: 1;
+                                        alignment: center;
+                                        TouchArea {
+                                            width: 20px;
+                                            height: 20px;
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.project-delete(proj.id);
+                                            }
+                                            Text {
+                                                width: 100%;
+                                                height: 100%;
+                                                text: "×";
+                                                color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                                                font-size: 14px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // TERMINALS — collapsible live PTY sessions
                         HorizontalLayout {
                             spacing: 4px;
@@ -1256,6 +1509,7 @@ export component AppWindow inherits Window {
                                         running: term.running;
                                         active: term.index == root.active-terminal-index;
                                         show-close: root.terminals-model.length > 1;
+                                        show-run-stop: true;
                                         term-id: term.id;
                                         term-index: term.index;
                                         show-drop-before: root.term-dragging
@@ -1273,6 +1527,23 @@ export component AppWindow inherits Window {
                                         close-clicked => {
                                             root.dismiss-any-rename-if-any();
                                             root.terminal-close(term.id);
+                                        }
+                                        run-clicked => {
+                                            root.dismiss-any-rename-if-any();
+                                            root.terminal-start(term.id);
+                                        }
+                                        stop-clicked => {
+                                            root.dismiss-any-rename-if-any();
+                                            root.terminal-stop(term.id);
+                                        }
+                                        edit-launch-clicked => {
+                                            root.dismiss-any-rename-if-any();
+                                            root.open-edit-launch(
+                                                term.id,
+                                                term.launch-command,
+                                                term.launch-args,
+                                                term.cwd
+                                            );
                                         }
                                         wheel(dy) => { root.scroll-terminals-by(dy); }
                                         rename-requested => {
@@ -2478,69 +2749,115 @@ export component AppWindow inherits Window {
     }
     }
 
-    // Settings dialog — max scrollback lines.
-    settings-dlg := PopupWindow {
+    // Create Project dialog.
+    create-project-dlg := PopupWindow {
         x: max(16px, (root.width - 400px) / 2);
         y: max(48px, (root.height - 220px) / 2);
         close-policy: close-on-click-outside;
 
-        Rectangle {
-            background: Theme.bg-window;
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 0px;
-            drop-shadow-color: Theme.shadow-panel;
-            drop-shadow-offset-y: 8px;
-            drop-shadow-blur: 20px;
+        FormDialogPanel {
+            title: "Create project";
+            ok-text: "Create";
+            cancelled => { create-project-dlg.close(); }
+            confirmed => { root.confirm-create-project(); }
+
+            FormTextField {
+                label: "Name";
+                text <=> root.project-name-draft;
+                focus-on-init: true;
+                accepted => { root.confirm-create-project(); }
+                cancelled => { create-project-dlg.close(); }
+            }
+        }
+    }
+
+    rename-project-dlg := PopupWindow {
+        x: max(16px, (root.width - 400px) / 2);
+        y: max(48px, (root.height - 220px) / 2);
+        close-policy: close-on-click-outside;
+
+        FormDialogPanel {
+            title: "Rename project";
+            ok-text: "OK";
+            cancelled => { rename-project-dlg.close(); }
+            confirmed => { root.confirm-rename-project(); }
+
+            FormTextField {
+                label: "Name";
+                text <=> root.project-rename-draft;
+                focus-on-init: true;
+                accepted => { root.confirm-rename-project(); }
+                cancelled => { rename-project-dlg.close(); }
+            }
+        }
+    }
+
+    edit-launch-dlg := PopupWindow {
+        x: max(16px, (root.width - 440px) / 2);
+        y: max(48px, (root.height - 360px) / 2);
+        close-policy: close-on-click-outside;
+
+        FormDialogPanel {
+            title: "Edit launch";
+            ok-text: "Save";
+            panel-min-width: 400px;
+            cancelled => { edit-launch-dlg.close(); }
+            confirmed => { root.confirm-edit-launch(); }
+
+            FormTextField {
+                label: "Command (empty = interactive shell)";
+                text <=> root.launch-command-draft;
+                focus-on-init: true;
+                accepted => { root.confirm-edit-launch(); }
+                cancelled => { edit-launch-dlg.close(); }
+            }
+            FormTextField {
+                label: "Args (space-separated)";
+                text <=> root.launch-args-draft;
+                accepted => { root.confirm-edit-launch(); }
+                cancelled => { edit-launch-dlg.close(); }
+            }
+            FormTextField {
+                label: "Working directory";
+                text <=> root.launch-cwd-draft;
+                accepted => { root.confirm-edit-launch(); }
+                cancelled => { edit-launch-dlg.close(); }
+            }
+        }
+    }
+
+    // Settings dialog — max scrollback lines.
+    settings-dlg := PopupWindow {
+        x: max(16px, (root.width - 400px) / 2);
+        y: max(48px, (root.height - 260px) / 2);
+        close-policy: close-on-click-outside;
+
+        FormDialogPanel {
+            title: "Settings";
+            ok-text: "OK";
+            cancelled => { root.close-settings(); }
+            confirmed => { root.confirm-settings(); }
 
             VerticalLayout {
-                padding: 20px;
-                spacing: 12px;
-                min-width: 360px;
-                max-width: 480px;
-
-                Text {
-                    text: "Settings";
-                    color: Theme.text-primary;
-                    font-size: 14px;
-                    font-weight: 700;
-                }
-
+                spacing: 6px;
+                width: 100%;
                 Text {
                     text: "Max scrollback lines";
                     color: Theme.text-muted;
                     font-size: 11px;
                     font-weight: 700;
                 }
-
                 SpinBox {
                     minimum: 100;
                     maximum: 30000;
                     step-size: 1000;
                     value <=> root.settings-draft;
                 }
-
                 Text {
                     text: "Oldest lines are dropped when the limit is exceeded (100–30000).";
                     color: Theme.text-secondary;
                     font-size: 11px;
                     wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: end;
-                    padding-top: 8px;
-
-                    Button {
-                        text: "Cancel";
-                        clicked => { root.close-settings(); }
-                    }
-                    Button {
-                        text: "OK";
-                        primary: true;
-                        clicked => { root.confirm-settings(); }
-                    }
                 }
             }
         }
@@ -2551,103 +2868,80 @@ export component AppWindow inherits Window {
     // popup (x ≈ 16px, stuck left). `parent` is AppWindow — center on that.
     about-dlg := PopupWindow {
         x: (parent.width - 420px) / 2;
-        y: max(48px, (parent.height - 200px) / 2);
+        y: max(48px, (parent.height - 220px) / 2);
         width: 420px;
         close-policy: close-on-click-outside;
 
-        Rectangle {
-            width: 100%;
-            height: 100%;
-            background: Theme.bg-window;
-            border-width: 1px;
-            border-color: Theme.border;
-            border-radius: 0px;
-            drop-shadow-color: Theme.shadow-panel;
-            drop-shadow-offset-y: 8px;
-            drop-shadow-blur: 20px;
+        FormDialogPanel {
+            title: "About";
+            ok-text: "OK";
+            show-cancel: false;
+            panel-min-width: 380px;
+            cancelled => { root.close-about(); }
+            confirmed => { root.close-about(); }
 
-            VerticalLayout {
-                padding: 20px;
-                spacing: 10px;
-                width: 100%;
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: start;
 
-                HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
-
-                    Image {
-                        source: @image-url("assets/icon.png");
-                        width: 32px;
-                        height: 32px;
-                        image-fit: contain;
-                    }
-
-                    VerticalLayout {
-                        spacing: 4px;
-                        alignment: center;
-                        Text {
-                            text: "NoViewLog";
-                            color: Theme.text-primary;
-                            font-size: 16px;
-                            font-weight: 700;
-                        }
-                        Text {
-                            text: "Native desktop log viewer";
-                            color: Theme.text-secondary;
-                            font-size: 12px;
-                        }
-                    }
+                Image {
+                    source: @image-url("assets/icon.png");
+                    width: 32px;
+                    height: 32px;
+                    image-fit: contain;
                 }
 
-                HorizontalLayout {
-                    spacing: 0px;
-                    alignment: start;
-
+                VerticalLayout {
+                    spacing: 4px;
+                    alignment: center;
                     Text {
-                        text: "UI built with Slint — see ";
-                        color: Theme.text-muted;
-                        font-size: 11px;
-                        wrap: no-wrap;
+                        text: "NoViewLog";
+                        color: Theme.text-primary;
+                        font-size: 16px;
+                        font-weight: 700;
                     }
-
-                    // TouchArea preferred size is 0 (stretch only). As a layout
-                    // child with alignment:start it was 0×0 — text painted, clicks missed.
-                    Rectangle {
-                        horizontal-stretch: 0;
-                        VerticalLayout {
-                            spacing: 1px;
-                            Text {
-                                text: "slint.dev";
-                                color: slint-link.has-hover ? Theme.text-primary : Theme.text-secondary;
-                                font-size: 11px;
-                                wrap: no-wrap;
-                            }
-                            Rectangle {
-                                height: 1px;
-                                background: slint-link.has-hover ? Theme.text-primary : Theme.text-secondary;
-                            }
-                        }
-                        slint-link := TouchArea {
-                            width: 100%;
-                            height: 100%;
-                            mouse-cursor: pointer;
-                            clicked => {
-                                root.open-url("https://slint.dev");
-                                root.close-about();
-                            }
-                        }
+                    Text {
+                        text: "Native desktop log viewer";
+                        color: Theme.text-secondary;
+                        font-size: 12px;
                     }
                 }
+            }
 
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: end;
-                    padding-top: 8px;
+            HorizontalLayout {
+                spacing: 0px;
+                alignment: start;
 
-                    Button {
-                        text: "OK";
-                        primary: true;
-                        clicked => { root.close-about(); }
+                Text {
+                    text: "UI built with Slint — see ";
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    wrap: no-wrap;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 0;
+                    VerticalLayout {
+                        spacing: 1px;
+                        Text {
+                            text: "slint.dev";
+                            color: slint-link.has-hover ? Theme.text-primary : Theme.text-secondary;
+                            font-size: 11px;
+                            wrap: no-wrap;
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: slint-link.has-hover ? Theme.text-primary : Theme.text-secondary;
+                        }
+                    }
+                    slint-link := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.open-url("https://slint.dev");
+                            root.close-about();
+                        }
                     }
                 }
             }

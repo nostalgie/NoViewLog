@@ -1,5 +1,5 @@
 use super::*;
-use super::events::{StatsSnapshot, StatsTab, StatsTerminal};
+use super::events::{StatsProject, StatsSnapshot, StatsTab, StatsTerminal};
 
 impl Engine {
     pub(crate) fn emit_stats(&mut self) {
@@ -24,6 +24,10 @@ impl Engine {
                 label: t.label(),
                 running: t.running,
                 cwd: t.cwd.clone(),
+                has_launch: t.launch.has_process_launch(),
+                program_id: t.program_id.clone(),
+                launch_command: t.launch.command.clone().unwrap_or_default(),
+                launch_args: t.launch.args.join(" "),
             };
             if t.is_file_session() {
                 files.push(row);
@@ -31,6 +35,21 @@ impl Engine {
                 terminals.push(row);
             }
         }
+        let projects: Vec<StatsProject> = self
+            .projects
+            .projects
+            .iter()
+            .enumerate()
+            .map(|(i, p)| StatsProject {
+                index: i,
+                id: p.id.clone(),
+                name: p.name.clone(),
+                program_count: p.programs.len(),
+            })
+            .collect();
+        let active_project_id = self
+            .active_project
+            .and_then(|i| self.projects.projects.get(i).map(|p| p.id.clone()));
         let active_terminal_idx = self.active_terminal;
         let is_file_session = self
             .terminals
@@ -227,6 +246,8 @@ impl Engine {
             has_selection,
             terminals,
             files,
+            projects,
+            active_project_id,
             active_terminal: active_terminal_idx,
             terminal_id,
             terminal_label,

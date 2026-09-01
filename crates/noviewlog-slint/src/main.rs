@@ -116,10 +116,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         label: SharedString::from("."),
         cwd: SharedString::from(""),
         running: true,
+        has_launch: false,
+        launch_command: SharedString::from(""),
+        launch_args: SharedString::from(""),
     }]));
     ui.set_terminals_model(ModelRc::from(terminals_model.clone()));
     let files_model = Rc::new(VecModel::<TerminalInfo>::from(vec![]));
     ui.set_files_model(ModelRc::from(files_model.clone()));
+    let projects_model = Rc::new(VecModel::<ProjectInfo>::from(vec![]));
+    ui.set_projects_model(ModelRc::from(projects_model.clone()));
+    ui.set_active_project_id(SharedString::from(""));
+    ui.set_projects_section_expanded(true);
     ui.set_active_terminal_index(0);
     ui.set_is_file_session(false);
     ui.set_terminals_section_expanded(true);
@@ -143,6 +150,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli: Vec<String> = std::env::args().skip(1).collect();
     let launch = launch_args::parse(&cli);
+    let mut engine = Engine::new();
+    let restored_project = engine.finish_startup(launch.clone());
     if launch.has_process_launch() {
         let label = launch
             .command
@@ -150,11 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .or(launch.log_file.as_deref())
             .unwrap_or("launch");
         ui.set_status_text(SharedString::from(format!("launch: {label}")));
-    } else {
+    } else if !restored_project {
         ui.set_status_text(SharedString::from("interactive shell"));
     }
-    let mut engine = Engine::new();
-    engine.set_launch(launch);
 
     let engine = Rc::new(RefCell::new(engine));
     let logical_size = Rc::new(RefCell::new((800.0f32, 600.0f32)));
@@ -1022,6 +1029,123 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
+        ui.on_terminal_start(move |id| {
+            let _ = engine.borrow_mut().send_command(Command::TerminalStart {
+                terminal_id: Some(id.as_str().to_string()),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_terminal_stop(move |id| {
+            let _ = engine.borrow_mut().send_command(Command::Stop {
+                terminal_id: Some(id.as_str().to_string()),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_project_open(move |id| {
+            let _ = engine.borrow_mut().send_command(Command::ProjectOpen {
+                project_id: id.as_str().to_string(),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_project_create(move |name| {
+            let _ = engine.borrow_mut().send_command(Command::ProjectCreate {
+                name: name.as_str().to_string(),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_project_rename(move |id, name| {
+            let _ = engine.borrow_mut().send_command(Command::ProjectRename {
+                project_id: id.as_str().to_string(),
+                name: name.as_str().to_string(),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_project_delete(move |id| {
+            let _ = engine.borrow_mut().send_command(Command::ProjectDelete {
+                project_id: id.as_str().to_string(),
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
+        ui.on_program_set_launch(move |terminal_id, command, args_text, cwd| {
+            let args: Vec<String> = args_text
+                .as_str()
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            let cmd = command.as_str().trim();
+            let cwd_s = cwd.as_str().trim();
+            let _ = engine.borrow_mut().send_command(Command::ProgramSetLaunch {
+                terminal_id: Some(terminal_id.as_str().to_string()),
+                command: if cmd.is_empty() {
+                    None
+                } else {
+                    Some(cmd.to_string())
+                },
+                args,
+                cwd: if cwd_s.is_empty() {
+                    None
+                } else {
+                    Some(cwd_s.to_string())
+                },
+            });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
         let ui_filt = ui.as_weak();
         let filter_draft_debounce = filter_draft_debounce.clone();
         let filter_draft_pending = filter_draft_pending.clone();
@@ -1337,6 +1461,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tabs_tick = tabs_model.clone();
     let terminals_tick = terminals_model.clone();
     let files_tick = files_model.clone();
+    let projects_tick = projects_model.clone();
     let filters_tick = filters_model.clone();
     let terminal_tab_tick = terminal_tab_active.clone();
     let timer_tick = timer.clone();
@@ -1398,6 +1523,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tabs_tick = tabs_tick.clone();
         let terminals_tick = terminals_tick.clone();
         let files_tick = files_tick.clone();
+        let projects_tick = projects_tick.clone();
         let filters_tick = filters_tick.clone();
         let terminal_tab_tick = terminal_tab_tick.clone();
         let timer_tick = timer_tick.clone();
@@ -1464,6 +1590,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &tabs_tick,
                                 &terminals_tick,
                                 &files_tick,
+                                &projects_tick,
                                 &filters_tick,
                                 &ui,
                                 &terminal_tab_tick,
