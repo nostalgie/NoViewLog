@@ -204,6 +204,7 @@ impl Engine {
                     term.running = false;
                     term.exit_code = Some(code);
                     let file_session = term.is_file_session();
+                    let has_launch_command = term.launch.command.is_some();
                     self.ptys.remove(&id);
                     let message = format_process_exit_message(code);
                     chrome_changed = true;
@@ -214,7 +215,8 @@ impl Engine {
                         self.mark_viewport_dirty();
                         self.push_event(json!({"type":"exit","code": code, "message": message}));
                     }
-                    if !file_session {
+                    // Programs with a saved command stay stopped; plain shells respawn.
+                    if !file_session && !has_launch_command {
                         respawn_shell_ids.push(id);
                     }
                 }
@@ -521,15 +523,19 @@ impl Engine {
         self.last_stats_at = None;
     }
 
-    pub(crate) fn stop(&mut self) {
-        let id = self.active_terminal().id.clone();
+    pub(crate) fn stop(&mut self, terminal_id: Option<&str>) {
+        let id = terminal_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.active_terminal().id.clone());
         if let Some(mut pty) = self.ptys.remove(&id) {
             pty.stop();
         }
-        let terminal = self.active_terminal_mut();
-        terminal.running = false;
+        if let Some(terminal) = self.terminals.iter_mut().find(|t| t.id == id) {
+            terminal.running = false;
+        }
         self.status_message = "Stopped".to_string();
         self.push_event(json!({"type":"status","message": "Stopped"}));
+        self.last_stats_at = None;
     }
 
     pub(crate) fn terminal_add(&mut self) {
@@ -592,6 +598,7 @@ impl Engine {
             active
         };
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 
     /// Set a custom sidebar title. Empty/whitespace or unknown id → no-op (does not clear).
@@ -605,6 +612,7 @@ impl Engine {
         };
         term.custom_title = Some(name.to_string());
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 
     pub(crate) fn terminal_start(&mut self, terminal_id: Option<&str>) {
@@ -677,6 +685,7 @@ impl Engine {
         }
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+        self.sync_active_project_from_terminals();
     }
 }
 

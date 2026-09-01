@@ -36,6 +36,8 @@ pub struct TerminalState {
     pub cwd: String,
     /// Optional sidebar title override; when `Some(non-empty)`, preferred by [`Self::label`].
     pub custom_title: Option<String>,
+    /// Linked [`crate::core::types::ProgramConfig::id`] when this session belongs to an open Project.
+    pub program_id: Option<String>,
     pub launch: LaunchConfig,
     pub views: Vec<LogView>,
     pub active_view: usize,
@@ -77,6 +79,7 @@ impl TerminalState {
             id,
             cwd,
             custom_title: None,
+            program_id: None,
             launch,
             views: vec![LogView::from_runtime(TERMINAL_TAB_NAME, Vec::new())],
             active_view: 0,

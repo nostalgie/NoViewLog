@@ -26,6 +26,26 @@ pub struct StatsTerminal {
     pub running: bool,
     #[serde(default)]
     pub cwd: String,
+    /// True when this session has a saved process/file launch (Run will start it).
+    #[serde(default)]
+    pub has_launch: bool,
+    #[serde(default)]
+    pub program_id: Option<String>,
+    /// Saved launch command (empty = shell-only).
+    #[serde(default)]
+    pub launch_command: String,
+    /// Space-joined launch args for Edit Launch chrome.
+    #[serde(default)]
+    pub launch_args: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsProject {
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub program_count: usize,
 }
 
 /// Flat `{"type":"stats", ...}` snapshot emitted by [`super::Engine::emit_stats`].
@@ -100,6 +120,11 @@ pub struct StatsSnapshot {
     /// Open log-file sessions (excludes live PTY terminals).
     #[serde(default)]
     pub files: Vec<StatsTerminal>,
+    #[serde(default)]
+    pub projects: Vec<StatsProject>,
+    /// Id of the open Project, if any.
+    #[serde(default)]
+    pub active_project_id: Option<String>,
     #[serde(default)]
     pub active_terminal: usize,
     #[serde(default)]

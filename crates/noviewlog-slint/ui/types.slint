@@ -12,6 +12,17 @@ export struct TerminalInfo {
     label: string,
     cwd: string,
     running: bool,
+    has-launch: bool,
+    launch-command: string,
+    launch-args: string,
+}
+
+export struct ProjectInfo {
+    index: int,
+    id: string,
+    name: string,
+    program-count: int,
+    active: bool,
 }
 
 // Per-tab IN/OUT filter rule (engine FilterRule via stats.filters).

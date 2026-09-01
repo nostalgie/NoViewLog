@@ -614,12 +614,92 @@ export component FilterRow inherits Rectangle {
 // Root is TouchArea (like TabChip) so double-clicked can start rename without
 // destroying the gesture target mid-Released (a child `if !renaming: TouchArea`
 // was torn down inside double-clicked and the rename UI never stuck).
+// Path icon in a fixed 22×22 hit target — avoids Unicode glyph misalignment (✎/▶/×).
+export component TerminalRowIcon inherits TouchArea {
+    // "edit" | "play" | "stop" | "close"
+    in property <string> kind;
+    in property <float> icon-opacity: 1.0;
+    callback wheel(delta-y: float);
+
+    width: 22px;
+    height: 22px;
+    mouse-cursor: pointer;
+    opacity: root.icon-opacity;
+
+    property <color> icon-color: self.has-hover ? Theme.text-primary : Theme.text-muted;
+
+    scroll-event(event) => {
+        root.wheel(event.delta-y / 1px);
+        accept
+    }
+
+    // 10×10 viewbox, optically centered in the 22×22 hit target.
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 10px;
+        height: 10px;
+        background: transparent;
+
+        if root.kind == "edit": Path {
+            width: 100%;
+            height: 100%;
+            stroke: root.icon-color;
+            stroke-width: 1px;
+            fill: transparent;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 7.5 0.5 L 9.5 2.5 L 3.5 8.5 L 1.5 8.5 L 1.5 6.5 Z";
+        }
+
+        if root.kind == "play": Path {
+            width: 100%;
+            height: 100%;
+            fill: root.icon-color;
+            stroke-width: 0px;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 2 1.5 L 2 8.5 L 8.5 5 Z";
+        }
+
+        if root.kind == "stop": Path {
+            width: 100%;
+            height: 100%;
+            fill: root.icon-color;
+            stroke-width: 0px;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 2.5 2.5 H 7.5 V 7.5 H 2.5 Z";
+        }
+
+        if root.kind == "close": Path {
+            width: 100%;
+            height: 100%;
+            stroke: root.icon-color;
+            stroke-width: 1.25px;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 1.5 1.5 L 8.5 8.5 M 8.5 1.5 L 1.5 8.5";
+        }
+    }
+}
+
 export component TerminalRow inherits TouchArea {
     in property <string> title;
     in property <string> subtitle;
     in property <bool> running;
     in property <bool> active;
     in property <bool> show-close;
+    // Live terminals: show Run when stopped / Stop when running. Files: false.
+    in property <bool> show-run-stop: false;
     in property <string> term-id: "";
     in property <int> term-index: 0;
     in property <bool> show-drop-before: false;
@@ -629,6 +709,9 @@ export component TerminalRow inherits TouchArea {
     // Parent wires activated (not TouchArea.clicked) so drag can suppress select.
     callback activated();
     callback close-clicked();
+    callback run-clicked();
+    callback stop-clicked();
+    callback edit-launch-clicked();
     // Forward wheel so list scroll + docked bar stay in sync.
     callback wheel(delta-y: float);
     callback rename-requested();
@@ -762,7 +845,7 @@ export component TerminalRow inherits TouchArea {
         z: 10;
     }
 
-    // One row skeleton: [●][title-slot][×]. Title-slot Rectangle ALWAYS exists with
+    // One row skeleton: [●][title-slot][actions][×]. Title-slot ALWAYS exists with
     // stretch — conditional children live inside it (never swap the stretch item itself).
     HorizontalLayout {
         width: 100%;
@@ -775,13 +858,22 @@ export component TerminalRow inherits TouchArea {
         spacing: 8px;
         alignment: stretch;
 
-        Text {
-            text: "●";
-            color: root.running ? Theme.accent : Theme.text-muted;
-            font-size: 10px;
-            vertical-alignment: center;
+        // Fixed-size status glyph, vertically centered (do not use layout
+        // alignment:center on the row — it blew up ● and collapsed the title).
+        VerticalLayout {
             width: 12px;
             horizontal-stretch: 0;
+            vertical-stretch: 1;
+            alignment: center;
+            Text {
+                text: "●";
+                color: root.running ? Theme.accent : Theme.text-muted;
+                font-size: 10px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                width: 12px;
+                height: 12px;
+            }
         }
 
         title-slot := Rectangle {
@@ -894,29 +986,41 @@ export component TerminalRow inherits TouchArea {
             }
         }
 
-        if root.show-close: TouchArea {
-            width: 20px;
-            height: 20px;
-            mouse-cursor: pointer;
-            vertical-stretch: 0;
+        // Action icons share one row so Path geometry aligns on a common baseline.
+        if root.show-run-stop || root.show-close: VerticalLayout {
             horizontal-stretch: 0;
-            // Keep × hittable while idle; during rename reserve width only.
-            enabled: !root.renaming;
-            clicked => { root.close-clicked(); }
-            scroll-event(event) => {
-                root.wheel(event.delta-y / 1px);
-                accept
-            }
+            vertical-stretch: 1;
+            alignment: center;
 
-            Text {
-                width: 100%;
-                height: 100%;
-                text: "×";
-                color: !root.renaming && parent.has-hover ? Theme.text-primary : Theme.text-muted;
-                font-size: 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                opacity: root.renaming ? 0.0 : 1.0;
+            HorizontalLayout {
+                spacing: 0;
+                alignment: center;
+
+                if root.show-run-stop && !root.renaming: TerminalRowIcon {
+                    kind: "edit";
+                    clicked => { root.edit-launch-clicked(); }
+                    wheel(dy) => { root.wheel(dy); }
+                }
+
+                if root.show-run-stop && !root.renaming: TerminalRowIcon {
+                    kind: root.running ? "stop" : "play";
+                    clicked => {
+                        if (root.running) {
+                            root.stop-clicked();
+                        } else {
+                            root.run-clicked();
+                        }
+                    }
+                    wheel(dy) => { root.wheel(dy); }
+                }
+
+                if root.show-close: TerminalRowIcon {
+                    kind: "close";
+                    icon-opacity: root.renaming ? 0.0 : 1.0;
+                    enabled: !root.renaming;
+                    clicked => { root.close-clicked(); }
+                    wheel(dy) => { root.wheel(dy); }
+                }
             }
         }
     }

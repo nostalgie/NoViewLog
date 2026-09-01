@@ -91,7 +91,20 @@ CLI launch with a log file still configures the initial session as a file sessio
 
 ## Persistence
 
-There is **no** `projects.yaml` session store. Filter presets, scrollback, viewport font, and sidebar section expand state live in `~/.config/noviewlog/config.yaml`.
+Filter presets, scrollback, viewport font, and sidebar section expand state live in
+`~/.config/noviewlog/config.yaml`.
+
+**Projects / Programs** are stored in `~/.config/noviewlog/projects.yaml`:
+
+- A **Project** groups one or more **Programs**
+- Each Program saves launch (`command` / `args` / `cwd`) and filter tabs
+- Opening a Project replaces the TERMINALS list with stopped sessions matching those Programs
+- On normal startup (no CLI args), the last active Project is restored automatically; the first Program in the list is selected, all stopped
+- CLI launch (`command` or log file) takes priority over project restore
+- Run starts the saved command (or an interactive shell when no command is set); Stop kills that PTY
+- Programs with a saved command stay stopped after Stop or process exit (no auto shell respawn)
+
+FILES sessions are not part of a Project and are left unchanged when opening one.
 
 ## UI chrome
 
