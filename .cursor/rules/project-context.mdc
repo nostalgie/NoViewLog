@@ -16,7 +16,7 @@ repo's tech stack.
 ## Build
 
 After Slint or shared engine changes used by Slint →
-`bash scripts/run-slint.sh` or `cargo build --release -p noviewlog-slint`.
+`bash scripts/run-slint.sh` or `cargo build --profile release-dev -p noviewlog-slint`.
 Windows release staging → `bash scripts/publish-slint-windows.sh` (native
 MSVC). See `slint-release-build.mdc`.
 

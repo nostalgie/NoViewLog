@@ -33,4 +33,4 @@ alwaysApply: true
 | Shared engine | `crates/noviewlog-core/` |
 
 After Slint/engine changes: build/run Slint (`run-slint.sh` or
-`cargo build --release -p noviewlog-slint`). See `slint-release-build.mdc`.
+`cargo build --profile release-dev -p noviewlog-slint`). See `slint-release-build.mdc`.

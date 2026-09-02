@@ -13,8 +13,9 @@ ask the user to rebuild.
 
 | Path | Role |
 |------|------|
-| `bash scripts/run-slint.sh` | `cargo run --release` + run `noviewlog-slint` (Linux) |
-| `cargo build --release -p noviewlog-slint` | Release binary only |
+| `bash scripts/run-slint.sh` | `cargo run --profile release-dev` + run `noviewlog-slint` (Linux) |
+| `cargo build --profile release-dev -p noviewlog-slint` | Daily optimized binary (no fat LTO) |
+| `cargo build --release -p noviewlog-slint` | Publish profile (fat LTO) |
 | `bash scripts/publish-slint-windows.sh` | Windows MSVC → `dist/noviewlog-slint-win-x64/NoViewLog.exe` |
 
 ## Required commands (Linux)
@@ -22,11 +23,18 @@ ask the user to rebuild.
 ```bash
 bash scripts/run-slint.sh
 # or
-cargo build --release -p noviewlog-slint
+cargo build --profile release-dev -p noviewlog-slint
 ```
 
-`run-slint.sh` MUST use `--release`. A debug `cargo run` pegs ~100% CPU on
-PTY flood even when release is fine — do not treat debug as the product path.
+`run-slint.sh` MUST use `--profile release-dev` (`opt-level = 3`, no fat LTO).
+A debug `cargo run` pegs ~100% CPU on PTY flood even when optimized is fine —
+do not treat debug as the product path. Fat `--release` (LTO + CGU=1) is for
+publish only; it disables incremental and makes every small edit a full relink.
+
+Do **not** set `RUSTFLAGS=-L…/.deps/lib` in the run script or the shell: it
+changes the rustc fingerprint of every crate and forces a full rebuild when
+the script and a plain `cargo` disagree. Link search lives in
+`crates/noviewlog-slint/build.rs`; pkg-config paths live in `.cargo/config.toml`.
 
 ## Windows release folder
 
@@ -42,5 +50,5 @@ bash scripts/publish-slint-windows.sh
 2. Do **not** claim Slint work is done until the build (or publish on Windows) succeeds when those surfaces changed.
 3. Linux fontconfig helper: `scripts/setup-slint-deps.sh` (used by `run-slint.sh`) — do not port to Windows.
 4. PTY / Follow / Viewport / HOST_TICK changes: a green compile is **not**
-   acceptance. Run the release GUI and measure `cat` per
+   acceptance. Run the daily GUI (`release-dev`) and measure `cat` per
    [terminal-flood-verify.mdc](terminal-flood-verify.mdc).

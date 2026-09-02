@@ -6,3 +6,13 @@ resolver = "2"
 lto = true
 codegen-units = 1
 strip = true
+
+# Daily GUI loop (`scripts/run-slint.sh`). Same opt-level as release so PTY
+# flood stays usable; no fat LTO so incremental rustc works. Debug
+# (opt-level 0) pegs a core on Follow+WRAP `cat`. Publish stays `--release`.
+[profile.release-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
