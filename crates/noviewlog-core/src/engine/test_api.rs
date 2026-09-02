@@ -281,6 +281,28 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn file_session_ids_for_test(&self) -> Vec<String> {
+        self.terminals
+            .iter()
+            .filter(|t| t.is_file_session())
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn file_session_paths_for_test(&self) -> Vec<String> {
+        self.terminals
+            .iter()
+            .filter_map(|t| t.file_session_path().map(str::to_string))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn file_backed_for_test(&self) -> bool {
+        self.has_active_terminal() && self.active_terminal().file_backed.is_some()
+    }
+
+    #[cfg(test)]
     pub fn active_view_name_for_test(&self) -> String {
         self.active_view().name.clone()
     }

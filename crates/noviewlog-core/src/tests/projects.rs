@@ -297,3 +297,109 @@ fn startup_no_projects_keeps_boot_terminal() {
     assert_eq!(engine.terminals_for_test().len(), 1);
     assert!(!engine.active_terminal_running_for_test());
 }
+
+#[test]
+fn active_project_saves_and_restores_file_sessions() {
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-proj-file-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "nginx line").unwrap();
+    }
+    let mut engine = engine_isolated();
+    engine
+        .send_command_json(r#"{"cmd":"project_create","name":"Logs"}"#)
+        .expect("create");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+
+    let programs = &engine.projects.projects[0].programs;
+    assert!(
+        programs.iter().any(|p| p.launch.log_file.as_deref() == Some(path.to_str().unwrap())
+            || p.launch.log_file.as_ref().is_some_and(|s| s.replace('\\', "/") == path.to_string_lossy().replace('\\', "/"))),
+        "open file must snapshot log_file onto the active Project: {:?}",
+        programs.iter().map(|p| p.launch.log_file.clone()).collect::<Vec<_>>()
+    );
+
+    let project_id = engine.projects.projects[0].id.clone();
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"project_open","project_id":"{project_id}"}}"#
+        ))
+        .expect("reopen");
+
+    let files = engine.file_session_ids_for_test();
+    assert_eq!(files.len(), 1);
+    assert_eq!(engine.file_session_paths_for_test().len(), 1);
+    assert!(!engine.active_is_file_session_for_test());
+
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"terminal_switch","terminal_id":"{}"}}"#,
+            files[0]
+        ))
+        .expect("switch");
+    engine.finish_file_load_for_test();
+    assert!(engine.active_is_file_session_for_test());
+    assert!(engine.file_backed_for_test());
+    assert!(engine.buffer_record_count_for_test() >= 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn project_open_replaces_leftover_files() {
+    use std::io::Write;
+
+    let path_a = std::env::temp_dir().join(format!(
+        "noviewlog-proj-a-{}.log",
+        std::process::id()
+    ));
+    let path_b = std::env::temp_dir().join(format!(
+        "noviewlog-proj-b-{}.log",
+        std::process::id()
+    ));
+    for p in [&path_a, &path_b] {
+        let mut f = std::fs::File::create(p).unwrap();
+        writeln!(f, "x").unwrap();
+    }
+    let mut engine = engine_isolated();
+    engine
+        .send_command_json(r#"{"cmd":"project_create","name":"A"}"#)
+        .expect("create A");
+    let id_a = engine.projects.projects[0].id.clone();
+    let path_a_str = path_a.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_a_str}"}}"#))
+        .expect("load A");
+    engine.finish_file_load_for_test();
+
+    engine
+        .send_command_json(r#"{"cmd":"project_create","name":"B"}"#)
+        .expect("create B");
+    let path_b_str = path_b.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_b_str}"}}"#))
+        .expect("load B");
+    engine.finish_file_load_for_test();
+    assert_eq!(engine.file_session_ids_for_test().len(), 1);
+
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"project_open","project_id":"{id_a}"}}"#))
+        .expect("open A");
+    let restored = engine.file_session_paths_for_test();
+    assert_eq!(restored.len(), 1);
+    let restored_norm = restored[0].replace('\\', "/");
+    let expect_a = path_a.to_string_lossy().replace('\\', "/");
+    assert_eq!(restored_norm, expect_a);
+
+    let _ = std::fs::remove_file(&path_a);
+    let _ = std::fs::remove_file(&path_b);
+}

@@ -13,6 +13,7 @@ impl Engine {
             self.active_terminal = idx;
             self.configure_active_as_file_session(&path);
             self.start_log_file_load(&path);
+            self.sync_active_project_from_terminals();
             self.mark_viewport_dirty();
             self.last_stats_at = None;
             return;
@@ -22,6 +23,40 @@ impl Engine {
         // dedicated file session (appears under FILES in the sidebar).
         self.terminal_add_blank();
         self.configure_active_as_file_session(&path);
+        self.start_log_file_load(&path);
+        self.sync_active_project_from_terminals();
+    }
+
+    /// Reload a file session from disk. Missing path → status error, session kept.
+    pub(crate) fn reload_file_command(&mut self, terminal_id: Option<&str>) {
+        self.ensure_valid_state();
+        if let Some(id) = terminal_id {
+            self.terminal_switch(id);
+        }
+        if !self.has_active_terminal() || !self.active_terminal().is_file_session() {
+            self.status_message = "Reload is for file sessions".to_string();
+            self.push_event(json!({"type":"status","message": self.status_message}));
+            return;
+        }
+        let Some(path) = self.active_terminal().file_session_path().map(str::to_string) else {
+            self.status_message = "File session has no path".to_string();
+            self.push_event(json!({"type":"status","message": self.status_message}));
+            return;
+        };
+        self.start_log_file_load(&path);
+    }
+
+    pub(crate) fn maybe_lazy_load_active_file(&mut self) {
+        if !self.has_active_terminal() || !self.active_terminal().is_file_session() {
+            return;
+        }
+        let terminal = self.active_terminal();
+        if terminal.file_backed.is_some() || terminal.file_load.is_some() {
+            return;
+        }
+        let Some(path) = terminal.launch.log_file.clone() else {
+            return;
+        };
         self.start_log_file_load(&path);
     }
 

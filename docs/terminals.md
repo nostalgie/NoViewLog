@@ -62,6 +62,7 @@ CLI launch with a log file still configures the initial session as a file sessio
 | `terminal_rename` | Set a **custom** sidebar title for a session id |
 | `terminal_start` | Start saved launch / log file / interactive shell on a session |
 | `load_file` | Open path in a dedicated file session (or switch + reload) |
+| `reload_file` | Re-read the file session’s saved path from disk (optional `terminal_id`) |
 | `set_sidebar_expanded` | Persist TERMINALS/FILES section expand state |
 | `tab_move` | Reorder filter tabs on the active session; primary tab stays at index 0 |
 
@@ -97,17 +98,19 @@ Filter presets, scrollback, viewport font, and sidebar section expand state live
 **Projects / Programs** are stored in `~/.config/noviewlog/projects.yaml`:
 
 - A **Project** groups one or more **Programs**
-- Each Program saves launch (`command` / `args` / `cwd`) and filter tabs
+- Each Program saves launch (`command` / `args` / `cwd` **or** `log_file`) and filter tabs
 - Manage Projects via **File → Projects…** (open, rename, delete, or create)
 - **New** creates an empty Project (one stopped Terminal; no copied launch or tabs)
-- Opening a Project replaces the TERMINALS list with stopped sessions matching those Programs
+- Opening a Project replaces TERMINALS with stopped live Programs **and** FILES with that Project’s log-file Programs (leftover FILES from the previous Project are dropped)
 - On normal startup (no CLI args), the last active Project is restored automatically; the first Program in the list is selected, all stopped
 - CLI launch (`command` or log file) takes priority over project restore
 - Run starts the saved command (or an interactive shell when no command is set); Stop kills that PTY
 - Programs with a saved command stay stopped after Stop or process exit (no auto shell respawn)
+- Restored FILES load from disk when selected (or immediately when opened via File / FILES `+`)
+- **Refresh** on a FILES row (or File → Reload log) re-reads that path from disk; it is not Follow/tail
 
-FILES sessions are not part of a Project and are left unchanged when opening one.
+While a Project is active, opening, renaming, or closing a file session updates that Project’s store. With no Project active, FILES stay session-only.
 
 ## UI chrome
 
-Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`). When a Project is open, its name appears above TERMINALS. TERMINALS supports DnD reorder. Follow is hidden for file sessions. Projects are managed from **File → Projects…**, not the sidebar. See `docs/architecture.md`.
+Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`). FILES rows have Refresh. When a Project is open, its name appears above TERMINALS. TERMINALS supports DnD reorder. Follow is hidden for file sessions. Projects are managed from **File → Projects…**, not the sidebar. See `docs/architecture.md`.
