@@ -166,6 +166,16 @@ fn apply_stats_to_terminals(
         ui.set_active_project_id(SharedString::from(active_project_id));
         changed = true;
     }
+    let active_project_name = stats
+        .active_project_id
+        .as_ref()
+        .and_then(|id| stats.projects.iter().find(|p| &p.id == id))
+        .map(|p| p.name.as_str())
+        .unwrap_or("");
+    if ui.get_active_project_name().as_str() != active_project_name {
+        ui.set_active_project_name(SharedString::from(active_project_name));
+        changed = true;
+    }
 
     let next_terms: Vec<TerminalInfo> = stats
         .terminals

@@ -98,6 +98,8 @@ Filter presets, scrollback, viewport font, and sidebar section expand state live
 
 - A **Project** groups one or more **Programs**
 - Each Program saves launch (`command` / `args` / `cwd`) and filter tabs
+- Manage Projects via **File → Projects…** (open, rename, delete, or create)
+- **New** creates an empty Project (one stopped Terminal; no copied launch or tabs)
 - Opening a Project replaces the TERMINALS list with stopped sessions matching those Programs
 - On normal startup (no CLI args), the last active Project is restored automatically; the first Program in the list is selected, all stopped
 - CLI launch (`command` or log file) takes priority over project restore
@@ -108,4 +110,4 @@ FILES sessions are not part of a Project and are left unchanged when opening one
 
 ## UI chrome
 
-Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`). TERMINALS supports DnD reorder. Follow is hidden for file sessions. See `docs/architecture.md`.
+Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`). When a Project is open, its name appears above TERMINALS. TERMINALS supports DnD reorder. Follow is hidden for file sessions. Projects are managed from **File → Projects…**, not the sidebar. See `docs/architecture.md`.

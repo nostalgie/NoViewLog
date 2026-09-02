@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let projects_model = Rc::new(VecModel::<ProjectInfo>::from(vec![]));
     ui.set_projects_model(ModelRc::from(projects_model.clone()));
     ui.set_active_project_id(SharedString::from(""));
-    ui.set_projects_section_expanded(true);
+    ui.set_active_project_name(SharedString::from(""));
     ui.set_active_terminal_index(0);
     ui.set_is_file_session(false);
     ui.set_terminals_section_expanded(true);

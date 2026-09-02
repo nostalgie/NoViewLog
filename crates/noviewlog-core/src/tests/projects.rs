@@ -100,7 +100,7 @@ fn project_open_restores_stopped_terminals_and_tabs() {
 }
 
 #[test]
-fn project_create_snapshots_and_reopen_restores() {
+fn project_create_starts_empty_and_does_not_copy_previous() {
     let mut engine = engine_isolated();
     engine
         .send_command_json(
@@ -113,52 +113,27 @@ fn project_create_snapshots_and_reopen_restores() {
             r#"{{"cmd":"terminal_rename","terminal_id":"{tid}","name":"One"}}"#
         ))
         .expect("rename");
-    engine.send_command_json(r#"{"cmd":"tab_add"}"#).expect("tab");
-    engine
-        .send_command_json(
-            r#"{"cmd":"filter_add","type":"include","pattern":"warn","regex":false}"#,
-        )
-        .expect("filter");
-
     engine.terminal_add_blank_for_test();
-    let tid2 = engine.active_terminal_id_for_test();
-    engine
-        .send_command_json(&format!(
-            r#"{{"cmd":"program_set_launch","terminal_id":"{tid2}","command":"echo","args":["b"]}}"#
-        ))
-        .expect("launch2");
-    engine
-        .send_command_json(&format!(
-            r#"{{"cmd":"terminal_rename","terminal_id":"{tid2}","name":"Two"}}"#
-        ))
-        .expect("rename2");
 
     engine
         .send_command_json(r#"{"cmd":"project_create","name":"MyProj"}"#)
         .expect("create");
     assert_eq!(engine.projects.projects.len(), 1);
-    assert_eq!(engine.projects.projects[0].programs.len(), 2);
-    let pid = engine.projects.projects[0].id.clone();
-
-    engine.terminal_add_blank_for_test();
-    engine
-        .send_command_json(&format!(
-            r#"{{"cmd":"project_open","project_id":"{pid}"}}"#
-        ))
-        .expect("reopen");
+    assert!(
+        engine.projects.projects[0].programs.is_empty(),
+        "new Project must not snapshot live TERMINALS"
+    );
+    assert_eq!(engine.active_project, Some(0));
 
     let live = engine.terminals_for_test();
-    assert_eq!(live.len(), 2);
-    assert!(!live[0].2 && !live[1].2);
-    assert_eq!(live[0].1, "One");
-    assert_eq!(live[1].1, "Two");
-    engine
-        .send_command_json(&format!(
-            r#"{{"cmd":"terminal_switch","terminal_id":"{}"}}"#,
-            live[0].0
-        ))
-        .expect("switch");
-    assert!(engine.tab_configs_for_test().len() >= 2);
+    assert_eq!(live.len(), 1, "empty Project opens as one stopped Terminal");
+    assert!(!live[0].2);
+    assert_ne!(live[0].1, "One");
+    assert!(
+        engine
+            .status_message_for_test()
+            .contains("Created project: MyProj")
+    );
 }
 
 #[test]
