@@ -1,0 +1,273 @@
+// File → Projects overlay: list / create / rename in one PopupWindow
+// (nested popups would dismiss the list on click-outside).
+// Square Theme borders only — never Theme.accent / fluent LineEdit focus bars.
+
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { ProjectInfo } from "types.slint";
+import { FormTextField } from "form-dialogs.slint";
+
+export component ProjectsDialog inherits Rectangle {
+    in property <[ProjectInfo]> projects;
+    callback closed();
+    callback project-open(id: string);
+    callback project-create(name: string);
+    callback project-rename(id: string, name: string);
+    callback project-delete(id: string);
+
+    in-out property <string> dialog-mode: "list";
+    in-out property <string> name-draft: "";
+    in-out property <string> rename-id: "";
+
+    background: Theme.bg-window;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 0px;
+    drop-shadow-color: Theme.shadow-panel;
+    drop-shadow-offset-y: 8px;
+    drop-shadow-blur: 20px;
+
+    function reset-to-list() {
+        root.dialog-mode = "list";
+        root.name-draft = "";
+        root.rename-id = "";
+    }
+
+    function begin-create() {
+        root.name-draft = "";
+        root.rename-id = "";
+        root.dialog-mode = "create";
+    }
+
+    function begin-rename(id: string, name: string) {
+        root.rename-id = id;
+        root.name-draft = name;
+        root.dialog-mode = "rename";
+    }
+
+    function cancel-form() {
+        root.reset-to-list();
+    }
+
+    function confirm-form() {
+        if (root.name-draft == "") {
+            return;
+        }
+        if (root.dialog-mode == "create") {
+            root.project-create(root.name-draft);
+        } else if (root.dialog-mode == "rename") {
+            root.project-rename(root.rename-id, root.name-draft);
+        }
+        root.reset-to-list();
+    }
+
+    property <string> panel-title: root.dialog-mode == "create" ? "Create project" : (root.dialog-mode == "rename" ? "Rename project" : "Projects");
+
+    dialog-keys := FocusScope {
+        width: 100%;
+        height: 100%;
+
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (root.dialog-mode == "list") {
+                    root.closed();
+                } else {
+                    root.cancel-form();
+                }
+                accept
+            } else {
+                reject
+            }
+        }
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 16px;
+            min-width: 420px;
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: stretch;
+
+                Text {
+                    text: root.panel-title;
+                    color: Theme.text-primary;
+                    font-size: 14px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                if root.dialog-mode == "list": Button {
+                    text: "New";
+                    clicked => { root.begin-create(); }
+                }
+            }
+
+            if root.dialog-mode == "list": VerticalLayout {
+                spacing: 8px;
+                width: 100%;
+
+                Flickable {
+                    height: 220px;
+                    viewport-width: parent.width;
+                    width: 100%;
+
+                    VerticalLayout {
+                        width: 100%;
+                        spacing: 3px;
+
+                        if root.projects.length == 0: HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            padding-top: 8px;
+                            Text {
+                                text: "No projects — New to create one";
+                                color: Theme.text-muted;
+                                font-size: 11px;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        for proj in root.projects: TouchArea {
+                            height: 32px;
+                            mouse-cursor: pointer;
+                            clicked => {
+                                root.project-open(proj.id);
+                            }
+
+                            // Selection = full-width fill only — never Theme.accent border.
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                border-radius: 0px;
+                                border-width: 0px;
+                                background: proj.active ? Theme.accent-soft : (parent.has-hover ? Theme.bg-input : transparent);
+                            }
+
+                            HorizontalLayout {
+                                width: 100%;
+                                height: 100%;
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                alignment: stretch;
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    text: proj.name;
+                                    color: proj.active ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: 12px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    vertical-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: proj.program-count;
+                                        color: Theme.text-muted;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    width: 20px;
+                                    horizontal-stretch: 0;
+                                    vertical-stretch: 1;
+                                    alignment: center;
+                                    TouchArea {
+                                        width: 20px;
+                                        height: 20px;
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.begin-rename(proj.id, proj.name);
+                                        }
+                                        Text {
+                                            width: 100%;
+                                            height: 100%;
+                                            text: "✎";
+                                            color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                                            font-size: 11px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    width: 20px;
+                                    horizontal-stretch: 0;
+                                    vertical-stretch: 1;
+                                    alignment: center;
+                                    TouchArea {
+                                        width: 20px;
+                                        height: 20px;
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.project-delete(proj.id);
+                                        }
+                                        Text {
+                                            width: 100%;
+                                            height: 100%;
+                                            text: "×";
+                                            color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                                            font-size: 14px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    padding-top: 4px;
+
+                    Button {
+                        text: "Close";
+                        primary: true;
+                        clicked => { root.closed(); }
+                    }
+                }
+            }
+
+            if root.dialog-mode != "list": VerticalLayout {
+                spacing: 16px;
+                width: 100%;
+
+                FormTextField {
+                    label: "Name";
+                    text <=> root.name-draft;
+                    focus-on-init: true;
+                    accepted => { root.confirm-form(); }
+                    cancelled => { root.cancel-form(); }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    padding-top: 4px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.cancel-form(); }
+                    }
+                    Button {
+                        text: root.dialog-mode == "create" ? "Create" : "OK";
+                        primary: true;
+                        clicked => { root.confirm-form(); }
+                    }
+                }
+            }
+        }
+    }
+}

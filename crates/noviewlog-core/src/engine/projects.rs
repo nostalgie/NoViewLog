@@ -194,61 +194,18 @@ impl Engine {
             return;
         }
 
-        let mut programs: Vec<ProgramConfig> = Vec::new();
-        for term in self.terminals.iter().filter(|t| !t.is_file_session()) {
-            let tabs: Vec<_> = term.views.iter().map(|v| v.to_tab_config()).collect();
-            let workspace = program_workspace_snapshot(&tabs, term.active_view);
-            let id = next_program_id(&programs);
-            let prog_name = term
-                .custom_title
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    if term.launch.has_process_launch() {
-                        program_display_name(&term.launch)
-                    } else {
-                        term.label()
-                    }
-                });
-            programs.push(ProgramConfig {
-                id,
-                name: prog_name,
-                launch: term.launch.clone(),
-                workspace,
-            });
-        }
-
         let project_id = next_project_id(&self.projects.projects);
-        let project = ProjectConfig {
+        self.projects.projects.push(ProjectConfig {
             id: project_id.clone(),
             name: name.to_string(),
             default_cwd: None,
             path_hint: None,
-            programs,
+            programs: Vec::new(),
             active_program: 0,
-        };
-        self.projects.projects.push(project);
-        let proj_idx = self.projects.projects.len() - 1;
-        self.active_project = Some(proj_idx);
-
-        // Link program ids on live terminals.
-        let program_ids: Vec<String> = self.projects.projects[proj_idx]
-            .programs
-            .iter()
-            .map(|p| p.id.clone())
-            .collect();
-        let mut i = 0usize;
-        for term in self.terminals.iter_mut().filter(|t| !t.is_file_session()) {
-            if let Some(id) = program_ids.get(i) {
-                term.program_id = Some(id.clone());
-            }
-            i += 1;
-        }
-
-        self.persist_projects_store();
-        self.last_stats_at = None;
+        });
+        // Open immediately so live TERMINALS match the empty store. Leaving the new
+        // Project active without opening would let sync copy the previous terminals.
+        self.project_open(&project_id);
         self.status_message = format!("Created project: {name}");
         self.push_event(json!({"type":"status","message": self.status_message}));
     }
