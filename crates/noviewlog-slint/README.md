@@ -31,6 +31,14 @@ See [`docs/architecture.md`](../../docs/architecture.md).
 
 ## Build
 
+Daily (incremental, `opt-level = 3`, no fat LTO):
+
+```bash
+cargo build --profile release-dev -p noviewlog-slint
+```
+
+Publish (fat LTO):
+
 ```bash
 cargo build --release -p noviewlog-slint
 ```

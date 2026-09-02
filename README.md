@@ -62,7 +62,8 @@ bash scripts/run-slint.sh -- npm run dev
 bash scripts/run-slint.sh -- --preset node-dev -- node server.js
 ```
 
-This builds and runs `noviewlog-slint`. First run may fetch local fontconfig
+This builds and runs `noviewlog-slint` with the daily `release-dev` profile
+(`opt-level = 3`, incremental, no fat LTO). First run may fetch local fontconfig
 deps via `scripts/setup-slint-deps.sh` into `.deps/`.
 
 Arguments after `--` are executed in a PTY. Each terminal has its own Terminal

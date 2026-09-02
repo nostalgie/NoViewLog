@@ -70,10 +70,13 @@ Slint packaging scripts, **build or run yourself** — do not ask the user to
 rebuild:
 
 ```bash
-bash scripts/run-slint.sh   # cargo run --release (not debug)
+bash scripts/run-slint.sh   # cargo run --profile release-dev (not debug)
 # or
-cargo build --release -p noviewlog-slint
+cargo build --profile release-dev -p noviewlog-slint
 ```
+
+Publish / fat LTO: `cargo build --release -p noviewlog-slint` or
+`bash scripts/publish-slint-windows.sh`.
 
 Windows release staging (native MSVC host only):
 
@@ -88,8 +91,8 @@ cargo test -p noviewlog-core --lib
 ```
 
 PTY ingest, Follow, WRAP, Viewport paint, or HOST_TICK: **also** run the
-release GUI and measure `cat` (CPU, no Follow jumps). Confirm
-`/proc/<pid>/exe` is `target/release/...` — debug pegs ~100% on the same
+daily GUI (`release-dev`) and measure `cat` (CPU, no Follow jumps). Confirm
+`/proc/<pid>/exe` is `target/release-dev/...` — debug pegs ~100% on the same
 flood. Tests + compile are not enough. See
 [`.cursor/rules/terminal-flood-verify.mdc`](.cursor/rules/terminal-flood-verify.mdc).
 
