@@ -1437,6 +1437,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
+        ui.on_reload_file(move |id| {
+            let terminal_id = if id.is_empty() {
+                None
+            } else {
+                Some(id.as_str().to_string())
+            };
+            let _ = engine.borrow_mut().send_command(Command::ReloadFile { terminal_id });
+            force_render.set(true);
+            bump_fast_timer(&timer, &timer_fast);
+        });
+    }
+
+    {
+        let engine = engine.clone();
+        let force_render = force_render.clone();
+        let timer = timer.clone();
+        let timer_fast = timer_fast.clone();
         let ui_set = ui.as_weak();
         ui.on_settings_apply(move |value| {
             let raw = if value < 0 { 0usize } else { value as usize };

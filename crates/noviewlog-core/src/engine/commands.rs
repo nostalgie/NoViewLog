@@ -72,6 +72,10 @@ pub enum Command {
     LoadFile {
         path: String,
     },
+    ReloadFile {
+        #[serde(default)]
+        terminal_id: Option<String>,
+    },
     Restart,
     SetFormat {
         format_id: String,
@@ -320,6 +324,7 @@ impl Engine {
                 self.mark_viewport_dirty();
             }
             Command::LoadFile { path } => self.open_log_file_command(&path),
+            Command::ReloadFile { terminal_id } => self.reload_file_command(terminal_id.as_deref()),
             Command::Restart => self.restart(),
             Command::SetFormat { format_id } => self.set_format(&format_id),
             Command::SetFollow { follow } => {

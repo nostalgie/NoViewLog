@@ -206,6 +206,7 @@ export component AppWindow inherits Window {
 
     // File → Open log file… / Settings… (engine load_file / set_settings).
     callback open-log-file();
+    callback reload-file(id: string);
     callback settings-apply(max-scrollback-lines: int);
     // About → Slint attribution link (https://slint.dev).
     callback open-url(url: string);
@@ -752,6 +753,13 @@ export component AppWindow inherits Window {
                                 activated => {
                                     root.close-chrome-menus();
                                     root.open-log-file();
+                                }
+                            }
+                            if root.is-file-session: ChromeMenuItem {
+                                title: "Reload log";
+                                activated => {
+                                    root.close-chrome-menus();
+                                    root.reload-file("");
                                 }
                             }
                             ChromeMenuItem {
@@ -1511,6 +1519,7 @@ export component AppWindow inherits Window {
                                         running: false;
                                         active: file.index == root.active-terminal-index;
                                         show-close: true;
+                                        show-refresh: true;
                                         term-id: file.id;
                                         term-index: file.index;
                                         show-drop-before: false;
@@ -1526,6 +1535,10 @@ export component AppWindow inherits Window {
                                         close-clicked => {
                                             root.dismiss-any-rename-if-any();
                                             root.terminal-close(file.id);
+                                        }
+                                        refresh-clicked => {
+                                            root.dismiss-any-rename-if-any();
+                                            root.reload-file(file.id);
                                         }
                                         wheel(dy) => { root.scroll-files-by(dy); }
                                         rename-requested => {

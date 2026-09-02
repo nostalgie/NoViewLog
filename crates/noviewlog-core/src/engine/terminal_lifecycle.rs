@@ -565,13 +565,13 @@ impl Engine {
         let Some(idx) = self.terminals.iter().position(|t| t.id == terminal_id) else {
             return;
         };
-        if idx == self.active_terminal {
-            return;
+        if idx != self.active_terminal {
+            self.active_terminal = idx;
+            self.mark_all_views_dirty();
+            self.mark_viewport_dirty();
+            self.last_stats_at = None;
         }
-        self.active_terminal = idx;
-        self.mark_all_views_dirty();
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
+        self.maybe_lazy_load_active_file();
     }
 
     pub(crate) fn terminal_move(&mut self, terminal_id: &str, to_index: usize) {
@@ -667,6 +667,7 @@ impl Engine {
                 }
                 self.terminals.remove(idx);
                 self.ensure_valid_state();
+                self.sync_active_project_from_terminals();
                 self.mark_viewport_dirty();
                 self.last_stats_at = None;
             }

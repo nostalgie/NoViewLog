@@ -254,6 +254,7 @@ impl Engine {
                 | Command::ProjectDelete { .. }
                 | Command::ProgramSetLaunch { .. }
                 | Command::LoadFile { .. }
+                | Command::ReloadFile { .. }
                 | Command::SetSettings { .. }
                 | Command::SetViewportFontSize { .. }
                 | Command::SetViewportFocus { .. }

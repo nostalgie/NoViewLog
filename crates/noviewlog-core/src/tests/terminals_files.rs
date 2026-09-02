@@ -732,3 +732,72 @@ fn file_scrollbar_reaches_eof() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn reload_file_picks_up_appended_lines() {
+    use crate::engine::Engine;
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-reload-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "first").unwrap();
+    }
+    let mut engine = Engine::new();
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    assert!(engine.buffer_record_count_for_test() >= 1);
+
+    {
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "second").unwrap();
+    }
+    engine
+        .send_command_json(r#"{"cmd":"reload_file"}"#)
+        .expect("reload_file");
+    engine.finish_file_load_for_test();
+    assert!(
+        engine.buffer_record_count_for_test() >= 2,
+        "reload must re-read appended lines"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn reload_missing_file_keeps_session() {
+    use crate::engine::Engine;
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-reload-missing-{}.log",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "only").unwrap();
+    }
+    let mut engine = Engine::new();
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    let _ = std::fs::remove_file(&path);
+
+    engine
+        .send_command_json(r#"{"cmd":"reload_file"}"#)
+        .expect("reload_file");
+    assert!(engine.active_is_file_session_for_test());
+    assert!(
+        engine.status_message_for_test().contains("Failed to open"),
+        "missing path must report status: {}",
+        engine.status_message_for_test()
+    );
+}
+
