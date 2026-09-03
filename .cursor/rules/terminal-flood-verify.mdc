@@ -34,3 +34,18 @@ or live Terminal rendering:
    `cargo test` passing is not acceptance. Report PID, `%CPU`, and
    `/proc/<pid>/exe`.
 8. If there is no `DISPLAY`, say so and do **not** claim the hitch is fixed.
+
+## Windows (same acceptance, different commands)
+
+1. Kill leftover `noviewlog-slint` processes (`Get-Process noviewlog-slint -ErrorAction SilentlyContinue | Stop-Process`).
+2. Build/run via `.\scripts\run-slint-windows.ps1` or
+   `cargo build --profile release-dev -p noviewlog-slint` (MSVC env required).
+3. Confirm the running binary path contains `target\release-dev\`, not
+   `target\debug\`:
+   `(Get-Process noviewlog-slint).Path`
+4. Reproduce with a visible window, Follow **on**, WRAP **on** and **off**:
+   `type big.log` (or `Get-Content big.log`) in the in-app terminal.
+5. Sample CPU for several seconds: `Get-Process noviewlog-slint |
+   Select-Object Id, CPU, Path` twice with `Start-Sleep` between samples.
+6. **Fail** on the same criteria as Linux (~100% of a core, tail teleport,
+   counter stuck at max scrollback). Report PID, CPU trend, and `.Path`.

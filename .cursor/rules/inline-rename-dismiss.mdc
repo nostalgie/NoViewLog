@@ -1,0 +1,35 @@
+---
+description: Inline rename click-away — dismiss on any press outside the field; never on mouse leave
+alwaysApply: true
+---
+
+# Inline rename dismiss (mandatory)
+
+Living spec: [`openspec/specs/ui/inline-rename/spec.md`](../../openspec/specs/ui/inline-rename/spec.md).
+Rust contract + tests: [`crates/noviewlog-slint/src/rename_chrome.rs`](../../crates/noviewlog-slint/src/rename_chrome.rs).
+
+## MUST dismiss
+
+Any **pointer-down / click** outside the active rename `TextInput` ends rename
+(commit if the draft is non-empty). Includes leftover sidebar stretch under
+FILES/TERMINALS (`sidebar-dead-space` in `app.slint`). Empty FILES is **0px**
+tall — the stretch **is** the empty area. Do **not** use a bare `Rectangle`
+there.
+
+Same on Linux and Windows. Do not add per-widget dismiss lists as the design;
+keep the dead-space layer + real focus loss.
+
+## MUST NOT dismiss
+
+Mouse leave / `has-hover` false / pointer-move without a press.
+
+Do **not** `self.focus()` on every blur (traps the editor).
+
+## Tests
+
+After changing rename or sidebar layout:
+
+```
+cargo test -p noviewlog-slint --lib
+cargo test -p noviewlog-slint --test inline_rename_wiring
+```

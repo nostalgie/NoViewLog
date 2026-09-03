@@ -426,15 +426,11 @@ fn selection_text_with_no_selection_returns_none() {
 
 #[test]
 fn set_launch_starts_command_immediately() {
-    use crate::core::types::LaunchConfig;
     use crate::engine::Engine;
+    use crate::tests::long_running_launch_config;
 
     let mut engine = Engine::new();
-    engine.set_launch(LaunchConfig {
-        command: Some("sleep".into()),
-        args: vec!["30".into()],
-        ..LaunchConfig::default()
-    });
+    engine.set_launch(long_running_launch_config());
     assert!(engine.process_started_for_test());
     assert!(engine.active_terminal_running_for_test());
     assert!(
@@ -450,15 +446,11 @@ fn set_launch_starts_command_immediately() {
 
 #[test]
 fn stale_pty_exit_does_not_replace_cli_process() {
-    use crate::core::types::LaunchConfig;
     use crate::engine::Engine;
+    use crate::tests::long_running_launch_config;
 
     let mut engine = Engine::new();
-    engine.set_launch(LaunchConfig {
-        command: Some("sleep".into()),
-        args: vec!["30".into()],
-        ..LaunchConfig::default()
-    });
+    engine.set_launch(long_running_launch_config());
     let id = engine.active_terminal_id_for_test();
     let gen = engine.pty_generation_for_test();
     assert!(gen >= 1);

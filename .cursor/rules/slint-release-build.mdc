@@ -14,6 +14,7 @@ ask the user to rebuild.
 | Path | Role |
 |------|------|
 | `bash scripts/run-slint.sh` | `cargo run --profile release-dev` + run `noviewlog-slint` (Linux) |
+| `scripts/run-slint-windows.ps1` | Same daily profile on Windows (imports MSVC env) |
 | `cargo build --profile release-dev -p noviewlog-slint` | Daily optimized binary (no fat LTO) |
 | `cargo build --release -p noviewlog-slint` | Publish profile (fat LTO) |
 | `bash scripts/publish-slint-windows.sh` | Windows MSVC → `dist/noviewlog-slint-win-x64/NoViewLog.exe` |
@@ -25,6 +26,16 @@ bash scripts/run-slint.sh
 # or
 cargo build --profile release-dev -p noviewlog-slint
 ```
+
+## Required commands (Windows)
+
+```powershell
+.\scripts\run-slint-windows.ps1
+# or (after MSVC env is active)
+cargo build --profile release-dev -p noviewlog-slint
+```
+
+Do **not** use `run-slint.sh` or `.deps` fontconfig helpers on Windows.
 
 `run-slint.sh` MUST use `--profile release-dev` (`opt-level = 3`, no fat LTO).
 A debug `cargo run` pegs ~100% CPU on PTY flood even when optimized is fine —

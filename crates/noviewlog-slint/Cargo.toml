@@ -6,6 +6,10 @@ description = "NoViewLog Slint desktop UI (viewport + PTY shell)"
 license = "MIT"
 repository = "https://github.com/nostalgie/NoViewLog"
 
+[lib]
+name = "noviewlog_slint"
+path = "src/lib.rs"
+
 [[bin]]
 name = "noviewlog-slint"
 path = "src/main.rs"

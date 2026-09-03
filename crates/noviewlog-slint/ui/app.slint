@@ -5,7 +5,7 @@
 // (gap only), double-click maximize, thin winit resize-border.
 // Native MenuBar is not used — Slint forces it above Window body children.
 
-import { Palette, SpinBox, Button } from "std-widgets.slint";
+import { Palette, SpinBox } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { TabInfo, TerminalInfo, FilterInfo, ProjectInfo } from "types.slint";
 import {
@@ -29,6 +29,11 @@ import {
 import { FormTextField, FormDialogPanel } from "form-dialogs.slint";
 import { ProjectsDialog } from "projects-dialog.slint";
 
+// Bundled proportional UI face (OFL) — matches Linux Noto look on Windows.
+// NOT Mono: never use NotoSansMono / Cascadia Mono for chrome text.
+import "../../../assets/NotoSans-Regular.ttf";
+import "../../../assets/NotoSans-Bold.ttf";
+
 export { TabInfo, TerminalInfo, FilterInfo, ProjectInfo }
 
 export component AppWindow inherits Window {
@@ -37,6 +42,9 @@ export component AppWindow inherits Window {
     preferred-height: 800px;
     min-width: 800px;
     min-height: 500px;
+    // Proportional chrome (menus, sidebar, dialogs, AppButton). Viewport bitmap
+    // fonts are separate (fontdue / load_mono_font).
+    default-font-family: "Noto Sans";
     // Client-side decorations (frameless window + custom caption strip).
     no-frame: true;
     // Edge/corner drag-resize. Keep thin so the top grip barely overlaps the 32px
@@ -497,6 +505,7 @@ export component AppWindow inherits Window {
 
     function close-chrome-menus() {
         // In-panel ChromeSubmenu flyouts close with their L1 PopupWindow.
+        root.dismiss-any-rename-if-any();
         root.file-active-submenu = -1;
         root.view-active-submenu = -1;
         root.tab-active-submenu = -1;
@@ -1073,6 +1082,7 @@ export component AppWindow inherits Window {
                     label: "Follow";
                     active: root.auto-follow;
                     clicked => {
+                        root.dismiss-any-rename-if-any();
                         root.set-follow(!root.auto-follow);
                         root.close-chrome-menus();
                     }
@@ -1082,6 +1092,7 @@ export component AppWindow inherits Window {
                     label: "WRAP";
                     active: root.wrap-lines;
                     clicked => {
+                        root.dismiss-any-rename-if-any();
                         root.set-wrap-lines(!root.wrap-lines);
                         root.close-chrome-menus();
                     }
@@ -1209,6 +1220,13 @@ export component AppWindow inherits Window {
                 // press/interaction in the sidebar (would blur and fight rename retention).
                 focus-on-click: !root.is-renaming();
 
+                changed has-focus => {
+                    // Viewport / tab strip took focus — commit inline rename.
+                    if (!self.has-focus) {
+                        root.dismiss-any-rename-if-any();
+                    }
+                }
+
                 key-pressed(_event) => { reject }
 
                 Rectangle {
@@ -1251,7 +1269,7 @@ export component AppWindow inherits Window {
                                 width: 20px;
                                 height: 24px;
                                 mouse-cursor: pointer;
-                                clicked => { root.toggle-terminals-section(); }
+                                clicked => { root.dismiss-any-rename-if-any(); root.toggle-terminals-section(); }
                                 Text {
                                     width: 100%;
                                     height: 100%;
@@ -1267,7 +1285,7 @@ export component AppWindow inherits Window {
                                 height: 24px;
                                 horizontal-stretch: 1;
                                 mouse-cursor: pointer;
-                                clicked => { root.toggle-terminals-section(); }
+                                clicked => { root.dismiss-any-rename-if-any(); root.toggle-terminals-section(); }
                                 Text {
                                     width: 100%;
                                     height: 100%;
@@ -1351,9 +1369,7 @@ export component AppWindow inherits Window {
                                         renaming: root.renaming-terminal-id != "" && root.renaming-terminal-id == term.id;
                                         rename-text: root.rename-draft;
                                         activated => {
-                                            if (root.renaming-terminal-id != "" && root.renaming-terminal-id != term.id) {
-                                                root.dismiss-terminal-rename-if-any();
-                                            }
+                                            root.dismiss-any-rename-if-any();
                                             root.terminal-switch(term.id);
                                         }
                                         close-clicked => {
@@ -1429,7 +1445,7 @@ export component AppWindow inherits Window {
                                 width: 20px;
                                 height: 24px;
                                 mouse-cursor: pointer;
-                                clicked => { root.toggle-files-section(); }
+                                clicked => { root.dismiss-any-rename-if-any(); root.toggle-files-section(); }
                                 Text {
                                     width: 100%;
                                     height: 100%;
@@ -1445,7 +1461,7 @@ export component AppWindow inherits Window {
                                 height: 24px;
                                 horizontal-stretch: 1;
                                 mouse-cursor: pointer;
-                                clicked => { root.toggle-files-section(); }
+                                clicked => { root.dismiss-any-rename-if-any(); root.toggle-files-section(); }
                                 Text {
                                     width: 100%;
                                     height: 100%;
@@ -1527,9 +1543,7 @@ export component AppWindow inherits Window {
                                         renaming: root.renaming-terminal-id != "" && root.renaming-terminal-id == file.id;
                                         rename-text: root.rename-draft;
                                         activated => {
-                                            if (root.renaming-terminal-id != "" && root.renaming-terminal-id != file.id) {
-                                                root.dismiss-terminal-rename-if-any();
-                                            }
+                                            root.dismiss-any-rename-if-any();
                                             root.terminal-switch(file.id);
                                         }
                                         close-clicked => {
@@ -1609,9 +1623,9 @@ export component AppWindow inherits Window {
                                     enabled: filt.enabled;
                                     use-regex: filt.use-regex;
                                     can-edit: !root.is-renaming();
-                                    toggled(on) => { root.filter-toggle(filt.id, on); }
-                                    remove-clicked => { root.filter-remove(filt.id); }
-                                    pattern-committed(text) => { root.filter-update(filt.id, text); }
+                                    toggled(on) => { root.dismiss-any-rename-if-any(); root.filter-toggle(filt.id, on); }
+                                    remove-clicked => { root.dismiss-any-rename-if-any(); root.filter-remove(filt.id); }
+                                    pattern-committed(text) => { root.dismiss-any-rename-if-any(); root.filter-update(filt.id, text); }
                                     pattern-editing-changed(text, active) => {
                                         if (active) {
                                             root.filter-draft-changed(text, filt.use-regex);
@@ -1781,11 +1795,20 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Absorb leftover height so TERMINALS/FILES lists stay fixed-size
-                        // when FILTERS appears/disappears or sections collapse.
-                        Rectangle {
+                        // Leftover sidebar height (empty FILES, gap under lists). Must
+                        // dismiss inline rename — a bare Rectangle ate clicks and left
+                        // the editor stuck. See openspec/specs/ui/inline-rename.
+                        sidebar-dead-space := TouchArea {
                             vertical-stretch: 1;
-                            background: transparent;
+                            mouse-cursor: default;
+                            pointer-event(event) => {
+                                if (event.kind == PointerEventKind.down) {
+                                    root.dismiss-any-rename-if-any();
+                                }
+                            }
+                            clicked => {
+                                root.dismiss-any-rename-if-any();
+                            }
                         }
                     }
                 }
@@ -1810,6 +1833,12 @@ export component AppWindow inherits Window {
                 // Keep focus on the rename TextInput; strip presses must not blur it.
                 // Click-away (gutter / + / restore) commits via dismiss-any-rename-if-any.
                 focus-on-click: !root.is-renaming();
+
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        root.dismiss-any-rename-if-any();
+                    }
+                }
                 vertical-stretch: 0;
 
                 key-pressed(_event) => { reject }
@@ -1874,11 +1903,7 @@ export component AppWindow inherits Window {
                                             renaming: root.renaming-tab-index == tab.index;
                                             rename-text: root.rename-draft;
                                             activated => {
-                                                // Other chip click does not blur rename (strip
-                                                // focus-on-click gated) — commit explicitly.
-                                                if (root.renaming-tab-index >= 0 && root.renaming-tab-index != tab.index) {
-                                                    root.dismiss-tab-rename-if-any();
-                                                }
+                                                root.dismiss-any-rename-if-any();
                                                 root.tab-switch(tab.index);
                                             }
                                             close-clicked => {
@@ -2435,14 +2460,19 @@ export component AppWindow inherits Window {
                                                 root.find-closed();
                                                 viewport-host.focus();
                                             }
-                                            Text {
-                                                width: 100%;
-                                                height: 100%;
-                                                text: "×";
-                                                color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
-                                                font-size: 14px;
-                                                horizontal-alignment: center;
-                                                vertical-alignment: center;
+                                            // Path close — never Unicode ×.
+                                            Path {
+                                                x: (parent.width - 10px) / 2;
+                                                y: (parent.height - 10px) / 2;
+                                                width: 10px;
+                                                height: 10px;
+                                                stroke: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                                                stroke-width: 1.25px;
+                                                viewbox-x: 0;
+                                                viewbox-y: 0;
+                                                viewbox-width: 10;
+                                                viewbox-height: 10;
+                                                commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
                                             }
                                         }
                                     }
@@ -2496,10 +2526,19 @@ export component AppWindow inherits Window {
 
                     // Status lives in the same clipped column as the V-scrollbar so the
                     // track cannot paint into/under the footer (layout overflow).
-                    Rectangle {
+                    TouchArea {
                         height: 22px;
                         vertical-stretch: 0;
-                        background: Theme.bg-bar;
+                        mouse-cursor: default;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                root.dismiss-any-rename-if-any();
+                            }
+                        }
+                        Rectangle {
+                            height: 22px;
+                            width: 100%;
+                            background: Theme.bg-bar;
 
                         HorizontalLayout {
                             padding-left: 8px;
@@ -2525,6 +2564,7 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    } // status TouchArea
                 }
                 } // clip Rectangle
             }
@@ -2564,12 +2604,20 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 0;
             }
 
-            Text {
-                text: "×";
-                color: Theme.text-muted;
-                font-size: 12px;
-                vertical-alignment: center;
+            VerticalLayout {
                 horizontal-stretch: 0;
+                alignment: center;
+                Path {
+                    width: 10px;
+                    height: 10px;
+                    stroke: Theme.text-muted;
+                    stroke-width: 1.25px;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
+                }
             }
         }
     }

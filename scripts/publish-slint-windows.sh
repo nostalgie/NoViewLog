@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Native Windows MSVC publish for noviewlog-slint → dist/noviewlog-slint-win-x64/
+#
+# From PowerShell when bash is not in PATH:
+#   & "C:\Program Files\Git\bin\bash.exe" scripts/publish-slint-windows.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,6 +23,7 @@ if ! is_windows_host; then
     echo "error: publish-slint-windows.sh requires a native Windows host (MSVC Rust toolchain)." >&2
     echo "  Linux→Windows GUI cross-compile is not supported in v1." >&2
     echo "  On Windows: install rustup MSVC target, then re-run this script." >&2
+    echo "  From PowerShell: \"C:\\Program Files\\Git\\bin\\bash.exe\" scripts/publish-slint-windows.sh" >&2
     echo "  Or use a windows-latest CI job with the same commands." >&2
     exit 1
 fi
@@ -53,6 +57,25 @@ Run:
 Copy this entire folder if you move the app; the engine is linked into NoViewLog.exe
 (no separate noviewlog_core.dll).
 EOF
+
+echo "==> Headless smoke (process start) ..."
+if ! "$OUT_DIR/NoViewLog.exe" --version >/dev/null 2>&1; then
+    # App may not implement --version; a failed start with no GUI is still OK for CI.
+    # Launch with no args, give it a moment, then kill if still running.
+    "$OUT_DIR/NoViewLog.exe" &
+    SMOKE_PID=$!
+    sleep 2
+    if kill -0 "$SMOKE_PID" 2>/dev/null; then
+        echo "  OK: NoViewLog.exe started (pid $SMOKE_PID)"
+        kill "$SMOKE_PID" 2>/dev/null || true
+        wait "$SMOKE_PID" 2>/dev/null || true
+    else
+        echo "error: NoViewLog.exe exited immediately after launch" >&2
+        exit 1
+    fi
+else
+    echo "  OK: NoViewLog.exe --version"
+fi
 
 SIZE="$(du -sh "$OUT_DIR" | cut -f1)"
 echo ""

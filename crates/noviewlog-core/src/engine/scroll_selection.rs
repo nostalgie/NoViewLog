@@ -423,6 +423,17 @@ impl Engine {
     }
 
     pub(crate) fn selection_at(&mut self, x: f32, y: f32, extend: bool, click_count: u32) {
+        // Live-grid Follow paints the VT screen, not LogView flat_lines. Materialize
+        // before mapping pixels so selection hits the visible text (not empty/stale flat_lines).
+        if !extend && self.paints_live_vt_grid() {
+            self.active_view_mut().auto_follow = false;
+            self.materialize_live_terminal_tab();
+            self.active_terminal_mut().scroll_offset_y = self.max_scroll_offset();
+            self.last_stats_at = None;
+        } else if !extend {
+            self.active_view_mut().auto_follow = false;
+        }
+
         let view = self.active_view();
         let metrics = self.renderer.metrics();
         let cell_width = metrics.cell_width;
@@ -447,7 +458,7 @@ impl Engine {
             &visual,
             &view.flat_lines,
         );
-        self.active_view_mut().auto_follow = false;
+        // auto_follow cleared above when leaving live grid or starting a new selection.
 
         // Collapse toggle: disclosure gutter, or anywhere on a collapsed preview row.
         if !extend && click_count == 1 {

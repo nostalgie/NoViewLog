@@ -88,6 +88,10 @@ export component TabChip inherits TouchArea {
 
     pointer-event(event) => {
         if (root.renaming) {
+            // Clicks on chip chrome outside the TextInput reach the TouchArea — commit.
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.finish-rename-accept(root.rename-text);
+            }
             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
                 if (root.reorder-dragging) {
                     root.reorder-drag-end();
@@ -209,12 +213,14 @@ export component TabChip inherits TouchArea {
             background: Theme.rename-bg;
             clip: true;
 
-            HorizontalLayout {
-                width: 100%;
-                height: 100%;
-                padding-left: 6px;
-                padding-right: 6px;
-                alignment: center;
+        HorizontalLayout {
+            width: 100%;
+            height: 100%;
+            padding-left: Theme.field-pad-x;
+            padding-right: Theme.field-pad-x;
+            padding-top: Theme.field-pad-y;
+            padding-bottom: Theme.field-pad-y;
+            alignment: stretch;
 
                 rename-edit := TextInput {
                     width: 100%;
@@ -222,8 +228,8 @@ export component TabChip inherits TouchArea {
                     min-width: 1px;
                     font-size: 12px;
                     color: Theme.rename-text;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    vertical-alignment: top;
                     selection-background-color: Theme.selection-bg;
                     selection-foreground-color: Theme.selection-fg;
                     single-line: true;
@@ -303,13 +309,14 @@ export component TabChip inherits TouchArea {
             width: 18px;
             alignment: center;
 
+            // Path close — never Unicode × (Windows UI fonts tofu it).
+            // Inline Path: TerminalRowIcon is defined later in this file.
             TouchArea {
                 width: 18px;
                 height: 18px;
                 vertical-stretch: 0;
                 mouse-cursor: pointer;
                 clicked => { root.close-clicked(); }
-                // Nested TouchArea steals events — middle-click still closes via ×.
                 pointer-event(event) => {
                     if (event.button == PointerEventButton.middle && event.kind == PointerEventKind.down) {
                         root.close-clicked();
@@ -320,14 +327,18 @@ export component TabChip inherits TouchArea {
                     accept
                 }
 
-                Text {
-                    width: 100%;
-                    height: 100%;
-                    text: "×";
-                    color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                Path {
+                    x: (parent.width - 10px) / 2;
+                    y: (parent.height - 10px) / 2;
+                    width: 10px;
+                    height: 10px;
+                    stroke: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                    stroke-width: 1.25px;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
                 }
             }
         }
@@ -456,14 +467,17 @@ export component FilterRow inherits Rectangle {
                 border-color: Theme.border;
                 background: root.enabled ? Theme.accent : Theme.bg-input;
 
-                if root.enabled: Text {
+                if root.enabled: Path {
                     width: 100%;
                     height: 100%;
-                    text: "✓";
-                    color: Theme.text-primary;
-                    font-size: 10px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                    stroke: Theme.text-primary;
+                    stroke-width: 1.25px;
+                    fill: transparent;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    commands: "M 1.5 5 L 4 7.5 L 8.5 2.5";
                 }
             }
         }
@@ -570,8 +584,7 @@ export component FilterRow inherits Rectangle {
             opacity: root.enabled ? 1.0 : 0.55;
         }
 
-        // Confirm edit — same 18px cell as × so it stays clickable (not an `if`
-        // torn down on blur). Hover uses include green, never Theme.accent.
+        // Confirm edit — Path check (never Unicode ✓). Hover uses include green.
         TouchArea {
             width: 18px;
             height: 100%;
@@ -581,14 +594,19 @@ export component FilterRow inherits Rectangle {
                 root.pattern-edit-finished();
             }
 
-            Text {
-                width: 100%;
-                height: 100%;
-                text: "✓";
-                color: parent.has-hover ? Theme.include : Theme.text-muted;
-                font-size: 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Path {
+                x: (parent.width - 10px) / 2;
+                y: (parent.height - 10px) / 2;
+                width: 10px;
+                height: 10px;
+                stroke: parent.has-hover ? Theme.include : Theme.text-muted;
+                stroke-width: 1.25px;
+                fill: transparent;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 10;
+                viewbox-height: 10;
+                commands: "M 1.5 5 L 4 7.5 L 8.5 2.5";
             }
         }
 
@@ -598,14 +616,18 @@ export component FilterRow inherits Rectangle {
             mouse-cursor: pointer;
             clicked => { root.remove-clicked(); }
 
-            Text {
-                width: 100%;
-                height: 100%;
-                text: "×";
-                color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
-                font-size: 14px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Path {
+                x: (parent.width - 10px) / 2;
+                y: (parent.height - 10px) / 2;
+                width: 10px;
+                height: 10px;
+                stroke: parent.has-hover ? Theme.text-primary : Theme.text-muted;
+                stroke-width: 1.25px;
+                viewbox-x: 0;
+                viewbox-y: 0;
+                viewbox-width: 10;
+                viewbox-height: 10;
+                commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
             }
         }
     }
@@ -616,7 +638,7 @@ export component FilterRow inherits Rectangle {
 // was torn down inside double-clicked and the rename UI never stuck).
 // Path icon in a fixed 22×22 hit target — avoids Unicode glyph misalignment (✎/▶/×).
 export component TerminalRowIcon inherits TouchArea {
-    // "edit" | "play" | "stop" | "close" | "refresh"
+    // "edit" | "play" | "stop" | "close" | "check" | "refresh"
     in property <string> kind;
     in property <float> icon-opacity: 1.0;
     callback wheel(delta-y: float);
@@ -689,6 +711,19 @@ export component TerminalRowIcon inherits TouchArea {
             viewbox-width: 10;
             viewbox-height: 10;
             commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
+        }
+
+        if root.kind == "check": Path {
+            width: 100%;
+            height: 100%;
+            stroke: root.icon-color;
+            stroke-width: 1.25px;
+            fill: transparent;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            commands: "M 1.5 5 L 4 7.5 L 8.5 2.5";
         }
 
         if root.kind == "refresh": Path {
@@ -798,6 +833,10 @@ export component TerminalRow inherits TouchArea {
 
     pointer-event(event) => {
         if (root.renaming) {
+            // Subtitle / padding clicks while renaming reach the row TouchArea — commit.
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.finish-rename-accept(root.rename-text);
+            }
             if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
                 if (root.reorder-dragging) {
                     root.reorder-drag-end();
@@ -892,66 +931,53 @@ export component TerminalRow inherits TouchArea {
             }
         }
 
-        title-slot := Rectangle {
+            title-slot := Rectangle {
             horizontal-stretch: 1;
             min-width: 0px;
             vertical-stretch: 1;
             background: transparent;
             clip: true;
 
-            if !root.renaming: VerticalLayout {
+            // One stack always: title-line (fixed height) + subtitle.
+            // Swapping two VerticalLayouts + a taller bordered field made the path jump.
+            VerticalLayout {
                 width: 100%;
                 height: 100%;
                 spacing: 1px;
                 alignment: center;
 
-                Text {
-                    text: root.title;
-                    color: root.active ? Theme.text-primary : Theme.text-secondary;
-                    font-size: 12px;
-                    font-weight: 400;
-                    overflow: elide;
-                }
-
-                Text {
-                    text: root.subtitle;
-                    color: Theme.text-muted;
-                    font-size: 11px;
-                    overflow: elide;
-                }
-            }
-
-            // Same two-line stack as idle so title baseline matches siblings.
-            if root.renaming: VerticalLayout {
-                width: 100%;
-                height: 100%;
-                spacing: 1px;
-                alignment: center;
-
-                Rectangle {
+                title-line := Rectangle {
                     width: 100%;
-                    // ~title line height — not a 28px pill centered in the row.
                     height: Theme.rename-terminal-height;
                     border-radius: Theme.rename-radius;
-                    // Square muted outline — never Theme.accent / fluent focus chrome.
                     border-width: Theme.rename-border-width;
-                    border-color: Theme.rename-border;
-                    background: Theme.rename-bg;
+                    border-color: root.renaming ? Theme.rename-border : transparent;
+                    background: root.renaming ? Theme.rename-bg : transparent;
                     clip: true;
 
-                    HorizontalLayout {
-                        width: 100%;
-                        height: 100%;
-                        padding-left: 2px;
-                        padding-right: 2px;
-                        alignment: center;
+                    if !root.renaming: Text {
+                        x: Theme.rename-pad;
+                        y: Theme.rename-pad;
+                        width: parent.width - 2 * Theme.rename-pad;
+                        height: parent.height - 2 * Theme.rename-pad;
+                        text: root.title;
+                        color: root.active ? Theme.text-primary : Theme.text-secondary;
+                        font-size: 12px;
+                        font-weight: 400;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
 
-                        rename-edit := TextInput {
-                            width: 100%;
-                            height: 100%;
-                            min-width: 1px;
-                            font-size: 12px;
-                            color: Theme.rename-text;
+                    if root.renaming: TextInput {
+                        x: Theme.rename-pad;
+                        y: Theme.rename-pad;
+                        width: parent.width - 2 * Theme.rename-pad;
+                        height: parent.height - 2 * Theme.rename-pad;
+                        min-width: 1px;
+                        font-size: 12px;
+                        color: Theme.rename-text;
+                        horizontal-alignment: left;
+                        vertical-alignment: center;
                             selection-background-color: Theme.selection-bg;
                             selection-foreground-color: Theme.selection-fg;
                             single-line: true;
@@ -971,8 +997,6 @@ export component TerminalRow inherits TouchArea {
                                 root.finish-rename-accept(self.text);
                             }
 
-                            // Real focus loss (viewport/Terminal tab *click*) commits.
-                            // Mouse leave / hover over viewport must not blur.
                             changed has-focus => {
                                 if (self.has-focus) {
                                     root.rename-had-focus = true;
@@ -989,7 +1013,6 @@ export component TerminalRow inherits TouchArea {
                                     reject
                                 }
                             }
-                        }
                     }
                 }
 
@@ -1012,15 +1035,22 @@ export component TerminalRow inherits TouchArea {
                 spacing: 0;
                 alignment: center;
 
-                if root.show-run-stop && !root.renaming: TerminalRowIcon {
+                if root.show-run-stop: TerminalRowIcon {
                     kind: "edit";
+                    icon-opacity: root.renaming ? 0.0 : 1.0;
+                    enabled: !root.renaming;
                     clicked => { root.edit-launch-clicked(); }
                     wheel(dy) => { root.wheel(dy); }
                 }
 
-                if root.show-run-stop && !root.renaming: TerminalRowIcon {
+                if root.show-run-stop: TerminalRowIcon {
                     kind: root.running ? "stop" : "play";
+                    icon-opacity: root.renaming ? 0.0 : 1.0;
+                    enabled: !root.renaming;
                     clicked => {
+                        if (root.renaming) {
+                            return;
+                        }
                         if (root.running) {
                             root.stop-clicked();
                         } else {
@@ -1030,8 +1060,10 @@ export component TerminalRow inherits TouchArea {
                     wheel(dy) => { root.wheel(dy); }
                 }
 
-                if root.show-refresh && !root.renaming: TerminalRowIcon {
+                if root.show-refresh: TerminalRowIcon {
                     kind: "refresh";
+                    icon-opacity: root.renaming ? 0.0 : 1.0;
+                    enabled: !root.renaming;
                     clicked => { root.refresh-clicked(); }
                     wheel(dy) => { root.wheel(dy); }
                 }

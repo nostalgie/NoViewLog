@@ -1,0 +1,23 @@
+name: Windows Slint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run core tests
+        run: cargo test -p noviewlog-core --lib
+
+      - name: Run Slint chrome tests
+        run: cargo test -p noviewlog-slint --lib --test inline_rename_wiring
+
+      - name: Build Slint (release-dev)
+        run: cargo build --profile release-dev -p noviewlog-slint

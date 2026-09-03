@@ -1,9 +1,29 @@
-use crate::core::types::{LogLevel, LogRecord};
+use crate::core::types::{LogLevel, LogRecord, LaunchConfig};
 use chrono::Utc;
 use std::sync::Mutex;
 
 /// User config.yaml is process-global; serialize tests that write it.
 pub(crate) static USER_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+/// Long-running process for PTY spawn tests (platform-specific).
+pub(crate) fn long_running_launch_config() -> LaunchConfig {
+    #[cfg(unix)]
+    {
+        LaunchConfig {
+            command: Some("sleep".into()),
+            args: vec!["30".into()],
+            ..LaunchConfig::default()
+        }
+    }
+    #[cfg(windows)]
+    {
+        LaunchConfig {
+            command: Some("ping".into()),
+            args: vec!["-n".into(), "31".into(), "127.0.0.1".into()],
+            ..LaunchConfig::default()
+        }
+    }
+}
 
 pub(crate) fn sample_records() -> Vec<LogRecord> {
     vec![
