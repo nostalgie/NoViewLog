@@ -75,13 +75,10 @@ The bundled presets live in [`presets/defaults.yaml`](presets/defaults.yaml)
 (default `node-dev`). User configuration is stored in
 `~/.config/noviewlog/config.yaml` — add or override entries under `presets:`.
 
-## Other platforms (best-effort)
+## Run (Windows)
 
-Windows and other OSes are supported on a best-effort basis while the project
-is in active development. Expect rough edges; Ubuntu remains the reference
-environment.
-
-### Windows (optional)
+Windows is supported on a best-effort basis while the project is in active
+development. Ubuntu remains the reference environment.
 
 Prerequisites: Windows 10+ x64.
 
@@ -95,23 +92,52 @@ Prerequisites: Windows 10+ x64.
 
 3. Verify the toolchain:
 
-```bash
+```powershell
 rustc -vV
 # host: x86_64-pc-windows-msvc
 ```
 
-4. Build (Git Bash/MSYS or a normal Windows shell):
+4. Build and run (PowerShell from the repo root):
 
-```bash
-bash scripts/publish-slint-windows.sh
-# or:
-cargo build --release -p noviewlog-slint
+```powershell
+.\scripts\run-slint-windows.ps1
+.\scripts\run-slint-windows.ps1 -- README.md
+.\scripts\run-slint-windows.ps1 -- npm run dev
+.\scripts\run-slint-windows.ps1 -- --preset node-dev -- node server.js
 ```
 
-Output: `dist/noviewlog-slint-win-x64/NoViewLog.exe`. Copy that folder to the
+This builds and runs `noviewlog-slint` with the daily `release-dev` profile
+(same as Linux: `opt-level = 3`, incremental, no fat LTO). The script imports
+the MSVC environment when `link.exe` is not already in `PATH`.
+
+Build only (after MSVC env is active):
+
+```powershell
+cargo build --profile release-dev -p noviewlog-slint
+```
+
+Binary: `target\release-dev\noviewlog-slint.exe`.
+
+### Windows publish (optional)
+
+Stage a copyable folder with fat LTO (`--release`):
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" scripts/publish-slint-windows.sh
+# or, if bash is in PATH:
+bash scripts/publish-slint-windows.sh
+```
+
+Output: `dist\noviewlog-slint-win-x64\NoViewLog.exe`. Copy that folder to the
 target machine and run `NoViewLog.exe`.
 
-Do not use the Linux `run-slint.sh` / fontconfig `.deps` helpers on Windows.
+Do **not** use the Linux `run-slint.sh` / fontconfig `.deps` helpers on Windows.
+
+User config on Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`.
+
+## Other platforms (best-effort)
+
+macOS and other OSes may work but are not actively tested.
 
 ## Tests
 

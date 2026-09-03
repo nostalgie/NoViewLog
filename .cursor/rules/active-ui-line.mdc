@@ -9,7 +9,7 @@ alwaysApply: true
 
 | Branch | Role | Binary / run |
 |--------|------|----------------|
-| `main` | Active Slint UI | `bash scripts/run-slint.sh` → `noviewlog-slint` |
+| `main` | Active Slint UI | Linux: `bash scripts/run-slint.sh` · Windows: `.\scripts\run-slint-windows.ps1` → `noviewlog-slint` |
 
 ## Session start (before any edit or branch)
 
@@ -29,7 +29,7 @@ alwaysApply: true
 | Task | Location |
 |------|----------|
 | Slint UI | `crates/noviewlog-slint/` |
-| Slint run helper | `scripts/run-slint.sh` |
+| Slint run helper | `scripts/run-slint.sh` (Linux), `scripts/run-slint-windows.ps1` (Windows) |
 | Shared engine | `crates/noviewlog-core/` |
 
 After Slint/engine changes: build/run Slint (`run-slint.sh` or

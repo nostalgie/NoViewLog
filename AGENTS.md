@@ -69,20 +69,16 @@ After changes to `crates/noviewlog-slint/`, shared engine code used by Slint, or
 Slint packaging scripts, **build or run yourself** — do not ask the user to
 rebuild:
 
-```bash
-bash scripts/run-slint.sh   # cargo run --profile release-dev (not debug)
-# or
-cargo build --profile release-dev -p noviewlog-slint
-```
+| Platform | Daily run | Build only |
+|----------|-----------|------------|
+| Linux | `bash scripts/run-slint.sh` | `cargo build --profile release-dev -p noviewlog-slint` |
+| Windows | `.\scripts\run-slint-windows.ps1` | same (after MSVC env is active) |
 
 Publish / fat LTO: `cargo build --release -p noviewlog-slint` or
-`bash scripts/publish-slint-windows.sh`.
+`bash scripts/publish-slint-windows.sh` (native Windows MSVC host only).
 
-Windows release staging (native MSVC host only):
-
-```bash
-bash scripts/publish-slint-windows.sh
-```
+CI: `.github/workflows/windows-slint.yml` runs `cargo test -p noviewlog-core --lib`
+and `cargo build --profile release-dev -p noviewlog-slint` on `windows-latest`.
 
 When touching engine / parser / filters:
 
@@ -91,9 +87,11 @@ cargo test -p noviewlog-core --lib
 ```
 
 PTY ingest, Follow, WRAP, Viewport paint, or HOST_TICK: **also** run the
-daily GUI (`release-dev`) and measure `cat` (CPU, no Follow jumps). Confirm
-`/proc/<pid>/exe` is `target/release-dev/...` — debug pegs ~100% on the same
-flood. Tests + compile are not enough. See
+daily GUI (`release-dev`) and measure flood CPU (no Follow jumps). On Linux,
+confirm `/proc/<pid>/exe` is `target/release-dev/...`. On Windows, confirm
+`Get-Process noviewlog-slint | Select-Object Path` contains
+`target\release-dev\` and sample CPU while `type big.log` runs in the terminal.
+Debug pegs ~100% on the same flood. Tests + compile are not enough. See
 [`.cursor/rules/terminal-flood-verify.mdc`](.cursor/rules/terminal-flood-verify.mdc).
 
 ## Where to edit
