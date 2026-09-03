@@ -1635,11 +1635,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let dirty = eng.needs_render() || force_tick.get();
-                let pty_pending = eng.pty_work_pending();
-                // Keep fast cadence while flooding even if this frame was not dirty yet.
-                if dirty || pty_pending {
+                let work_pending = eng.host_work_pending();
+                // Keep fast cadence while flooding / file load / match scan even if
+                // this frame was not dirty yet.
+                if dirty || work_pending {
                     bump_fast_timer(&timer_tick, &timer_fast_tick);
-                    flood_pacing.store(pty_pending, Ordering::Release);
+                    flood_pacing.store(eng.pty_work_pending(), Ordering::Release);
                 } else if timer_fast_tick.get() {
                     timer_tick.set_interval(TICK_IDLE);
                     timer_fast_tick.set(false);

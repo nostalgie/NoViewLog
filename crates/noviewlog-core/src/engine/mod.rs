@@ -457,6 +457,22 @@ impl Engine {
         self.pty_drain_pending || self.pty_hold.is_some()
     }
 
+    /// True when the host should keep a fast tick cadence (PTY flood, file load/index,
+    /// pending window jump, or in-progress whole-file match scan).
+    pub fn host_work_pending(&self) -> bool {
+        if self.pty_work_pending() {
+            return true;
+        }
+        if !self.has_active_terminal() {
+            return false;
+        }
+        let terminal = self.active_terminal();
+        if terminal.file_load.is_some() || terminal.pending_file_window.is_some() {
+            return true;
+        }
+        terminal.active_view().match_scan_pos.is_some()
+    }
+
     /// Clear and return whether a drain was requested after the last `poll_pty`.
     pub fn take_pty_drain_pending(&mut self) -> bool {
         let pending = self.pty_drain_pending || self.pty_hold.is_some();
@@ -708,8 +724,20 @@ impl Engine {
         }
 
         if !running && flat_lines.is_empty() {
-            let on_terminal_tab = self.active_terminal().active_view == 0;
-            let msg = if on_terminal_tab {
+            let terminal = self.active_terminal();
+            let view = terminal.active_view();
+            let msg = if terminal.is_file_session()
+                && view.uses_match_index()
+                && view.match_scan_pos.is_some()
+            {
+                // Same text as the status bar while the whole-file match index builds.
+                self.status_message.as_str()
+            } else if terminal.is_file_session()
+                && view.uses_match_index()
+                && view.match_scan_pos.is_none()
+            {
+                "No matching lines"
+            } else if terminal.active_view == 0 {
                 "Type to open a shell — or ▶ Start for the saved command"
             } else {
                 "Press ▶ Start to run"
@@ -1231,6 +1259,7 @@ impl Engine {
             use_regex,
             regex: None,
         }));
+        self.reset_file_match_viewport();
         self.sync_active_project_from_terminals();
     }
 
@@ -1246,6 +1275,7 @@ impl Engine {
         {
             filter.enabled = enabled;
         }
+        self.reset_file_match_viewport();
         self.sync_active_project_from_terminals();
     }
 
@@ -1254,6 +1284,7 @@ impl Engine {
             return;
         }
         self.active_view_mut().filters_mut().retain(|f| f.id != id);
+        self.reset_file_match_viewport();
         self.sync_active_project_from_terminals();
     }
 
@@ -1278,6 +1309,7 @@ impl Engine {
         {
             *slot = compile_filter(rule);
         }
+        self.reset_file_match_viewport();
         self.sync_active_project_from_terminals();
     }
 

@@ -565,9 +565,14 @@ pub fn selection_plain_text(flat_lines: &[FlatLine], sel: &TextSelection) -> Str
         return String::new();
     }
     let (start, end) = sel.normalized();
+    if start.line_index >= flat_lines.len() || end.line_index >= flat_lines.len() {
+        return String::new();
+    }
     if start.line_index == end.line_index {
         let line = &flat_lines[start.line_index].raw;
-        return line[start.byte_offset..end.byte_offset].to_string();
+        let from = start.byte_offset.min(line.len());
+        let to = end.byte_offset.min(line.len()).max(from);
+        return line[from..to].to_string();
     }
 
     let mut out = String::new();
@@ -578,9 +583,11 @@ pub fn selection_plain_text(flat_lines: &[FlatLine], sel: &TextSelection) -> Str
         .take(end.line_index - start.line_index + 1)
     {
         if i == start.line_index {
-            out.push_str(&line.raw[start.byte_offset..]);
+            let from = start.byte_offset.min(line.raw.len());
+            out.push_str(&line.raw[from..]);
         } else if i == end.line_index {
-            out.push_str(&line.raw[..end.byte_offset]);
+            let to = end.byte_offset.min(line.raw.len());
+            out.push_str(&line.raw[..to]);
         } else {
             out.push_str(&line.raw);
         }

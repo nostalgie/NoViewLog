@@ -30,38 +30,36 @@ impl FilterEngine {
     }
 
     pub fn is_visible(&self, record: &LogRecord) -> bool {
-        let active: Vec<_> = self.filters.iter().filter(|f| f.enabled).collect();
-        if active.is_empty() {
+        let filters = &self.filters;
+        if !filters.iter().any(|f| f.enabled) {
             return true;
         }
 
-        let includes: Vec<_> = active
-            .iter()
-            .filter(|f| f.filter_type == FilterType::Include)
-            .collect();
-        let excludes: Vec<_> = active
-            .iter()
-            .filter(|f| f.filter_type == FilterType::Exclude)
-            .collect();
-
-        for filter in excludes {
-            if filter
-                .regex
-                .as_ref()
-                .is_some_and(|re| re.is_match(&record.text))
-            {
-                return false;
+        let mut has_include = false;
+        for filter in filters.iter().filter(|f| f.enabled) {
+            if filter.filter_type == FilterType::Exclude {
+                if filter
+                    .regex
+                    .as_ref()
+                    .is_some_and(|re| re.is_match(&record.text))
+                {
+                    return false;
+                }
+            } else {
+                has_include = true;
             }
         }
 
-        if includes.is_empty() {
+        if !has_include {
             return true;
         }
 
-        includes.iter().any(|f| {
-            f.regex
-                .as_ref()
-                .is_some_and(|re| re.is_match(&record.text))
+        filters.iter().any(|f| {
+            f.enabled
+                && f.filter_type == FilterType::Include
+                && f.regex
+                    .as_ref()
+                    .is_some_and(|re| re.is_match(&record.text))
         })
     }
 

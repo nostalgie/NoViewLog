@@ -801,3 +801,313 @@ fn reload_missing_file_keeps_session() {
     );
 }
 
+#[test]
+fn file_filter_match_index_scans_and_filters_without_window_thrash() {
+    use crate::engine::{Command, Engine};
+    use std::io::Write;
+
+    // Large enough that only a sliding window is resident; filter must use match index.
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-file-match-{}",
+        std::process::id()
+    ));
+    let needle = "11:01:13";
+    let mut expected_hits = 0usize;
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Long URLs so WRAP creates a tall filtered viewport (scrollbar + wheel).
+        let pad = format!(
+            "GET http://example.com/{}/{}",
+            "x".repeat(120),
+            "y".repeat(120)
+        );
+        for i in 0..80_000 {
+            if i % 400 == 0 {
+                writeln!(f, "ts={needle} hit-{i} {pad}").unwrap();
+                expected_hits += 1;
+            } else {
+                writeln!(f, "ts=10:00:00 line-{i}").unwrap();
+            }
+        }
+    }
+
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
+        .expect("resize");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    assert!(engine.active_is_file_session_for_test());
+
+    // Scroll into the middle so unfiltered mode would have a non-tail window.
+    let max_unfiltered = engine.max_scroll_offset_for_test();
+    assert!(max_unfiltered > 1000.0);
+    engine
+        .send_command(Command::Scroll {
+            offset: max_unfiltered * 0.5,
+        })
+        .expect("scroll mid");
+    engine.finish_pending_file_window_for_test();
+    let window_start_before = engine.buffer_line_start_for_test();
+    assert!(window_start_before > 0);
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    assert_eq!(engine.active_tab_index_for_test(), 1);
+
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"filter_add","type":"include","pattern":"{needle}"}}"#
+        ))
+        .expect("filter_add");
+    assert!(engine.uses_match_index_for_test());
+    assert_eq!(
+        engine.flat_lines_len_for_test(),
+        0,
+        "viewport must clear immediately on filter invalidate"
+    );
+    assert_eq!(engine.scroll_offset_y_for_test(), 0.0);
+    assert!(engine.match_scan_pos_for_test().is_some());
+    assert!(
+        engine.host_work_pending_for_test(),
+        "match scan must keep host_work_pending so the UI stays on TICK_FAST"
+    );
+    assert!(
+        engine.status_message_for_test().starts_with("Scanning filters…"),
+        "status/center progress must show scan: {}",
+        engine.status_message_for_test()
+    );
+
+    // Mid-scan: max_scroll tracks match count (partial), not full-file height.
+    engine.advance_file_match_scan();
+    let mid_max = engine.max_scroll_offset_for_test();
+    let file_total = engine.file_total_lines_for_test();
+    let stride = engine.viewport_row_stride_for_test();
+    let full_file_max = (file_total as f32 * stride - 400.0).max(0.0);
+    assert!(
+        mid_max < full_file_max * 0.1,
+        "during scan max_scroll must not use full-file height (mid={mid_max} file={full_file_max})"
+    );
+
+    // Prefetch / file-window scroll must not move the underlying buffer window.
+    engine.tick();
+    engine.tick();
+    assert_eq!(
+        engine.buffer_line_start_for_test(),
+        window_start_before,
+        "match-index mode must not slide the file window"
+    );
+    assert_eq!(engine.flat_lines_len_for_test(), 0);
+
+    // Scrollbar input during scan must stay pinned (no file-window jump).
+    engine
+        .send_command(Command::Scroll {
+            offset: full_file_max * 0.5,
+        })
+        .expect("scroll during scan");
+    assert_eq!(engine.scroll_offset_y_for_test(), 0.0);
+    assert_eq!(engine.buffer_line_start_for_test(), window_start_before);
+
+    engine.finish_file_match_scan_for_test();
+    assert!(engine.match_scan_pos_for_test().is_none());
+    assert_eq!(engine.match_offsets_len_for_test(), expected_hits);
+    assert_eq!(engine.flat_lines_len_for_test(), expected_hits);
+    for text in engine.flat_line_texts_for_test() {
+        assert!(
+            text.contains(needle),
+            "filtered line must contain needle: {text}"
+        );
+    }
+
+    let match_max = engine.max_scroll_offset_for_test();
+    assert!(
+        match_max < full_file_max * 0.05,
+        "completed match max_scroll should be tiny vs file (match={match_max} file={full_file_max})"
+    );
+
+    // Scroll within matches must not move the file buffer window.
+    assert_eq!(engine.buffer_line_start_for_test(), window_start_before);
+
+    // Small match set must scroll locally (WRAP-aware) without freezing / re-seeking.
+    engine
+        .send_command_json(r#"{"cmd":"set_wrap_lines","wrap":true}"#)
+        .expect("wrap on");
+    // Reset to top before measuring wheel.
+    engine
+        .send_command(Command::Scroll { offset: 0.0 })
+        .expect("scroll top");
+    let match_max = engine.max_scroll_offset_for_test();
+    let local_max = engine.local_window_max_scroll_for_test();
+    assert!(
+        (match_max - local_max).abs() < 1.0,
+        "scrollbar max must match wheel local max (match={match_max} local={local_max})"
+    );
+    assert!(
+        match_max > 1.0,
+        "wrapped matches must expose scroll range, got {match_max} (hits={expected_hits})"
+    );
+    let (_cur, total) = engine.viewport_line_position_for_test();
+    assert_eq!(total, expected_hits as u64, "counter total must be match count");
+
+    engine
+        .send_command(Command::ScrollLines { delta: 5 })
+        .expect("wheel");
+    assert!(
+        engine.scroll_offset_y_for_test() > 0.5,
+        "wheel must move local scroll"
+    );
+
+    // Scrollbar path (Command::Scroll) must reach the same range as wheel.
+    engine
+        .send_command(Command::Scroll { offset: 0.0 })
+        .expect("scroll top again");
+    let mid = match_max * 0.5;
+    engine
+        .send_command(Command::Scroll { offset: mid })
+        .expect("scrollbar mid");
+    assert!(
+        (engine.scroll_offset_y_for_test() - mid).abs() < 2.0,
+        "scrollbar mid must stick (got {} want {mid})",
+        engine.scroll_offset_y_for_test()
+    );
+    assert!(
+        (engine.stats_scroll_y_for_test() - mid).abs() < 2.0,
+        "stats thumb Y must track scrollbar"
+    );
+
+    engine
+        .send_command(Command::Scroll { offset: match_max })
+        .expect("scroll end");
+    let (cur3, total3) = engine.viewport_line_position_for_test();
+    assert_eq!((cur3, total3), (expected_hits as u64, expected_hits as u64));
+    assert_eq!(engine.buffer_line_start_for_test(), window_start_before);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn file_filter_clear_drops_stale_selection_without_panic() {
+    use crate::engine::{Command, Engine};
+    use crate::viewport_layout::{TextPos, TextSelection};
+    use std::io::Write;
+
+    let path = std::env::temp_dir().join(format!(
+        "noviewlog-filter-sel-{}",
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..2_000 {
+            writeln!(f, "line-{i:04} payload").unwrap();
+        }
+    }
+
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
+        .expect("resize");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+    engine.rebuild_if_needed_for_test();
+
+    // Stale selection into the unfiltered window (as if the user dragged).
+    engine.set_selection_for_test(TextSelection::new(
+        TextPos {
+            line_index: 510,
+            byte_offset: 0,
+        },
+        TextPos {
+            line_index: 510,
+            byte_offset: 8,
+        },
+    ));
+    assert!(engine.selection_text_for_test().is_some());
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    engine
+        .send_command_json(r#"{"cmd":"filter_add","type":"include","pattern":"line-0001"}"#)
+        .expect("filter_add");
+
+    // Must not panic: empty flat_lines + old selection indices.
+    assert!(engine.selection_text_for_test().is_none());
+    assert_eq!(engine.flat_lines_len_for_test(), 0);
+
+    // Pointer extend while empty must also stay safe.
+    engine
+        .send_command(Command::SelectionAt {
+            x: 40.0,
+            y: 20.0,
+            extend: true,
+            click_count: 1,
+        })
+        .expect("selection_at");
+    assert!(engine.selection_text_for_test().is_none());
+
+    engine.finish_file_match_scan_for_test();
+    assert!(engine.match_offsets_len_for_test() >= 1);
+    assert!(engine.flat_lines_len_for_test() >= 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn big_log_home_filter_match_index_if_present() {
+    use crate::engine::Engine;
+
+    let path = std::path::Path::new("/home/dima/big.log");
+    if !path.exists() {
+        return;
+    }
+    let needle = "11:01:13";
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
+        .expect("resize");
+    engine
+        .send_command_json(r#"{"cmd":"load_file","path":"/home/dima/big.log"}"#)
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"filter_add","type":"include","pattern":"{needle}"}}"#
+        ))
+        .expect("filter_add");
+    assert_eq!(engine.flat_lines_len_for_test(), 0);
+    let window_start = engine.buffer_line_start_for_test();
+
+    let start = std::time::Instant::now();
+    engine.finish_file_match_scan_for_test();
+    let scan_ms = start.elapsed().as_millis();
+    assert!(
+        engine.match_scan_pos_for_test().is_none(),
+        "scan must complete"
+    );
+    assert_eq!(engine.match_offsets_len_for_test(), 31);
+    assert_eq!(engine.flat_lines_len_for_test(), 31);
+    assert_eq!(
+        engine.buffer_line_start_for_test(),
+        window_start,
+        "match scan must not thrash the file window"
+    );
+    for text in engine.flat_line_texts_for_test() {
+        assert!(text.contains(needle), "filtered line: {text}");
+    }
+    assert!(
+        scan_ms < 30_000,
+        "big.log filter scan took {scan_ms}ms (want <30s in test)"
+    );
+}
+
