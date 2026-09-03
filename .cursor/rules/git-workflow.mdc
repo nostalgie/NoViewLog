@@ -10,7 +10,15 @@ alwaysApply: true
 1. Run `git branch --show-current` before creating or switching branches.
 2. Base feature work off `main`.
 3. Commit messages and PR titles/bodies: **English only**.
-4. Commit and push the feature branch before opening or updating a PR.
+
+## Commit, push, PR — only when the user says so
+
+- **Never** `git commit`, `git push`, or `gh pr create` unless the user
+  **explicitly** asked in **this** turn (`commit`, `push`, `open a PR`).
+- A plan todo such as “commit, PR”, “finish all todos”, or “implement the plan”
+  is **not** permission to commit or push.
+- **Never** offer commit or push (“say the word if you want a commit”). Leave
+  the tree dirty. The user will ask if they want it.
 
 ## Protected main
 
@@ -46,9 +54,10 @@ Uncommitted files come along when they apply cleanly. If that checkout **fails**
 
 If `git branch -d` refuses, use `git branch -D` only after confirming the PR is merged into `main`.
 
-## PR lifecycle
+## PR lifecycle (only after an explicit user request)
 
 1. Implement on a feature branch off `main`
-2. Commit, push, create/update PR
-3. Merge when asked (or when the task expects merge)
-4. Auto-resync as above — no extra user prompt
+2. Commit, push, create/update PR — **only if the user asked**
+3. Merge when asked
+4. Auto-resync after a merged PR as above — no extra user prompt
+   (resync must not commit or push the agent’s own uncommitted work)

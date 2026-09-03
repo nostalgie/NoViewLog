@@ -31,6 +31,8 @@ alwaysApply: true
 - Do **NOT** `self.focus()` on every blur — that traps the editor when the console intentionally takes focus
 - Gate sidebar/tab `FocusScope.focus-on-click` and tab `Flickable.interactive` while renaming so mouse leave does not steal focus
 - Wire viewport click / viewport focus to dismiss tab **and** terminal rename
+- Leftover sidebar stretch under FILES/TERMINALS MUST dismiss rename
+  (`sidebar-dead-space` TouchArea). See [inline-rename-dismiss.mdc](inline-rename-dismiss.mdc)
 
 ## Rename / text fields
 

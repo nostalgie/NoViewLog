@@ -31,6 +31,8 @@ context: |
 
   Git workflow:
   - Feature branch off main; ship via PR; never push to main
+  - Never commit, push, or open a PR unless the user explicitly asked
+  - Never offer commit or push
   - Commits, PRs, and tracked docs: English only
 
   Always-on agent constraints (see .cursor/rules/):

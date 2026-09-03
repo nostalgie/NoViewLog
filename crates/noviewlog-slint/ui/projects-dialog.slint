@@ -1,11 +1,13 @@
 // File → Projects overlay: list / create / rename in one PopupWindow
 // (nested popups would dismiss the list on click-outside).
 // Square Theme borders only — never Theme.accent / fluent LineEdit focus bars.
+// Icons are Path (TerminalRowIcon); actions are AppButton — never Unicode ✎/×
+// or fluent std-widgets Button (Windows UI fonts tofu those glyphs).
 
-import { Button } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { ProjectInfo } from "types.slint";
-import { FormTextField } from "form-dialogs.slint";
+import { AppButton, FormTextField } from "form-dialogs.slint";
+import { TerminalRowIcon } from "sidebar.slint";
 
 export component ProjectsDialog inherits Rectangle {
     in property <[ProjectInfo]> projects;
@@ -98,7 +100,7 @@ export component ProjectsDialog inherits Rectangle {
                     horizontal-stretch: 1;
                 }
 
-                if root.dialog-mode == "list": Button {
+                if root.dialog-mode == "list": AppButton {
                     text: "New";
                     clicked => { root.begin-create(); }
                 }
@@ -149,8 +151,8 @@ export component ProjectsDialog inherits Rectangle {
                                 width: 100%;
                                 height: 100%;
                                 padding-left: 10px;
-                                padding-right: 8px;
-                                spacing: 8px;
+                                padding-right: 4px;
+                                spacing: 4px;
                                 alignment: stretch;
 
                                 Text {
@@ -175,51 +177,21 @@ export component ProjectsDialog inherits Rectangle {
                                     }
                                 }
 
-                                VerticalLayout {
-                                    width: 20px;
-                                    horizontal-stretch: 0;
-                                    vertical-stretch: 1;
-                                    alignment: center;
-                                    TouchArea {
-                                        width: 20px;
-                                        height: 20px;
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.begin-rename(proj.id, proj.name);
-                                        }
-                                        Text {
-                                            width: 100%;
-                                            height: 100%;
-                                            text: "✎";
-                                            color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
-                                            font-size: 11px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
+                                TerminalRowIcon {
+                                    kind: "edit";
+                                    width: 22px;
+                                    height: 22px;
+                                    clicked => {
+                                        root.begin-rename(proj.id, proj.name);
                                     }
                                 }
 
-                                VerticalLayout {
-                                    width: 20px;
-                                    horizontal-stretch: 0;
-                                    vertical-stretch: 1;
-                                    alignment: center;
-                                    TouchArea {
-                                        width: 20px;
-                                        height: 20px;
-                                        mouse-cursor: pointer;
-                                        clicked => {
-                                            root.project-delete(proj.id);
-                                        }
-                                        Text {
-                                            width: 100%;
-                                            height: 100%;
-                                            text: "×";
-                                            color: parent.has-hover ? Theme.text-primary : Theme.text-muted;
-                                            font-size: 14px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                        }
+                                TerminalRowIcon {
+                                    kind: "close";
+                                    width: 22px;
+                                    height: 22px;
+                                    clicked => {
+                                        root.project-delete(proj.id);
                                     }
                                 }
                             }
@@ -232,7 +204,7 @@ export component ProjectsDialog inherits Rectangle {
                     alignment: end;
                     padding-top: 4px;
 
-                    Button {
+                    AppButton {
                         text: "Close";
                         primary: true;
                         clicked => { root.closed(); }
@@ -257,11 +229,11 @@ export component ProjectsDialog inherits Rectangle {
                     alignment: end;
                     padding-top: 4px;
 
-                    Button {
+                    AppButton {
                         text: "Cancel";
                         clicked => { root.cancel-form(); }
                     }
-                    Button {
+                    AppButton {
                         text: root.dialog-mode == "create" ? "Create" : "OK";
                         primary: true;
                         clicked => { root.confirm-form(); }

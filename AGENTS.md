@@ -56,6 +56,9 @@ After upgrading the global CLI: `openspec update` in the repo root.
 - Default branch: `main` (protected).
 - Ship changes via **feature branch → pull request → merge**.
 - **Never** push (or force-push) directly to `main`.
+- **Never** `git commit`, `git push`, or `gh pr create` unless the user
+  explicitly asked in this turn. Plan todos do not count.
+- **Never** prompt the user to commit or push.
 - Do not create or switch branches unless the task needs it.
 - After a PR merges (including when the user merged it on GitHub), switch back
   to `main` and pull **without being asked** — at session start and before new
@@ -77,8 +80,9 @@ rebuild:
 Publish / fat LTO: `cargo build --release -p noviewlog-slint` or
 `bash scripts/publish-slint-windows.sh` (native Windows MSVC host only).
 
-CI: `.github/workflows/windows-slint.yml` runs `cargo test -p noviewlog-core --lib`
-and `cargo build --profile release-dev -p noviewlog-slint` on `windows-latest`.
+CI: `.github/workflows/windows-slint.yml` runs `cargo test -p noviewlog-core --lib`,
+`cargo test -p noviewlog-slint --lib --test inline_rename_wiring`, and
+`cargo build --profile release-dev -p noviewlog-slint` on `windows-latest`.
 
 When touching engine / parser / filters:
 
@@ -111,9 +115,18 @@ webpack, or vite unless the user explicitly asks. This is not a web app.
 - Selection may use a soft background tint (`Theme.accent-soft`) without an
   accent border.
 - Inline rename: square `TextInput` in a `Rectangle` with `Theme.border` (or no
-  border) — not fluent `LineEdit`.
+  border) — not fluent `LineEdit`. Click-away (including empty sidebar space
+  under FILES) MUST end rename; mouse leave MUST NOT. Spec:
+  [`openspec/specs/ui/inline-rename/spec.md`](openspec/specs/ui/inline-rename/spec.md).
+- Chrome icons: **Path** geometry only (never Unicode `✎`/`×`/`✓` in `Text`).
+- Dialog buttons: **`AppButton`** (Theme + `TouchArea`) — never fluent
+  `Button` from `std-widgets`. Chrome labels/captions use bundled
+  **Noto Sans** (proportional); never mono (`Noto Sans Mono` / Cascadia)
+  on Window `default-font-family`.
 
-Details: [`.cursor/rules/no-blue-chrome-borders.mdc`](.cursor/rules/no-blue-chrome-borders.mdc).
+
+Details: [`.cursor/rules/no-blue-chrome-borders.mdc`](.cursor/rules/no-blue-chrome-borders.mdc),
+[`.cursor/rules/no-system-chrome-fonts.mdc`](.cursor/rules/no-system-chrome-fonts.mdc).
 
 ## Safety
 

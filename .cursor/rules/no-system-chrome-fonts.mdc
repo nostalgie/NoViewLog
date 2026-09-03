@@ -1,0 +1,52 @@
+---
+description: Path geometry for chrome icons; Noto Sans UI text OK; no fluent Button
+alwaysApply: true
+---
+
+# No Unicode chrome icons (mandatory)
+
+Windows system UI fonts (Segoe etc.) **lack** many symbol glyphs. Unicode
+chrome icons (`✎`, `×`, `✕`, `✓`, `❐`, `─`, …) render as **tofu** (empty
+boxes / two vertical rectangles). That is an **icon** problem — not a reason
+to ban readable proportional fonts for labels and buttons.
+
+Fluent `Button` from `std-widgets.slint` also looks foreign next to Theme
+chrome. Prefer `AppButton`.
+
+This has already bitten caption buttons and Projects edit/delete. Do not
+reintroduce Unicode icon glyphs or fluent `Button`.
+
+## Icons
+
+- Chrome actions MUST use **Path geometry** (`TerminalRowIcon`, `CaptionButton`,
+  or an inline `Path` with a fixed viewbox).
+- NEVER put symbol glyphs in `Text { text: "✎" }` / `"×"` / `"✓"` for buttons
+  or row actions.
+
+## Text labels and buttons
+
+- Dialog / form actions MUST use **`AppButton`** (`form-dialogs.slint`) or
+  another Theme + `TouchArea` control — never `import { Button } from
+  "std-widgets.slint"`.
+- Chrome text (menus, sidebar, tabs, dialogs, AppButton) uses bundled
+  **Noto Sans** (proportional) via Window `default-font-family: "Noto Sans"`
+  and `assets/NotoSans-Regular.ttf` / `NotoSans-Bold.ttf` (OFL).
+- NEVER force a **mono** face on chrome (`Noto Sans Mono`, Cascadia Mono/Code,
+  Consolas, `Theme.ui-font` pointing at mono). Mono is for the viewport
+  bitmap only (separate).
+- Do **not** set Window `default-font-family` to a mono family.
+
+## Allowed fluent leftovers
+
+- `Palette` / `SpinBox` may remain until a Theme replacement exists.
+- Do **not** add new fluent `Button`, `LineEdit`, or Unicode icon `Text`.
+
+## Agent obligations
+
+- After chrome icon/button/font changes: rebuild
+  `cargo build --profile release-dev -p noviewlog-slint` (Windows:
+  `.\scripts\run-slint-windows.ps1` or MSVC env + same cargo).
+- Grep for `text: "✎"`, `text: "×"`, `text: "✓"`, and `Button` from
+  `std-widgets` in `crates/noviewlog-slint/ui/` before calling the work done.
+- Grep that chrome is not mono: no `default-font-family: "Noto Sans Mono"` /
+  Cascadia Mono on Window.
