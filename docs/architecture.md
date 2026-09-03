@@ -72,12 +72,21 @@ Click a collapsed preview (or disclosure cue) to toggle; View → Expand/Collaps
 
 | Module | Responsibility |
 |--------|----------------|
-| `engine` | Session façade: commands, tick, stats, multi-terminal |
+| `engine` | Session façade: commands, tick, stats, multi-terminal, Projects |
+| `engine/projects` | Project open/create, Program restore, auto-start on open |
 | `terminal_state` / `TerminalState` | Per-terminal bag (views, buffer, file window) |
 | `log_view` | Per-tab filters + search + flat lines |
 | `pty` | Process I/O |
 | `viewport` + `viewport_layout` | Paint + soft-wrap / selection geometry |
 | `core/*` | Parser, filters, buffer, config, formats |
+
+## Projects (high level)
+
+Programs persist in `projects.yaml`. **Open / cold start** always selects the
+**Terminal** tab on live sessions and **auto-starts** them (saved command,
+interactive shell, or file load). Details:
+[`docs/terminals.md`](terminals.md),
+[`openspec/specs/terminals/projects/spec.md`](../openspec/specs/terminals/projects/spec.md).
 
 ## Agent docs
 

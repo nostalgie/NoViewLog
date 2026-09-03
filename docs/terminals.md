@@ -15,7 +15,7 @@ FILES (collapsible)         read-only log file
 | `id` | Stable session id (`terminal-…`) |
 | `cwd` | Live working directory (spawn cwd, OSC 7); for files, the opened file’s parent directory |
 | `label` | Sidebar label: optional **custom title**, else cwd segment / **file basename** |
-| `launch` | Optional saved command / log file for ▶ Start / reload |
+| `launch` | Optional saved command / log file for Start / reload |
 | `running` | Whether this session’s PTY child is alive (always false for files) |
 
 Multiple sessions can run **at the same time**. Switching the active session only changes the viewport — it does **not** stop other PTYs.
@@ -100,17 +100,57 @@ Filter presets, scrollback, viewport font, and sidebar section expand state live
 - A **Project** groups one or more **Programs**
 - Each Program saves launch (`command` / `args` / `cwd` **or** `log_file`) and filter tabs
 - Manage Projects via **File → Projects…** (open, rename, delete, or create)
-- **New** creates an empty Project (one stopped Terminal; no copied launch or tabs)
-- Opening a Project replaces TERMINALS with stopped live Programs **and** FILES with that Project’s log-file Programs (leftover FILES from the previous Project are dropped)
-- On normal startup (no CLI args), the last active Project is restored automatically; the first Program in the list is selected, all stopped
+- **New** creates an empty Project (one live Terminal that auto-starts an interactive
+  shell; no copied launch or filter tabs from the previous Project)
+- Opening a Project (File → Projects, or last Project on app startup) **replaces**
+  TERMINALS and FILES with that Project’s Programs
 - CLI launch (`command` or log file) takes priority over project restore
-- Run starts the saved command (or an interactive shell when no command is set); Stop kills that PTY
-- Programs with a saved command stay stopped after Stop or process exit (no auto shell respawn)
-- Restored FILES load from disk when selected (or immediately when opened via File / FILES `+`)
-- **Refresh** on a FILES row (or File → Reload log) re-reads that path from disk; it is not Follow/tail
+
+### Project open / cold start (mandatory UX)
+
+Same on Linux and Windows:
+
+1. **Tab strip:** every restored **live** TERMINALS session opens on the primary
+   **Terminal** tab (`active_view == 0`), even if `projects.yaml` saved a filter
+   tab as `active_tab`. Filter tabs remain in the strip; the user can switch to
+   them after output exists. FILES may keep a restored filter tab.
+2. **Auto-start:** opening/restoring a Project **starts sessions without pressing
+   Start**:
+   - Live Program with a saved `command` → start that process
+   - Live Program with no command → start an interactive shell
+   - FILES Program → begin loading the log file
+3. Empty viewport hints (stopped / empty buffer only) are ASCII and point at the
+   TERMINALS row Start control if a filter tab is somehow still empty — they are
+   not a substitute for auto-start on Project open.
+
+### After Start / Stop
+
+- Manual **Start** on a TERMINALS row still starts saved command / interactive shell
+- **Stop** kills that PTY; Programs with a saved command stay stopped after Stop or
+  process exit (no auto shell respawn)
+- **Refresh** on a FILES row (or File → Reload log) re-reads that path from disk;
+  it is not Follow/tail
 
 While a Project is active, opening, renaming, or closing a file session updates that Project’s store. With no Project active, FILES stay session-only.
 
 ## UI chrome
 
-Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`). FILES rows have Refresh. When a Project is open, its name appears above TERMINALS. TERMINALS supports DnD reorder. Follow is hidden for file sessions. Projects are managed from **File → Projects…**, not the sidebar. See `docs/architecture.md`.
+Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`).
+
+- Section markers are colored discs (`SectionDot`): **accent** for TERMINALS,
+  **include** green for FILES — never Unicode chevrons/dots (Windows tofu).
+- Row status discs use the same colors (TERMINALS: accent when running, muted
+  when stopped; FILES: include).
+- Action icons are **Path** geometry (`TerminalRowIcon`: edit, play/stop,
+  refresh, close). Dialogs use **`AppButton`**, not fluent `Button`.
+- Chrome text uses bundled **Noto Sans**; the log viewport bitmap uses mono
+  (bundled Noto Sans Mono / system Cascadia when available).
+- Inline rename: TERMINALS rows and filter tabs only — **FILES rows cannot be
+  renamed**. Click-away (including empty sidebar space) ends rename.
+- When a Project is open, its name appears above TERMINALS. TERMINALS supports
+  DnD reorder. Follow is hidden for file sessions. Projects are managed from
+  **File → Projects…**, not the sidebar.
+
+See [`docs/architecture.md`](architecture.md),
+[`openspec/specs/terminals/projects/spec.md`](../openspec/specs/terminals/projects/spec.md),
+and [`.cursor/rules/`](../.cursor/rules/).

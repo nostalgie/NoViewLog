@@ -38,12 +38,14 @@ context: |
   Always-on agent constraints (see .cursor/rules/):
   - UI chrome: no Theme.accent borders or accent drop markers
   - Inline rename: square TextInput, not fluent LineEdit
+  - Project open: Terminal tab + auto-start (see project-open-autostart.mdc,
+    docs/terminals.md); do not restore onto an empty filter tab stopped
   - Do not add GitHub Actions unless explicitly requested
 
   Spec domain folders (create on first change in that area):
   - openspec/specs/ui/ — Slint chrome, tabs, sidebar, rename
   - openspec/specs/engine/ — commands, viewport, parsing, PTY
-  - openspec/specs/terminals/ — multi-terminal model
+  - openspec/specs/terminals/ — multi-terminal model, Projects open/restore
 
 rules:
   proposal:

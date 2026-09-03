@@ -13,7 +13,7 @@ use crate::log_view::TERMINAL_TAB_NAME;
 impl Engine {
     /// Complete host startup: CLI launch, last-project restore, or interactive shell.
     ///
-    /// Returns `true` when the last active project was restored (no shell auto-start).
+    /// Returns `true` when the last active project was restored.
     pub fn finish_startup(&mut self, launch: LaunchConfig) -> bool {
         if launch.has_process_launch() {
             self.set_launch(launch);
@@ -168,10 +168,24 @@ impl Engine {
         }
 
         self.terminals = new_sessions;
-        self.active_terminal = 0;
+        // Prefer the Project's active_program among live sessions.
+        let active_prog = self.projects.projects[proj_idx].active_program;
+        if let Some(pos) = self
+            .terminals
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.is_file_session())
+            .nth(active_prog)
+            .map(|(i, _)| i)
+        {
+            self.active_terminal = pos;
+        } else {
+            self.active_terminal = 0;
+        }
         self.active_project = Some(proj_idx);
         self.projects.active_project = proj_idx;
         self.persist_projects_store();
+        self.auto_start_restored_project_sessions();
         self.mark_all_views_dirty();
         self.mark_viewport_dirty();
         self.last_stats_at = None;
@@ -180,6 +194,48 @@ impl Engine {
             self.projects.projects[proj_idx].name
         );
         self.push_event(json!({"type":"status","message": self.status_message}));
+    }
+
+    /// Start every restored session so cold open lands on a live Terminal tab
+    /// without pressing Start. Files begin loading; process launches and blank
+    /// live terminals get a PTY / interactive shell.
+    fn auto_start_restored_project_sessions(&mut self) {
+        let plan: Vec<(String, bool, bool)> = self
+            .terminals
+            .iter()
+            .map(|t| {
+                (
+                    t.id.clone(),
+                    t.is_file_session(),
+                    t.launch.command.is_some(),
+                )
+            })
+            .collect();
+        if plan.is_empty() {
+            return;
+        }
+        let resume_id = self
+            .terminals
+            .get(self.active_terminal)
+            .map(|t| t.id.clone());
+        for (id, is_file, has_command) in plan {
+            self.terminal_switch(&id);
+            if is_file {
+                if let Some(path) = self.active_terminal().launch.log_file.clone() {
+                    self.active_terminal_mut().process_started = true;
+                    self.start_log_file_load(&path);
+                }
+            } else if has_command {
+                self.active_terminal_mut().process_started = true;
+                self.start_launch_process();
+            } else {
+                // Blank live terminal — interactive shell so typing works immediately.
+                self.start_interactive_shell();
+            }
+        }
+        if let Some(id) = resume_id {
+            self.terminal_switch(&id);
+        }
     }
 
     pub(crate) fn project_create(&mut self, name: &str) {
@@ -322,6 +378,12 @@ fn apply_program_to_terminal(term: &mut TerminalState, program: &ProgramConfig) 
     term.running = false;
     term.process_started = false;
     term.exit_code = None;
+    // Live TERMINALS always open on the Terminal tab after restore. Saved
+    // `active_tab` may be a filter tab; cold-open there showed an empty hint
+    // with no Start on the tab itself. FILES keep their restored filter tab.
+    if program.launch.log_file.is_none() {
+        term.active_view = 0;
+    }
 }
 
 fn configure_restored_file_session(term: &mut TerminalState) {
