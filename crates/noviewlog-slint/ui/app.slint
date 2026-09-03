@@ -2588,9 +2588,9 @@ export component AppWindow inherits Window {
 
     // File → Projects overlay (list / create / rename in one popup).
     projects-dlg := PopupWindow {
-        x: (parent.width - 460px) / 2;
+        x: (parent.width - Theme.overlay-width) / 2;
         y: max(48px, (parent.height - 400px) / 2);
-        width: 460px;
+        width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
         projects-panel := ProjectsDialog {
@@ -2611,14 +2611,15 @@ export component AppWindow inherits Window {
     }
 
     edit-launch-dlg := PopupWindow {
-        x: max(16px, (root.width - 440px) / 2);
-        y: max(48px, (root.height - 360px) / 2);
+        x: (parent.width - Theme.overlay-width) / 2;
+        y: max(48px, (parent.height - 360px) / 2);
+        width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
         FormDialogPanel {
             title: "Edit launch";
             ok-text: "Save";
-            panel-min-width: 400px;
+            width: 100%;
             cancelled => { edit-launch-dlg.close(); }
             confirmed => { root.confirm-edit-launch(); }
 
@@ -2646,13 +2647,15 @@ export component AppWindow inherits Window {
 
     // Settings dialog — max scrollback lines.
     settings-dlg := PopupWindow {
-        x: max(16px, (root.width - 400px) / 2);
-        y: max(48px, (root.height - 260px) / 2);
+        x: (parent.width - Theme.overlay-width) / 2;
+        y: max(48px, (parent.height - 260px) / 2);
+        width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
         FormDialogPanel {
             title: "Settings";
             ok-text: "OK";
+            width: 100%;
             cancelled => { root.close-settings(); }
             confirmed => { root.confirm-settings(); }
 
@@ -2685,16 +2688,16 @@ export component AppWindow inherits Window {
     // PopupWindow is lowered into its own component, so `root.width` here is the
     // popup (x ≈ 16px, stuck left). `parent` is AppWindow — center on that.
     about-dlg := PopupWindow {
-        x: (parent.width - 420px) / 2;
+        x: (parent.width - Theme.overlay-width) / 2;
         y: max(48px, (parent.height - 220px) / 2);
-        width: 420px;
+        width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
         FormDialogPanel {
             title: "About";
             ok-text: "OK";
             show-cancel: false;
-            panel-min-width: 380px;
+            width: 100%;
             cancelled => { root.close-about(); }
             confirmed => { root.close-about(); }
 

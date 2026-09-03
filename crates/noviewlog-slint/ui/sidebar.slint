@@ -623,6 +623,7 @@ export component TerminalRowIcon inherits TouchArea {
 
     width: 22px;
     height: 22px;
+    vertical-stretch: 0;
     mouse-cursor: pointer;
     opacity: root.icon-opacity;
 
@@ -651,7 +652,7 @@ export component TerminalRowIcon inherits TouchArea {
             viewbox-y: 0;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 7.5 0.5 L 9.5 2.5 L 3.5 8.5 L 1.5 8.5 L 1.5 6.5 Z";
+            commands: "M 7.5 1.5 L 9.5 3.5 L 3.5 9.5 L 1.5 9.5 L 1.5 7.5 Z";
         }
 
         if root.kind == "play": Path {
@@ -663,7 +664,7 @@ export component TerminalRowIcon inherits TouchArea {
             viewbox-y: 0;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 2 1.5 L 2 8.5 L 8.5 5 Z";
+            commands: "M 1 0.5 L 1 9.5 L 9.5 5 Z";
         }
 
         if root.kind == "stop": Path {
@@ -675,7 +676,7 @@ export component TerminalRowIcon inherits TouchArea {
             viewbox-y: 0;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 2.5 2.5 H 7.5 V 7.5 H 2.5 Z";
+            commands: "M 1.5 1.5 H 8.5 V 8.5 H 1.5 Z";
         }
 
         if root.kind == "close": Path {
@@ -687,7 +688,7 @@ export component TerminalRowIcon inherits TouchArea {
             viewbox-y: 0;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 1.5 1.5 L 8.5 8.5 M 8.5 1.5 L 1.5 8.5";
+            commands: "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
         }
 
         if root.kind == "refresh": Path {
@@ -700,7 +701,7 @@ export component TerminalRowIcon inherits TouchArea {
             viewbox-y: 0;
             viewbox-width: 10;
             viewbox-height: 10;
-            commands: "M 8 2 A 3.5 3.5 0 1 1 2 3.5 M 8 2 L 6 0.5 M 8 2 L 8.8 4.2";
+            commands: "M 8.5 1.5 A 4 4 0 1 1 1.5 3 M 8.5 1.5 L 6.2 0.2 M 8.5 1.5 L 9.3 3.8";
         }
     }
 }
