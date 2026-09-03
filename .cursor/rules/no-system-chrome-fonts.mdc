@@ -5,23 +5,28 @@ alwaysApply: true
 
 # No Unicode chrome icons (mandatory)
 
-Windows system UI fonts (Segoe etc.) **lack** many symbol glyphs. Unicode
-chrome icons (`✎`, `×`, `✕`, `✓`, `❐`, `─`, …) render as **tofu** (empty
-boxes / two vertical rectangles). That is an **icon** problem — not a reason
-to ban readable proportional fonts for labels and buttons.
+Windows fonts and bundled Noto Sans **lack** many symbol glyphs. Unicode
+chrome icons (`✎`, `×`, `✕`, `✓`, `❐`, `─`, `▾`, `▸`, `›`, `●`, `↑`, `↓`,
+`↩`, `＋`, `－`, …) render as **tofu** (empty boxes / two vertical rectangles).
+
+This has already bitten caption buttons, Projects edit/delete, **and**
+TERMINALS/FILES section chevrons. A narrow “grep only ✎×✓” pass is **not**
+enough — any symbol used as an icon must be Path.
 
 Fluent `Button` from `std-widgets.slint` also looks foreign next to Theme
 chrome. Prefer `AppButton`.
 
-This has already bitten caption buttons and Projects edit/delete. Do not
-reintroduce Unicode icon glyphs or fluent `Button`.
-
 ## Icons
 
-- Chrome actions MUST use **Path geometry** (`TerminalRowIcon`, `CaptionButton`,
-  or an inline `Path` with a fixed viewbox).
-- NEVER put symbol glyphs in `Text { text: "✎" }` / `"×"` / `"✓"` for buttons
-  or row actions.
+- Chrome actions MUST use **Path geometry** (`SectionDot`,
+  `TerminalRowIcon`, `CaptionButton`, or an inline `Path` with a fixed
+  viewbox). Status / section markers MUST be a small `Rectangle` with
+  `border-radius` (colored disc) — never Unicode `●` / `▾` / `▸`.
+  TERMINALS markers use `Theme.accent`; FILES use `Theme.include`.
+- NEVER put symbol glyphs in `Text { text: "…" }` for buttons, row actions,
+  section collapse, menu chevrons, find arrows, or filter chip signs.
+- ASCII `+` / `-` in labels is OK (e.g. `"+ Include"`). Prose punctuation
+  (`—`, `…`) in sentences is OK.
 
 ## Text labels and buttons
 
@@ -32,9 +37,7 @@ reintroduce Unicode icon glyphs or fluent `Button`.
   **Noto Sans** (proportional) via Window `default-font-family: "Noto Sans"`
   and `assets/NotoSans-Regular.ttf` / `NotoSans-Bold.ttf` (OFL).
 - NEVER force a **mono** face on chrome (`Noto Sans Mono`, Cascadia Mono/Code,
-  Consolas, `Theme.ui-font` pointing at mono). Mono is for the viewport
-  bitmap only (separate).
-- Do **not** set Window `default-font-family` to a mono family.
+  Consolas). Mono is for the viewport bitmap only (separate).
 
 ## Allowed fluent leftovers
 
@@ -46,7 +49,12 @@ reintroduce Unicode icon glyphs or fluent `Button`.
 - After chrome icon/button/font changes: rebuild
   `cargo build --profile release-dev -p noviewlog-slint` (Windows:
   `.\scripts\run-slint-windows.ps1` or MSVC env + same cargo).
-- Grep for `text: "✎"`, `text: "×"`, `text: "✓"`, and `Button` from
-  `std-widgets` in `crates/noviewlog-slint/ui/` before calling the work done.
-- Grep that chrome is not mono: no `default-font-family: "Noto Sans Mono"` /
-  Cascadia Mono on Window.
+- Do **not** rely on a hand-picked glyph grep. Run:
+
+```
+cargo test -p noviewlog-slint --test chrome_icon_wiring
+cargo test -p noviewlog-slint --test inline_rename_wiring
+```
+
+  `chrome_icon_wiring` fails if any `ui/*.slint` `text: "…"` still contains
+  banned icon codepoints (including `▾`/`▸`).

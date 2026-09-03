@@ -58,6 +58,34 @@ fn files_and_terminals_headers_dismiss_rename() {
 }
 
 #[test]
+fn files_rows_cannot_rename() {
+    let src = app_slint();
+    let files = src.find("for file in root.files-model: TerminalRow").expect("files TerminalRow");
+    let chunk = &src[files..files.saturating_add(1200).min(src.len())];
+    assert!(
+        chunk.contains("can-rename: false"),
+        "FILES TerminalRow must set can-rename: false"
+    );
+    assert!(
+        !chunk.contains("start-terminal-rename(file.id"),
+        "FILES must not wire start-terminal-rename"
+    );
+}
+
+#[test]
+fn terminals_rows_can_rename() {
+    let src = app_slint();
+    let terms = src
+        .find("for term in root.terminals-model: TerminalRow")
+        .expect("terminals TerminalRow");
+    let chunk = &src[terms..terms.saturating_add(1200).min(src.len())];
+    assert!(
+        chunk.contains("can-rename: true") || chunk.contains("start-terminal-rename(term.id"),
+        "TERMINALS rows must allow rename"
+    );
+}
+
+#[test]
 fn terminal_row_keeps_one_title_subtitle_stack() {
     let src = sidebar_slint();
     let idx = src.find("title-slot := Rectangle").expect("title-slot");
