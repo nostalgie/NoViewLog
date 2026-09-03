@@ -218,6 +218,11 @@ impl Engine {
         if !self.has_active_terminal() || self.active_terminal().file_load.is_some() {
             return;
         }
+        // Match-index tabs own the viewport via apply_match_window — sliding the
+        // shared file window causes thrashing/jumps while filters are active.
+        if self.active_view().uses_match_index() {
+            return;
+        }
         if self.active_terminal().pending_file_window.is_some() {
             return;
         }
@@ -527,6 +532,92 @@ impl Engine {
         self.mark_viewport_dirty();
     }
 
+    /// Map a whole-match-index scrollbar offset to a materialized match window + local scroll.
+    ///
+    /// During an in-progress scan the viewport stays empty at scroll 0 (no file-window jumps).
+    pub(crate) fn scroll_match_to_global_offset(&mut self, global_offset: f32) {
+        if !self.has_active_terminal() || !self.active_view().uses_match_index() {
+            return;
+        }
+        if self.active_view().match_scan_pos.is_some() {
+            self.active_terminal_mut().scroll_offset_y = 0.0;
+            self.active_view_mut().match_window_start = 0;
+            return;
+        }
+
+        let total = self.active_view().match_offsets.len();
+        if total == 0 {
+            self.active_terminal_mut().scroll_offset_y = 0.0;
+            self.active_view_mut().match_window_start = 0;
+            self.active_view_mut().set_match_flat_lines(Vec::new());
+            self.mark_viewport_dirty();
+            return;
+        }
+
+        // All matches fit in one window: scrollbar Y is local visual scroll (WRAP-aware),
+        // same coordinate space as wheel / max_scroll_offset / stats_scroll_y.
+        if total <= crate::file_match::MATCH_WINDOW_LINES {
+            if self.active_view().match_window_start != 0
+                || self.active_view().flat_lines.len() != total
+            {
+                self.active_view_mut().match_window_start = 0;
+                self.active_terminal_mut().scroll_offset_y = 0.0;
+                self.apply_match_window();
+            }
+            let max_scroll = self.local_window_max_scroll();
+            self.active_terminal_mut().scroll_offset_y = global_offset.clamp(0.0, max_scroll);
+            self.mark_viewport_dirty();
+            self.last_stats_at = None;
+            return;
+        }
+
+        let stride = self.renderer.metrics().row_stride;
+        let viewport_h = self.viewport_height as f32;
+        let max_scroll = self.max_scroll_offset();
+        let global_offset = global_offset.clamp(0.0, max_scroll);
+
+        let window = crate::file_match::MATCH_WINDOW_LINES;
+        let max_start = total.saturating_sub(window);
+        let target = ((global_offset / stride).floor() as usize).min(total.saturating_sub(1));
+        let near_end = max_scroll <= 0.5
+            || global_offset + viewport_h >= max_scroll
+            || target >= max_start;
+
+        let (new_start, local_raw) = if near_end {
+            let local = (global_offset - max_start as f32 * stride).max(0.0);
+            (max_start, local)
+        } else {
+            let start = self.active_view().match_window_start;
+            let loaded = self.active_view().flat_lines.len();
+            let end = start.saturating_add(loaded);
+            let margin = (loaded / 5).max(1);
+            let comfortably_inside =
+                loaded > 0 && target >= start.saturating_add(margin) && target + margin < end;
+            if comfortably_inside {
+                let local = global_offset - start as f32 * stride;
+                let local_max = self.local_window_max_scroll();
+                self.active_terminal_mut().scroll_offset_y = local.clamp(0.0, local_max);
+                self.mark_viewport_dirty();
+                return;
+            }
+            let new_start = target.saturating_sub(window / 3).min(max_start);
+            let local = (global_offset - new_start as f32 * stride).max(0.0);
+            (new_start, local)
+        };
+
+        self.active_view_mut().match_window_start = new_start;
+        self.active_terminal_mut().scroll_offset_y = local_raw;
+        self.apply_match_window();
+        let local_max = self.local_window_max_scroll();
+        let terminal = self.active_terminal_mut();
+        terminal.scroll_offset_y = if near_end {
+            local_max
+        } else {
+            terminal.scroll_offset_y.clamp(0.0, local_max)
+        };
+        self.mark_viewport_dirty();
+    }
+
     /// Advance whole-file match scan for the active file filter tab.
     pub(crate) fn advance_file_match_scan(&mut self) {
         if !self.has_active_terminal() || !self.active_terminal().is_file_session() {
@@ -578,7 +669,7 @@ impl Engine {
         let filter_engine = crate::core::filter::FilterEngine::new(filters);
 
         let result = {
-            let mut offsets = self.active_view().match_offsets.clone();
+            let mut offsets = std::mem::take(&mut self.active_view_mut().match_offsets);
             let terminal = self.active_terminal_mut();
             let backed = terminal.file_backed.as_mut().unwrap();
             let scan = crate::file_match::scan_match_chunk(
@@ -595,17 +686,18 @@ impl Engine {
 
         match result {
             (Ok((next, done)), offsets) => {
+                let match_count = offsets.len();
                 let view = self.active_view_mut();
                 view.match_offsets = offsets;
                 if done {
                     view.match_scan_pos = None;
                     view.request_match_rebuild();
-                    self.status_message = format!(
-                        "Filter scan complete ({} matches)",
-                        view.match_offsets.len()
-                    );
+                    self.status_message =
+                        format!("Filter scan complete ({match_count} matches)");
                     self.push_event(json!({"type":"status","message": self.status_message}));
                     self.apply_match_window();
+                    self.mark_viewport_dirty();
+                    self.last_stats_at = None;
                 } else {
                     view.match_scan_pos = Some(next);
                     let pct = if file_size == 0 {
@@ -613,23 +705,39 @@ impl Engine {
                     } else {
                         ((next as f32 / file_size as f32) * 100.0) as u32
                     };
-                    self.status_message = format!(
-                        "Scanning filters… {pct}% ({} matches)",
-                        view.match_offsets.len()
-                    );
+                    // Throttle status churn: update every ~5% (same idea as file indexing).
+                    let prev_pct = self
+                        .status_message
+                        .strip_prefix("Scanning filters… ")
+                        .and_then(|rest| rest.split('%').next())
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    if pct >= 99 || pct / 5 > prev_pct / 5 {
+                        self.status_message =
+                            format!("Scanning filters… {pct}% ({match_count} matches)");
+                        self.push_event(json!({"type":"status","message": self.status_message}));
+                        // Repaint centered progress (empty viewport during scan).
+                        self.mark_viewport_dirty();
+                    }
+                    // Host keeps TICK_FAST via host_work_pending() while match_scan_pos is set.
                 }
-                self.mark_viewport_dirty();
-                self.last_stats_at = None;
             }
-            (Err(message), _) => {
+            (Err(message), offsets) => {
+                self.active_view_mut().match_offsets = offsets;
                 self.active_view_mut().match_scan_pos = None;
                 self.status_message = message.clone();
                 self.push_event(json!({"type":"status","message": message}));
+                self.mark_viewport_dirty();
+                self.last_stats_at = None;
             }
         }
     }
 
     /// Materialize a window of match lines into the active view's flat_lines.
+    ///
+    /// `scroll_offset_y` is local within the current match window; global Y is
+    /// `match_window_start * stride + scroll_offset_y` only when paging a large
+    /// match set. When all matches fit in one window, scroll is purely local/visual.
     pub(crate) fn apply_match_window(&mut self) {
         if !self.has_active_terminal() || self.active_terminal().file_backed.is_none() {
             return;
@@ -642,33 +750,93 @@ impl Engine {
         }
 
         let metrics = self.renderer.metrics();
-        let scroll_y = self.active_terminal().scroll_offset_y;
-        let first_match = ((scroll_y / metrics.row_stride).floor() as usize)
-            .saturating_sub(crate::file_match::MATCH_WINDOW_LINES / 4);
+        let stride = metrics.row_stride;
+        let local = self.active_terminal().scroll_offset_y;
+        let prev_start = self.active_view().match_window_start;
+        let loaded = self.active_view().flat_lines.len();
+        let total = self.active_view().match_offsets.len();
+        let window = crate::file_match::MATCH_WINDOW_LINES;
 
-        let (lines, start) = {
-            let offsets = self.active_view().match_offsets.clone();
-            let start = first_match.min(offsets.len());
+        // Small match sets: keep the full list resident and only adjust local scroll.
+        // Re-reading on every wheel tick made scroll feel frozen (hundreds of seeks).
+        if total <= window && loaded == total && prev_start == 0 {
+            let local_max = self.local_window_max_scroll();
+            self.active_terminal_mut().scroll_offset_y = local.clamp(0.0, local_max);
+            return;
+        }
+
+        let global_y = prev_start as f32 * stride + local;
+        let max_start = total.saturating_sub(window);
+        let target = if total == 0 {
+            0
+        } else {
+            ((global_y / stride).floor() as usize).min(total.saturating_sub(1))
+        };
+        let mut start = prev_start.min(max_start);
+        let end = start.saturating_add(loaded.min(window));
+        // Margin must scale with the *loaded* window, not MATCH_WINDOW_LINES — otherwise
+        // small match sets always look like "near the end" and re-read every tick.
+        let margin = (loaded / 5).max(1);
+        let need_recenter = loaded == 0
+            || target < start.saturating_add(margin)
+            || (end > start && target + margin >= end);
+        if !need_recenter {
+            let local_max = self.local_window_max_scroll();
+            self.active_terminal_mut().scroll_offset_y = local.clamp(0.0, local_max);
+            return;
+        }
+        start = target.saturating_sub(window / 4).min(max_start);
+        let start = start.min(total);
+
+        let offsets = std::mem::take(&mut self.active_view_mut().match_offsets);
+        let lines = {
             let terminal = self.active_terminal_mut();
             let backed = terminal.file_backed.as_mut().unwrap();
-            let lines = match crate::file_match::read_match_window(
-                &mut backed.file,
-                &offsets,
-                start,
-                crate::file_match::MATCH_WINDOW_LINES,
-            ) {
-                Ok(lines) => lines,
-                Err(err) => {
-                    self.status_message = err;
-                    return;
-                }
-            };
-            (lines, start)
+            crate::file_match::read_match_window(&mut backed.file, &offsets, start, window)
         };
+        let lines = match lines {
+            Ok(lines) => lines,
+            Err(err) => {
+                self.active_view_mut().match_offsets = offsets;
+                self.status_message = err;
+                return;
+            }
+        };
+        let new_local = (global_y - start as f32 * stride).max(0.0);
+        self.active_view_mut().match_offsets = offsets;
         self.active_view_mut().match_window_start = start;
 
         let flat = crate::core::visible::flat_lines_from_raw_lines(&lines, start as u64);
         self.active_view_mut().set_match_flat_lines(flat);
+        {
+            let local_max = self.local_window_max_scroll();
+            let terminal = self.active_terminal_mut();
+            terminal.scroll_offset_y = new_local.clamp(0.0, local_max);
+            // Match window lines are a different index space than the prior view.
+            terminal.selection = None;
+        }
         self.mark_viewport_dirty();
+    }
+
+    /// After filter/severity invalidate on a file session: empty viewport + scroll 0.
+    pub(crate) fn reset_file_match_viewport(&mut self) {
+        if !self.has_active_terminal() || !self.active_terminal().is_file_session() {
+            return;
+        }
+        if !self.active_view().uses_match_index() {
+            return;
+        }
+        // Empty until scan finishes (rebuild_if_needed skips while match_scan_pos is set).
+        self.active_view_mut().clear_flat_lines();
+        {
+            let terminal = self.active_terminal_mut();
+            terminal.scroll_offset_y = 0.0;
+            // Stale selection indices point into the previous (unfiltered) window.
+            terminal.selection = None;
+        }
+        self.status_message = "Scanning filters… 0% (0 matches)".to_string();
+        self.push_event(json!({"type":"status","message": self.status_message}));
+        self.mark_viewport_dirty();
+        self.last_stats_at = None;
     }
 }

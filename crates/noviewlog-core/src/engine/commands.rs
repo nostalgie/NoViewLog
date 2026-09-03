@@ -283,6 +283,8 @@ impl Engine {
                     // The Terminal tab has no filters.
                 } else {
                     self.active_view_mut().clear_filters();
+                    self.reset_file_match_viewport();
+                    self.sync_active_project_from_terminals();
                 }
             }
             Command::FilterToggle { id, enabled } => self.filter_toggle(&id, enabled),
@@ -294,6 +296,7 @@ impl Engine {
                 } else {
                     self.active_view_mut()
                         .set_filters(filters.into_iter().map(compile_filter).collect());
+                    self.reset_file_match_viewport();
                     self.sync_active_project_from_terminals();
                 }
             }
@@ -301,7 +304,11 @@ impl Engine {
                 if self.active_terminal().is_file_session()
                     && self.active_terminal().file_backed.is_some()
                 {
-                    self.scroll_file_to_global_offset(offset);
+                    if self.active_view().uses_match_index() {
+                        self.scroll_match_to_global_offset(offset);
+                    } else {
+                        self.scroll_file_to_global_offset(offset);
+                    }
                 } else {
                     let max_scroll = self.max_scroll_offset();
                     self.active_terminal_mut().scroll_offset_y =
@@ -422,6 +429,7 @@ impl Engine {
                     return Err(format!("unknown severity mode: {mode}"));
                 };
                 self.active_view_mut().set_severity_filter(parsed);
+                self.reset_file_match_viewport();
                 self.last_stats_at = None;
                 self.mark_viewport_dirty();
             }

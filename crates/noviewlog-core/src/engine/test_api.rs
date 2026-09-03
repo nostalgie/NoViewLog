@@ -186,6 +186,16 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn set_selection_for_test(&mut self, sel: crate::viewport_layout::TextSelection) {
+        self.active_terminal_mut().selection = Some(sel);
+    }
+
+    #[cfg(test)]
+    pub fn host_work_pending_for_test(&self) -> bool {
+        self.host_work_pending()
+    }
+
+    #[cfg(test)]
     pub fn scroll_x_for_test(&self) -> f32 {
         self.active_terminal().scroll_x
     }
@@ -300,6 +310,46 @@ impl Engine {
     #[cfg(test)]
     pub fn file_backed_for_test(&self) -> bool {
         self.has_active_terminal() && self.active_terminal().file_backed.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn match_scan_pos_for_test(&self) -> Option<u64> {
+        self.active_view().match_scan_pos
+    }
+
+    #[cfg(test)]
+    pub fn match_offsets_len_for_test(&self) -> usize {
+        self.active_view().match_offsets.len()
+    }
+
+    #[cfg(test)]
+    pub fn flat_lines_len_for_test(&self) -> usize {
+        self.active_view().flat_lines.len()
+    }
+
+    #[cfg(test)]
+    pub fn flat_line_texts_for_test(&self) -> Vec<String> {
+        self.active_view()
+            .flat_lines
+            .iter()
+            .map(|l| l.raw.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn uses_match_index_for_test(&self) -> bool {
+        self.active_view().uses_match_index()
+    }
+
+    #[cfg(test)]
+    pub fn finish_file_match_scan_for_test(&mut self) {
+        for _ in 0..100_000 {
+            if self.active_view().match_scan_pos.is_none() {
+                break;
+            }
+            self.advance_file_match_scan();
+        }
+        let _ = self.rebuild_if_needed();
     }
 
     #[cfg(test)]

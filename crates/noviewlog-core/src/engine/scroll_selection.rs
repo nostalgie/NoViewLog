@@ -51,7 +51,11 @@ impl Engine {
         self.active_view_mut().auto_follow = false;
         self.last_stats_at = None;
         if self.active_terminal().file_backed.is_some() {
-            self.request_file_window_at(0, 0.0);
+            if self.active_view().uses_match_index() {
+                self.scroll_match_to_global_offset(0.0);
+            } else {
+                self.request_file_window_at(0, 0.0);
+            }
         } else {
             self.active_terminal_mut().scroll_offset_y = 0.0;
             self.materialize_live_terminal_tab();
@@ -62,7 +66,11 @@ impl Engine {
     pub(crate) fn scroll_to_end(&mut self) {
         if self.active_terminal().file_backed.is_some() {
             let max = self.max_scroll_offset();
-            self.scroll_file_to_global_offset(max);
+            if self.active_view().uses_match_index() {
+                self.scroll_match_to_global_offset(max);
+            } else {
+                self.scroll_file_to_global_offset(max);
+            }
             self.last_stats_at = None;
             self.mark_viewport_dirty();
             return;
@@ -122,13 +130,29 @@ impl Engine {
         if self.has_active_terminal() {
             let terminal = self.active_terminal();
             let view = terminal.active_view();
-            if terminal.is_file_session()
-                && view.uses_match_index()
-                && view.match_scan_pos.is_none()
-            {
+            // Match-index tabs: never use full-file height.
+            if terminal.is_file_session() && view.uses_match_index() {
+                if view.match_scan_pos.is_some() {
+                    // Mid-scan: empty viewport; keep scrollbar range at partial match count.
+                    let total = view.match_offsets.len();
+                    let content_h = total as f32 * stride;
+                    return (content_h - self.viewport_height as f32).max(0.0);
+                }
                 let total = view.match_offsets.len();
-                let content_h = total as f32 * stride;
-                return (content_h - self.viewport_height as f32).max(0.0);
+                if total == 0 {
+                    return 0.0;
+                }
+                // Entire result set fits in one window: scrollbar must use the same
+                // WRAP-aware visual range as wheel (ScrollLines → local_window_max_scroll).
+                // Using match_count * stride here made the thumb nearly inert while wheel worked.
+                if total <= crate::file_match::MATCH_WINDOW_LINES {
+                    return self.local_window_max_scroll();
+                }
+                // Huge match sets: ordinal scrollbar, never below the resident window's visual max.
+                let ordinal = (total as f32 * stride - self.viewport_height as f32).max(0.0);
+                let local = self.local_window_max_scroll();
+                let global_floor = view.match_window_start as f32 * stride + local;
+                return ordinal.max(global_floor);
             }
             if let Some(backed) = &terminal.file_backed {
                 // Whole-file scrollbar range (1 file line ≈ 1 visual row for unread spans).
@@ -235,8 +259,14 @@ impl Engine {
             return local.clamp(0.0, max_y);
         }
         let view = terminal.active_view();
-        let y = if view.uses_match_index() && view.match_scan_pos.is_none() {
-            view.match_window_start as f32 * stride + local
+        let y = if view.uses_match_index() {
+            // Small match sets: local visual Y only (match_window_start stays 0).
+            // Large sets: ordinal base + local within the materialized window.
+            if view.match_offsets.len() <= crate::file_match::MATCH_WINDOW_LINES {
+                local
+            } else {
+                view.match_window_start as f32 * stride + local
+            }
         } else if terminal.file_backed.is_some() {
             terminal.buffer_line_start as f32 * stride + local
         } else {
@@ -260,6 +290,29 @@ impl Engine {
 
         if terminal.is_file_session() {
             if let Some(backed) = &terminal.file_backed {
+                let view = terminal.active_view();
+                // Filtered match-index tabs report match ordinals, not file line numbers.
+                if view.uses_match_index() && view.match_scan_pos.is_none() {
+                    let total = view.match_offsets.len() as u64;
+                    if total == 0 {
+                        return (0, 0);
+                    }
+                    let local_y = terminal.scroll_offset_y;
+                    let index =
+                        view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
+                    let bottom_visual = ((local_y + viewport_h - 0.01) / stride)
+                        .floor()
+                        .max(0.0) as usize;
+                    let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
+                    let flat = index
+                        .flat_at_visual_row(bottom_visual)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let cur = (view.match_window_start as u64 + flat as u64 + 1).min(total.max(1));
+                    let at_eof = local_y + 1.0 >= self.local_window_max_scroll() || total <= 1;
+                    let cur = if at_eof { total } else { cur };
+                    return (cur, total);
+                }
                 let total = backed.index.total_lines();
                 if total == 0 {
                     return (0, 0);
@@ -380,6 +433,7 @@ impl Engine {
             metrics.cell_width,
         );
         if visual.is_empty() {
+            self.active_terminal_mut().selection = None;
             return;
         }
         let terminal = self.active_terminal();
