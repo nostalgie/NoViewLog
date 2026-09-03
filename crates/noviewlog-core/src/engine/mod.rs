@@ -39,6 +39,14 @@ pub const MAX_RECORDS: usize = DEFAULT_MAX_SCROLLBACK_LINES;
 const PENDING_IDLE_FLUSH: Duration = Duration::from_millis(120);
 /// Terminal tab block caret blink half-period (~classic terminal rate).
 pub const CARET_BLINK_PERIOD: Duration = Duration::from_millis(530);
+
+/// Empty Terminal-tab hint when the process session is stopped (ASCII only).
+pub const EMPTY_TERMINAL_TAB_STOPPED: &str =
+    "Type to open a shell — or use Start for the saved command";
+/// Empty filter-tab hint when the process session is stopped (ASCII only).
+/// Start is the TERMINALS row play control — not on the filter tab itself.
+pub const EMPTY_FILTER_TAB_STOPPED: &str =
+    "Session stopped — use Start on the TERMINALS row";
 /// Minimum PTY/emulator column width.
 ///
 /// Soft-wrap is display-only and always uses the real viewport width. The PTY
@@ -738,9 +746,9 @@ impl Engine {
             {
                 "No matching lines"
             } else if terminal.active_view == 0 {
-                "Type to open a shell — or ▶ Start for the saved command"
+                EMPTY_TERMINAL_TAB_STOPPED
             } else {
-                "Press ▶ Start to run"
+                EMPTY_FILTER_TAB_STOPPED
             };
             self.renderer.render_center_message(out, width, height, msg)?;
             self.viewport_dirty = false;

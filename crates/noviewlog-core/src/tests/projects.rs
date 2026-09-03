@@ -15,7 +15,7 @@ fn engine_isolated() -> Engine {
 }
 
 #[test]
-fn project_open_restores_stopped_terminals_and_tabs() {
+fn project_open_selects_terminal_tab_and_auto_starts() {
     let mut engine = engine_isolated();
     engine.projects = ProjectsStore {
         projects: vec![ProjectConfig {
@@ -89,14 +89,34 @@ fn project_open_restores_stopped_terminals_and_tabs() {
 
     let live = engine.terminals_for_test();
     assert_eq!(live.len(), 2);
-    assert!(!live[0].2);
-    assert!(!live[1].2);
+    // echo/sleep may already have exited; auto-start is tracked via process_started.
     assert_eq!(live[0].1, "API");
     assert_eq!(live[1].1, "Worker");
     assert_eq!(engine.tab_configs_for_test().len(), 2);
-    assert_eq!(engine.active_tab_index_for_test(), 1);
-    assert_eq!(engine.active_view_name_for_test(), "Errors");
+    // Live TERMINALS restore always lands on Terminal (view 0), even when the
+    // saved workspace had a filter tab active.
+    assert_eq!(engine.active_tab_index_for_test(), 0);
+    assert_eq!(engine.active_view_name_for_test(), "Terminal");
+    assert!(
+        engine.process_started_for_test(),
+        "project open auto-starts the active process session"
+    );
     assert!(engine.active_project.is_some());
+}
+
+#[test]
+fn stopped_empty_viewport_messages_are_ascii_without_play_glyph() {
+    use crate::engine::{EMPTY_FILTER_TAB_STOPPED, EMPTY_TERMINAL_TAB_STOPPED};
+    for msg in [EMPTY_TERMINAL_TAB_STOPPED, EMPTY_FILTER_TAB_STOPPED] {
+        assert!(
+            !msg.contains('▶') && !msg.contains("Press ▶"),
+            "empty hint must not use play glyph: {msg}"
+        );
+    }
+    assert!(
+        EMPTY_FILTER_TAB_STOPPED.contains("TERMINALS"),
+        "filter-tab hint must point at the TERMINALS Start control"
+    );
 }
 
 #[test]
@@ -126,9 +146,13 @@ fn project_create_starts_empty_and_does_not_copy_previous() {
     assert_eq!(engine.active_project, Some(0));
 
     let live = engine.terminals_for_test();
-    assert_eq!(live.len(), 1, "empty Project opens as one stopped Terminal");
-    assert!(!live[0].2);
+    assert_eq!(live.len(), 1, "empty Project opens as one Terminal");
     assert_ne!(live[0].1, "One");
+    // Blank live terminal auto-starts an interactive shell.
+    assert!(
+        live[0].2 || engine.has_pty_for_test(&live[0].0),
+        "empty Project Terminal should be running without Start"
+    );
     assert!(
         engine
             .status_message_for_test()
@@ -237,7 +261,7 @@ fn sample_project(id: &str, name: &str) -> ProjectConfig {
 }
 
 #[test]
-fn startup_restores_last_project_stopped() {
+fn startup_restores_last_project_and_auto_starts() {
     let mut engine = engine_isolated();
     engine.projects = ProjectsStore {
         projects: vec![
@@ -251,15 +275,15 @@ fn startup_restores_last_project_stopped() {
     assert!(restored);
     assert_eq!(engine.active_project, Some(1));
     assert_eq!(engine.active_terminal_index_for_test(), 0);
+    assert_eq!(engine.active_tab_index_for_test(), 0);
 
     let live = engine.terminals_for_test();
     assert_eq!(live.len(), 2);
-    assert!(!live[0].2 && !live[1].2);
     assert_eq!(live[0].1, "API");
     assert_eq!(live[1].1, "Worker");
     assert!(
-        !engine.has_pty_for_test(&live[0].0) && !engine.has_pty_for_test(&live[1].0),
-        "restored programs must stay stopped"
+        engine.process_started_for_test(),
+        "restored programs auto-start without pressing Start"
     );
     assert!(
         engine

@@ -12,8 +12,8 @@ repository’s tech stack.
 |-----|----------|
 | [`README.md`](README.md) | Users: run, Windows build, filters |
 | [`docs/architecture.md`](docs/architecture.md) | Engine ↔ UI boundary |
-| [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs model |
-| [`.cursor/rules/`](.cursor/rules/) | Enforced agent details (UI chrome, build) |
+| [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs / **Project open + auto-start** |
+| [`.cursor/rules/`](.cursor/rules/) | Enforced agent details (UI chrome, build, project open) |
 | [`openspec/specs/`](openspec/specs/) | Living behavior specs (grow via archived changes) |
 | [`openspec/changes/`](openspec/changes/) | Active change proposals and artifacts |
 
@@ -118,17 +118,20 @@ webpack, or vite unless the user explicitly asks. This is not a web app.
   border) — not fluent `LineEdit`. Click-away (including empty sidebar space
   under FILES) MUST end rename; mouse leave MUST NOT. Spec:
   [`openspec/specs/ui/inline-rename/spec.md`](openspec/specs/ui/inline-rename/spec.md).
-- Chrome icons: **Path** geometry only (never Unicode symbols in `Text` —
-  including section `▾`/`▸`, menu chevrons, status `●`, find arrows). Guard:
+- Chrome icons: **Path** geometry or colored discs (`SectionDot`) — never
+  Unicode symbols in `Text`. Guard:
   `cargo test -p noviewlog-slint --test chrome_icon_wiring`.
 - Dialog buttons: **`AppButton`** (Theme + `TouchArea`) — never fluent
-  `Button` from `std-widgets`. Chrome labels/captions use bundled
-  **Noto Sans** (proportional); never mono (`Noto Sans Mono` / Cascadia)
-  on Window `default-font-family`.
-
+  `Button` from `std-widgets`. Chrome labels use bundled **Noto Sans**
+  (proportional); never mono on Window `default-font-family`.
+- **Project open:** Terminal tab + auto-start — see
+  [`docs/terminals.md`](docs/terminals.md) and
+  [`.cursor/rules/project-open-autostart.mdc`](.cursor/rules/project-open-autostart.mdc).
+- FILES rows: no inline rename (`can-rename: false`).
 
 Details: [`.cursor/rules/no-blue-chrome-borders.mdc`](.cursor/rules/no-blue-chrome-borders.mdc),
-[`.cursor/rules/no-system-chrome-fonts.mdc`](.cursor/rules/no-system-chrome-fonts.mdc).
+[`.cursor/rules/no-system-chrome-fonts.mdc`](.cursor/rules/no-system-chrome-fonts.mdc),
+[`.cursor/rules/inline-rename-dismiss.mdc`](.cursor/rules/inline-rename-dismiss.mdc).
 
 ## Safety
 

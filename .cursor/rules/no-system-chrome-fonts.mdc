@@ -10,8 +10,9 @@ chrome icons (`✎`, `×`, `✕`, `✓`, `❐`, `─`, `▾`, `▸`, `›`, `●
 `↩`, `＋`, `－`, …) render as **tofu** (empty boxes / two vertical rectangles).
 
 This has already bitten caption buttons, Projects edit/delete, **and**
-TERMINALS/FILES section chevrons. A narrow “grep only ✎×✓” pass is **not**
-enough — any symbol used as an icon must be Path.
+TERMINALS/FILES section markers (Unicode chevrons tofu’d). A narrow
+“grep only ✎×✓” pass is **not** enough — any symbol used as an icon must be
+Path or a Theme disc.
 
 Fluent `Button` from `std-widgets.slint` also looks foreign next to Theme
 chrome. Prefer `AppButton`.

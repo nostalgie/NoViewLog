@@ -13,17 +13,23 @@ work, but they are not the main development focus yet.
 ### Sessions
 
 - Launch a command through a PTY (`bash scripts/run-slint.sh -- …`) or open a log file (CLI path, `--file` / `-f`, or File → Open log file)
-- Run multiple independent terminals; switching the viewport does not stop other sessions
+- Run multiple independent terminals under **TERMINALS**; log files under **FILES** — switching the viewport does not stop other live sessions
 - Type into a live process on the Terminal tab; copy and paste (including middle-click paste)
-- Open a log in a dedicated view-only file terminal (no PTY or stdin); reopening the same path switches to it and reloads
-- Sidebar: add or close terminals (the first stays), rename, and drag-reorder; the working directory updates via OSC 7
+- Open a log in a dedicated view-only file session (no PTY or stdin); reopening the same path switches to it and reloads
+- Sidebar: add or close sessions, rename **TERMINALS** rows (FILES are not renamable), Start/Stop or Refresh, drag-reorder TERMINALS; working directory updates via OSC 7
+
+### Projects
+
+- **File → Projects…** — create, open, rename, or delete Projects (Programs with launch + filter tabs)
+- Opening a Project (or restoring the last Project on startup) replaces TERMINALS and FILES, selects the **Terminal** tab on each live session, and **auto-starts** processes / shells / file loads (no extra Start click)
+- See [`docs/terminals.md`](docs/terminals.md) (Persistence → Project open / cold start)
 
 ### Tabs and filters
 
-- Each terminal has a pinned Terminal tab (not filter-editable) plus optional filter tabs
+- Each session has a pinned primary tab (**Terminal** for live sessions, file basename for FILES) plus optional filter tabs
 - Include and exclude rules (literal or regex): add, toggle, edit, and remove; the draft highlights matches while you type
 - After include/exclude, a per-tab severity mode: All, Errors, Warnings, Info, Debug, or Unleveled
-- Add, close, restore the last closed tab, rename, and drag-reorder filter tabs (the Terminal tab stays at index 0)
+- Add, close, restore the last closed tab, rename, and drag-reorder filter tabs (the primary tab stays at index 0)
 
 ### Find and viewport
 
@@ -36,7 +42,8 @@ work, but they are not the main development focus yet.
 
 ### Config
 
-- User config: `~/.config/noviewlog/config.yaml`
+- User config: `~/.config/noviewlog/config.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`)
+- Projects store: `~/.config/noviewlog/projects.yaml`
 - Settings: maximum scrollback lines
 - Bundled filter presets in [`presets/defaults.yaml`](presets/defaults.yaml)
   (`node-dev`, `node-errors`, `php-dev`, `php-errors`, `python-dev`,
@@ -74,6 +81,8 @@ See [`docs/terminals.md`](docs/terminals.md) and
 The bundled presets live in [`presets/defaults.yaml`](presets/defaults.yaml)
 (default `node-dev`). User configuration is stored in
 `~/.config/noviewlog/config.yaml` — add or override entries under `presets:`.
+Projects live in `~/.config/noviewlog/projects.yaml` (see
+[`docs/terminals.md`](docs/terminals.md)).
 
 ## Run (Windows)
 
@@ -134,6 +143,7 @@ target machine and run `NoViewLog.exe`.
 Do **not** use the Linux `run-slint.sh` / fontconfig `.deps` helpers on Windows.
 
 User config on Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`.
+Projects: `%USERPROFILE%\.config\noviewlog\projects.yaml`.
 
 ## Other platforms (best-effort)
 
@@ -143,16 +153,22 @@ macOS and other OSes may work but are not actively tested.
 
 ```bash
 cargo test -p noviewlog-core --lib
+cargo test -p noviewlog-slint --lib --test inline_rename_wiring --test chrome_icon_wiring
 ```
+
+On Windows CI (`.github/workflows/windows-slint.yml`) the same core/Slint tests run,
+plus `cargo build --profile release-dev -p noviewlog-slint`.
 
 ## Architecture
 
 | Path | Role |
 |------|------|
-| [`crates/noviewlog-core/`](crates/noviewlog-core/) | Engine: PTY, filters, buffer, fontdue viewport |
+| [`crates/noviewlog-core/`](crates/noviewlog-core/) | Engine: PTY, filters, buffer, fontdue viewport, Projects |
 | [`crates/noviewlog-slint/`](crates/noviewlog-slint/) | Slint desktop UI |
 | [`docs/architecture.md`](docs/architecture.md) | Engine ↔ UI boundary (commands, stats, paint) |
+| [`docs/terminals.md`](docs/terminals.md) | TERMINALS / FILES / Projects open + auto-start |
 | [`presets/`](presets/) | Bundled filter presets |
+| [`assets/`](assets/) | App icon + bundled Noto Sans (UI) / Noto Sans Mono (viewport) |
 
 ## Filter logic
 

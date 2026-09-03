@@ -1,0 +1,23 @@
+---
+description: Project open — Terminal tab + auto-start (Linux/Windows)
+alwaysApply: true
+---
+
+# Project open / cold start (mandatory)
+
+Living docs: [`docs/terminals.md`](../../docs/terminals.md) (Persistence →
+Project open / cold start),
+[`openspec/specs/terminals/projects/spec.md`](../../openspec/specs/terminals/projects/spec.md).
+
+When opening or restoring a Project (File → Projects or last Project on
+startup), **same on Linux and Windows**:
+
+1. **Terminal tab** — every restored **live** TERMINALS session selects the
+   primary Terminal tab (`active_view == 0`), even if YAML saved a filter tab.
+   Do **not** leave the user on an empty filter tab after open.
+2. **Auto-start** — start without pressing Start: saved `command` → process;
+   no command → interactive shell; FILES → begin load.
+3. Empty viewport “Press Start” hints are fallback copy only, not the open path.
+
+Do not “fix” Project open by restoring the last filter tab or leaving
+sessions stopped for the user to click Start.
