@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::process::Stdio;
 use std::rc::Rc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
@@ -121,6 +122,7 @@ pub(crate) fn install(
 
     {
         let ui_open = ui.as_weak();
+        #[cfg(target_os = "linux")]
         let pending_open_url = pending_open_url.clone();
         ui.on_open_url(move |url| {
             let url = url.to_string();

@@ -509,3 +509,67 @@ fn follow_live_line_counter_grows_past_scrollback_cap() {
     );
 }
 
+#[test]
+fn selection_materializes_live_grid_under_follow() {
+    let mut engine = Engine::new();
+    engine
+        .send_command(Command::Resize {
+            width: 800,
+            height: 400,
+        })
+        .expect("resize");
+    engine.mark_running_for_test();
+    engine.ensure_live_screen_for_test();
+    {
+        let term = engine.active_terminal_mut();
+        term.ingest.feed(
+            b"hello selection marker line here\r\n",
+            &mut term.buffer,
+            &mut term.parser,
+        );
+    }
+    assert!(engine.auto_follow_for_test());
+    assert_eq!(
+        engine.view_flat_line_count_for_test(0),
+        Some(0),
+        "live grid must not patch flat_lines while Follow paints the VT screen"
+    );
+
+    engine
+        .send_command(Command::SelectionAt {
+            x: 80.0,
+            y: 20.0,
+            extend: false,
+            click_count: 1,
+        })
+        .expect("selection down");
+    assert!(!engine.auto_follow_for_test());
+    assert!(
+        engine.view_flat_line_count_for_test(0).unwrap_or(0) > 0,
+        "click must materialize live screen into flat_lines"
+    );
+
+    let stride = engine.viewport_row_stride_for_test();
+    let scroll = engine.scroll_offset_y_for_test();
+    let idx = engine
+        .flat_line_texts_for_test()
+        .iter()
+        .position(|l| l.contains("selection marker"))
+        .expect("materialized line with marker");
+    let y = idx as f32 * stride - scroll + stride * 0.5;
+
+    engine
+        .send_command(Command::SelectionAt {
+            x: 120.0,
+            y,
+            extend: false,
+            click_count: 2,
+        })
+        .expect("word select");
+    let text = engine.selection_text_for_test().unwrap_or_default();
+    assert!(
+        text.contains("selection"),
+        "expected word selection, got {text:?}"
+    );
+}
+
