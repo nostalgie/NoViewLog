@@ -81,7 +81,7 @@ Publish / fat LTO: `cargo build --release -p noviewlog-slint` or
 `bash scripts/publish-slint-windows.sh` (native Windows MSVC host only).
 
 CI: `.github/workflows/windows-slint.yml` runs `cargo test -p noviewlog-core --lib`,
-`cargo test -p noviewlog-slint --lib --test inline_rename_wiring`, and
+`cargo test -p noviewlog-slint --lib --test inline_rename_wiring --test chrome_icon_wiring`, and
 `cargo build --profile release-dev -p noviewlog-slint` on `windows-latest`.
 
 When touching engine / parser / filters:
@@ -118,7 +118,9 @@ webpack, or vite unless the user explicitly asks. This is not a web app.
   border) — not fluent `LineEdit`. Click-away (including empty sidebar space
   under FILES) MUST end rename; mouse leave MUST NOT. Spec:
   [`openspec/specs/ui/inline-rename/spec.md`](openspec/specs/ui/inline-rename/spec.md).
-- Chrome icons: **Path** geometry only (never Unicode `✎`/`×`/`✓` in `Text`).
+- Chrome icons: **Path** geometry only (never Unicode symbols in `Text` —
+  including section `▾`/`▸`, menu chevrons, status `●`, find arrows). Guard:
+  `cargo test -p noviewlog-slint --test chrome_icon_wiring`.
 - Dialog buttons: **`AppButton`** (Theme + `TouchArea`) — never fluent
   `Button` from `std-widgets`. Chrome labels/captions use bundled
   **Noto Sans** (proportional); never mono (`Noto Sans Mono` / Cascadia)

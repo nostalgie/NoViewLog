@@ -1,6 +1,8 @@
 ## Purpose
 
-Inline rename for TERMINALS rows, FILES rows, and filter tabs. Same behavior on Linux and Windows. Click-away is defined by hit target, not by a list of widgets.
+Inline rename for TERMINALS rows and filter tabs. FILES rows do **not** support
+inline rename. Same dismiss behavior on Linux and Windows. Click-away is defined
+by hit target, not by a list of widgets.
 
 ## Requirements
 
@@ -51,7 +53,18 @@ Enter SHALL commit. Escape SHALL cancel. Real focus loss (viewport or another wi
 
 #### Scenario: Subtitle does not jump
 
-- **GIVEN** a TERMINALS or FILES row shows a title and a path subtitle
+- **GIVEN** a TERMINALS row shows a title and a path subtitle
 - **WHEN** inline rename starts
 - **THEN** the subtitle stays on the same baseline (fixed title-line height; action icons keep their layout slot)
+
+### Requirement: FILES rows are not renamable
+
+Inline rename SHALL apply to TERMINALS rows only. Double-click (and any rename
+entry point) on a FILES row SHALL NOT start rename.
+
+#### Scenario: Double-click FILES row
+
+- **GIVEN** a FILES row is listed
+- **WHEN** the user double-clicks the row title
+- **THEN** rename does not open
 

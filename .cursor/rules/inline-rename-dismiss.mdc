@@ -8,6 +8,9 @@ alwaysApply: true
 Living spec: [`openspec/specs/ui/inline-rename/spec.md`](../../openspec/specs/ui/inline-rename/spec.md).
 Rust contract + tests: [`crates/noviewlog-slint/src/rename_chrome.rs`](../../crates/noviewlog-slint/src/rename_chrome.rs).
 
+Inline rename applies to **TERMINALS rows and tabs** only — FILES rows MUST set
+`can-rename: false` and MUST NOT wire `start-terminal-rename`.
+
 ## MUST dismiss
 
 Any **pointer-down / click** outside the active rename `TextInput` ends rename

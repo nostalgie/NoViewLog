@@ -633,6 +633,22 @@ export component FilterRow inherits Rectangle {
     }
 }
 
+// TERMINALS/FILES section marker — filled disc (never Unicode ● / ▾/▸).
+// Collapse still toggles via the header TouchArea; color identifies the section.
+export component SectionDot inherits Rectangle {
+    in property <color> fill-color: Theme.text-muted;
+    /// Dim slightly when the section is collapsed.
+    in property <bool> expanded: true;
+
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.fill-color;
+    opacity: root.expanded ? 1.0 : 0.45;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+}
+
 // Root is TouchArea (like TabChip) so double-clicked can start rename without
 // destroying the gesture target mid-Released (a child `if !renaming: TouchArea`
 // was torn down inside double-clicked and the rename UI never stuck).
@@ -756,6 +772,10 @@ export component TerminalRow inherits TouchArea {
     in property <bool> dim-as-drag-source: false;
     in property <bool> renaming: false;
     in property <string> rename-text: "";
+    // False for FILES rows — inline rename is TERMINALS-only.
+    in property <bool> can-rename: true;
+    // Row status disc — terminals use accent/muted; files use a distinct section color.
+    in property <color> status-dot-color: Theme.text-muted;
     // Parent wires activated (not TouchArea.clicked) so drag can suppress select.
     callback activated();
     callback close-clicked();
@@ -809,7 +829,7 @@ export component TerminalRow inherits TouchArea {
     }
 
     double-clicked => {
-        if (!root.renaming && !root.reorder-dragging) {
+        if (!root.renaming && root.can-rename && !root.reorder-dragging) {
             root.skip-next-activated = true;
             root.rename-requested();
         }
@@ -913,21 +933,19 @@ export component TerminalRow inherits TouchArea {
         spacing: 8px;
         alignment: stretch;
 
-        // Fixed-size status glyph, vertically centered (do not use layout
-        // alignment:center on the row — it blew up ● and collapsed the title).
+        // Fixed-size status disc (never Unicode ● — tofu on Noto Sans).
         VerticalLayout {
             width: 12px;
             horizontal-stretch: 0;
             vertical-stretch: 1;
             alignment: center;
-            Text {
-                text: "●";
-                color: root.running ? Theme.accent : Theme.text-muted;
-                font-size: 10px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-                width: 12px;
-                height: 12px;
+            Rectangle {
+                width: 6px;
+                height: 6px;
+                border-radius: 3px;
+                background: root.status-dot-color;
+                horizontal-stretch: 0;
+                vertical-stretch: 0;
             }
         }
 
