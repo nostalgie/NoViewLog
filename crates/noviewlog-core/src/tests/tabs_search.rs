@@ -521,7 +521,7 @@ fn search_goto_advances_match_and_dirties_viewport() {
     engine
         .send_command_json(r#"{"cmd":"resize","width":800,"height":400}"#)
         .expect("resize");
-    // Clear the auto-started shell viewport dirtiness so needs_render tracks search_goto.
+    // Clear initial viewport dirtiness so needs_render tracks search_goto.
     let mut rgba = vec![0u8; 800 * 400 * 4];
     let _ = engine.render(800, 400, &mut rgba);
     assert!(!engine.needs_render());

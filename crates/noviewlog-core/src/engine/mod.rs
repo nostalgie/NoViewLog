@@ -120,7 +120,8 @@ pub struct Engine {
     pub(crate) last_viewport_paint_at: Option<Instant>,
     /// Last `poll_pty` (ingest). Host must not busy-wake the reader within the paint interval.
     pub(crate) last_pty_poll_at: Option<Instant>,
-    /// When true, the first tick auto-starts the active program (CLI launch only).
+    /// When true, the first tick auto-starts the active program.
+    /// CLI launch only — never set for Project open / last-Project restore.
     pub(crate) auto_start_launch: bool,
     /// Terminal tab block-caret blink: visible when true; toggled on [`CARET_BLINK_PERIOD`].
     pub(crate) caret_blink_on: bool,
@@ -170,9 +171,9 @@ impl Engine {
 
         let projects = load_projects_store();
 
-        // Boot terminal is replaced by [`Self::finish_startup`] (CLI launch, project
-        // restore, or interactive shell). No PTY here so a leftover boot-shell Exit
-        // cannot steal the session.
+        // Boot terminal is replaced by [`Self::finish_startup`] (CLI launch or
+        // project restore). No PTY here so a leftover boot-shell Exit cannot
+        // steal the session. Project restore leaves Programs stopped.
         Self {
             terminals: vec![terminal],
             active_terminal: 0,

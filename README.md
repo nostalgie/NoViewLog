@@ -22,7 +22,7 @@ supported. macOS and other OSes are best-effort.
 ### Projects
 
 - **File → Projects…** — create, open, rename, or delete Projects (Programs with launch + filter tabs)
-- Opening a Project (or restoring the last Project on startup) replaces TERMINALS and FILES, selects the **Terminal** tab on each live session, and **auto-starts** processes / shells / file loads (no extra Start click)
+- Opening a Project (or restoring the last Project on startup) replaces TERMINALS and FILES, selects the **Terminal** tab on each live session, and leaves Programs **stopped** until Start (FILES may begin load)
 - On Windows, Edit Launch can enable **WSL** so a Program’s command (or an empty-command bash) runs inside a distro
 - See [`docs/terminals.md`](docs/terminals.md) (Persistence → Project open / cold start)
 
@@ -160,8 +160,7 @@ cargo test -p noviewlog-core --lib
 cargo test -p noviewlog-slint --lib --test inline_rename_wiring --test chrome_icon_wiring
 ```
 
-On Windows CI (`.github/workflows/windows-slint.yml`) the same core/Slint tests run,
-plus `cargo build --profile release-dev -p noviewlog-slint`.
+There is no GitHub Actions CI. Run those tests locally (and `cargo build --profile release-dev -p noviewlog-slint` after Slint or engine UI changes). Do not add workflows unless explicitly requested — this project is moving to a self-hosted server.
 
 ## Architecture
 
@@ -170,7 +169,7 @@ plus `cargo build --profile release-dev -p noviewlog-slint`.
 | [`crates/noviewlog-core/`](crates/noviewlog-core/) | Engine: PTY, filters, buffer, fontdue viewport, Projects |
 | [`crates/noviewlog-slint/`](crates/noviewlog-slint/) | Slint desktop UI |
 | [`docs/architecture.md`](docs/architecture.md) | Engine ↔ UI boundary (commands, stats, paint) |
-| [`docs/terminals.md`](docs/terminals.md) | TERMINALS / FILES / Projects open + auto-start |
+| [`docs/terminals.md`](docs/terminals.md) | TERMINALS / FILES / Projects open + manual Start |
 | [`presets/`](presets/) | Bundled filter presets |
 | [`assets/`](assets/) | App icon + bundled Noto Sans (UI) / Noto Sans Mono (viewport) |
 

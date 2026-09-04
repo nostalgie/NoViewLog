@@ -107,11 +107,13 @@ Filter presets, scrollback, viewport font, and sidebar section expand state live
   On Windows, a Program MAY set `wsl: true` (optional `wsl_distro`) so Start runs the
   command inside WSL; `cwd` is then a Linux path (`/home/…` or `\\wsl$\Distro\…`).
 - Manage Projects via **File → Projects…** (open, rename, delete, or create)
-- **New** creates an empty Project (one live Terminal that auto-starts an interactive
-  shell; no copied launch or filter tabs from the previous Project)
+- **New** creates an empty Project (one stopped live Terminal; no copied launch
+  or filter tabs from the previous Project; no shell until the user types or Starts)
 - Opening a Project (File → Projects, or last Project on app startup) **replaces**
-  TERMINALS and FILES with that Project’s Programs
-- CLI launch (`command` or log file) takes priority over project restore
+  TERMINALS and FILES with that Project’s Programs. Live Programs stay **stopped**
+  until Start. FILES may begin load on open.
+- CLI launch (`command` or log file) takes priority over project restore and MAY
+  start that one-shot session
 
 ### Project open / cold start (mandatory UX)
 
@@ -121,16 +123,15 @@ Same on Linux and Windows:
    **Terminal** tab (`active_view == 0`), even if `projects.yaml` saved a filter
    tab as `active_tab`. Filter tabs remain in the strip; the user can switch to
    them after output exists. FILES may keep a restored filter tab.
-2. **Auto-start:** opening/restoring a Project **starts sessions without pressing
-   Start**:
-   - Live Program with a saved `command` → start that process
-     (on Windows, `wsl: true` runs the command inside WSL)
-   - Live Program with no command → start an interactive shell
-     (WSL bash when `wsl: true`)
-   - FILES Program → begin loading the log file
-3. Empty viewport hints (stopped / empty buffer only) are ASCII and point at the
-   TERMINALS row Start control if a filter tab is somehow still empty — they are
-   not a substitute for auto-start on Project open.
+2. **Manual Start:** opening/restoring a Project does **not** start live Programs:
+   - Live Program with a saved `command` → stays stopped until Start on the
+     TERMINALS row (on Windows, `wsl: true` runs the command inside WSL)
+   - Live Program with no command → no interactive shell until the user types
+     or explicitly Starts
+   - FILES Program → MAY begin loading the log file
+3. Empty viewport hints (stopped / empty buffer) are ASCII and **are** the open
+   path for Programs (`EMPTY_TERMINAL_TAB_STOPPED`). Filter-tab empty copy
+   points at Start on the TERMINALS row.
 
 ### After Start / Stop
 

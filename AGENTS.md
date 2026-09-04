@@ -39,7 +39,7 @@ Publish (Windows, native MSVC): `.\scripts\publish-slint-windows.ps1`
 |-----|----------|
 | [`README.md`](README.md) | Users: run on Linux and Windows, filters |
 | [`docs/architecture.md`](docs/architecture.md) | Engine ↔ UI boundary |
-| [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs / Project open + auto-start |
+| [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs / Project open + manual Start |
 | [`.cursor/rules/`](.cursor/rules/) | Enforced agent details (do not copy into this file) |
 | [`openspec/specs/`](openspec/specs/) | Living behavior specs (grow via archived changes) |
 | [`openspec/changes/`](openspec/changes/) | Active change proposals and artifacts |
@@ -106,4 +106,6 @@ Details live in the always-on rules — do not restate them here:
 ## Safety
 
 - Do not commit secrets, `target/`, `.deps/`, `dist/`, or local `sample/`.
-- Do not add GitHub Actions workflows unless explicitly requested.
+- Do not add GitHub Actions workflows. They were removed on purpose; this
+  project will move to a self-hosted server. Do not recreate `.github/workflows`
+  or any third-party CI until the user explicitly requests it.

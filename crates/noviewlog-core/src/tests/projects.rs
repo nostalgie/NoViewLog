@@ -15,7 +15,7 @@ fn engine_isolated() -> Engine {
 }
 
 #[test]
-fn project_open_selects_terminal_tab_and_auto_starts() {
+fn project_open_selects_terminal_tab_and_stays_stopped() {
     let mut engine = engine_isolated();
     engine.projects = ProjectsStore {
         projects: vec![ProjectConfig {
@@ -89,7 +89,6 @@ fn project_open_selects_terminal_tab_and_auto_starts() {
 
     let live = engine.terminals_for_test();
     assert_eq!(live.len(), 2);
-    // echo/sleep may already have exited; auto-start is tracked via process_started.
     assert_eq!(live[0].1, "API");
     assert_eq!(live[1].1, "Worker");
     assert_eq!(engine.tab_configs_for_test().len(), 2);
@@ -97,11 +96,35 @@ fn project_open_selects_terminal_tab_and_auto_starts() {
     // saved workspace had a filter tab active.
     assert_eq!(engine.active_tab_index_for_test(), 0);
     assert_eq!(engine.active_view_name_for_test(), "Terminal");
+    for (id, _, running) in &live {
+        assert!(
+            !*running,
+            "project open must leave live Programs stopped: {id}"
+        );
+        assert!(
+            !engine.has_pty_for_test(id),
+            "project open must not spawn a PTY: {id}"
+        );
+    }
     assert!(
-        engine.process_started_for_test(),
-        "project open auto-starts the active process session"
+        !engine.process_started_for_test(),
+        "project open must not start the saved command"
+    );
+    assert!(!engine.active_terminal_running_for_test());
+    engine.tick();
+    assert!(
+        !engine.process_started_for_test() && !engine.active_terminal_running_for_test(),
+        "tick after project open must not auto-start"
     );
     assert!(engine.active_project.is_some());
+
+    engine
+        .send_command_json(r#"{"cmd":"terminal_start"}"#)
+        .expect("start");
+    assert!(
+        engine.process_started_for_test(),
+        "manual Start must run the saved command"
+    );
 }
 
 #[test]
@@ -148,11 +171,13 @@ fn project_create_starts_empty_and_does_not_copy_previous() {
     let live = engine.terminals_for_test();
     assert_eq!(live.len(), 1, "empty Project opens as one Terminal");
     assert_ne!(live[0].1, "One");
-    // Blank live terminal auto-starts an interactive shell.
+    // Empty Project: one stopped Terminal; no shell until the user types or Starts.
+    assert!(!live[0].2, "empty Project Terminal must stay stopped");
     assert!(
-        live[0].2 || engine.has_pty_for_test(&live[0].0),
-        "empty Project Terminal should be running without Start"
+        !engine.has_pty_for_test(&live[0].0),
+        "empty Project must not spawn a PTY"
     );
+    assert!(!engine.process_started_for_test());
     assert!(
         engine
             .status_message_for_test()
@@ -334,7 +359,7 @@ fn sample_project(id: &str, name: &str) -> ProjectConfig {
 }
 
 #[test]
-fn startup_restores_last_project_and_auto_starts() {
+fn startup_restores_last_project_and_stays_stopped() {
     let mut engine = engine_isolated();
     engine.projects = ProjectsStore {
         projects: vec![
@@ -354,9 +379,21 @@ fn startup_restores_last_project_and_auto_starts() {
     assert_eq!(live.len(), 2);
     assert_eq!(live[0].1, "API");
     assert_eq!(live[1].1, "Worker");
+    for (id, _, running) in &live {
+        assert!(!*running, "startup restore must leave Programs stopped: {id}");
+        assert!(
+            !engine.has_pty_for_test(id),
+            "startup restore must not spawn a PTY: {id}"
+        );
+    }
     assert!(
-        engine.process_started_for_test(),
-        "restored programs auto-start without pressing Start"
+        !engine.process_started_for_test(),
+        "restoring last Project must not auto-start"
+    );
+    engine.tick();
+    assert!(
+        !engine.process_started_for_test() && !engine.active_terminal_running_for_test(),
+        "tick after last-Project restore must not auto-start"
     );
     assert!(
         engine
@@ -535,4 +572,8 @@ fn program_set_launch_keeps_wsl_through_project_open() {
     assert_eq!(restored.command.as_deref(), Some("uname"));
     assert_eq!(restored.wsl_distro.as_deref(), Some("Ubuntu"));
     assert_eq!(restored.cwd.as_deref(), Some("/home/me"));
+    assert!(
+        !engine.active_terminal_running_for_test() && !engine.process_started_for_test(),
+        "reopen must keep the WSL Program stopped until Start"
+    );
 }
