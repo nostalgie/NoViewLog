@@ -90,7 +90,8 @@ pub struct Engine {
     pub(crate) terminals: Vec<TerminalState>,
     pub(crate) active_terminal: usize,
     pub(crate) config: AppConfig,
-    /// Persisted Projects / Programs (`~/.config/noviewlog/projects.yaml`).
+    /// Persisted Projects / Programs (`~/.config/noviewlog/projects.yaml`;
+    /// Windows: `%USERPROFILE%\.config\noviewlog\projects.yaml`).
     pub(crate) projects: ProjectsStore,
     /// Index into `projects.projects` when a Project is open; `None` = no active Project.
     pub(crate) active_project: Option<usize>,

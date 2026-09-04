@@ -1,5 +1,5 @@
 ---
-description: MANDATORY — build Slint after engine/UI changes
+description: MANDATORY — build Slint after engine/UI changes; pick the host OS row
 alwaysApply: true
 ---
 
@@ -9,57 +9,36 @@ After changes to `crates/noviewlog-slint/`, `crates/noviewlog-core/` (when used
 by Slint), or Slint packaging scripts, build or run Slint yourself. Do **not**
 ask the user to rebuild.
 
-## What the user runs
+**Pick the Host OS row** in `AGENTS.md` / `project-context.mdc`. Linux and
+Windows are equally supported. Do not treat Linux commands as the default on a
+Windows host (or the reverse).
 
-| Path | Role |
-|------|------|
-| `bash scripts/run-slint.sh` | `cargo run --profile release-dev` + run `noviewlog-slint` (Linux) |
-| `scripts/run-slint-windows.ps1` | Same daily profile on Windows (imports MSVC env) |
-| `cargo build --profile release-dev -p noviewlog-slint` | Daily optimized binary (no fat LTO) |
-| `cargo build --release -p noviewlog-slint` | Publish profile (fat LTO) |
-| `bash scripts/publish-slint-windows.sh` | Windows MSVC → `dist/noviewlog-slint-win-x64/NoViewLog.exe` |
+## Shared (both hosts)
 
-## Required commands (Linux)
+- Daily profile: `release-dev` (`opt-level = 3`, incremental, no fat LTO).
+- Debug `cargo run` pegs ~100% CPU on PTY flood — not the product path.
+- Fat `--release` (LTO + CGU=1) is **publish only**; it disables incremental.
+- Do **not** set `RUSTFLAGS=-L…/.deps/lib` in a run script or the shell: it
+  changes the rustc fingerprint of every crate. Link search lives in
+  `crates/noviewlog-slint/build.rs`; pkg-config paths live in `.cargo/config.toml`.
+- Linux fontconfig helper: `scripts/setup-slint-deps.sh` (used by
+  `run-slint.sh`) — do **not** port to Windows or run on Windows.
+- Never `run-slint.sh` / `.deps` on Windows. Never the Windows `.ps1` scripts on
+  Linux.
 
-```bash
-bash scripts/run-slint.sh
-# or
-cargo build --profile release-dev -p noviewlog-slint
-```
+## Publish
 
-## Required commands (Windows)
-
-```powershell
-.\scripts\run-slint-windows.ps1
-# or (after MSVC env is active)
-cargo build --profile release-dev -p noviewlog-slint
-```
-
-Do **not** use `run-slint.sh` or `.deps` fontconfig helpers on Windows.
-
-`run-slint.sh` MUST use `--profile release-dev` (`opt-level = 3`, no fat LTO).
-A debug `cargo run` pegs ~100% CPU on PTY flood even when optimized is fine —
-do not treat debug as the product path. Fat `--release` (LTO + CGU=1) is for
-publish only; it disables incremental and makes every small edit a full relink.
-
-Do **not** set `RUSTFLAGS=-L…/.deps/lib` in the run script or the shell: it
-changes the rustc fingerprint of every crate and forces a full rebuild when
-the script and a plain `cargo` disagree. Link search lives in
-`crates/noviewlog-slint/build.rs`; pkg-config paths live in `.cargo/config.toml`.
-
-## Windows release folder
-
-Run on a Windows host with the MSVC Rust toolchain (not Linux cross):
-
-```bash
-bash scripts/publish-slint-windows.sh
-```
+- Windows PowerShell (preferred): `.\scripts\publish-slint-windows.ps1`
+  → `dist\noviewlog-slint-win-x64\NoViewLog.exe` (native MSVC, not Linux cross).
+- Windows Git Bash: `bash scripts/publish-slint-windows.sh` (same output).
+- Fat LTO binary only: `cargo build --release -p noviewlog-slint` (after MSVC
+  env is active on Windows).
 
 ## Agent obligations
 
-1. Run the appropriate command(s) yourself — do **not** tell the user to rebuild.
-2. Do **not** claim Slint work is done until the build (or publish on Windows) succeeds when those surfaces changed.
-3. Linux fontconfig helper: `scripts/setup-slint-deps.sh` (used by `run-slint.sh`) — do not port to Windows.
-4. PTY / Follow / Viewport / HOST_TICK changes: a green compile is **not**
-   acceptance. Run the daily GUI (`release-dev`) and measure `cat` per
+1. Run the **host** command yourself — do **not** tell the user to rebuild.
+2. Do **not** claim Slint work is done until that build (or Windows publish)
+   succeeds when those surfaces changed.
+3. PTY / Follow / Viewport / HOST_TICK: a green compile is **not** acceptance.
+   Run the daily GUI (`release-dev`) and measure flood per
    [terminal-flood-verify.mdc](terminal-flood-verify.mdc).

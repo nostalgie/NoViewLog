@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Native Windows MSVC publish for noviewlog-slint → dist/noviewlog-slint-win-x64/
 #
-# From PowerShell when bash is not in PATH:
+# From PowerShell (preferred): .\scripts\publish-slint-windows.ps1
+# From Git Bash when bash is not in PATH:
 #   & "C:\Program Files\Git\bin\bash.exe" scripts/publish-slint-windows.sh
 set -euo pipefail
 

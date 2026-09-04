@@ -2,13 +2,24 @@
 
 Active desktop UI for NoViewLog (Slint + Rust). Default product on `main`.
 
+Linux and Windows are equally supported. Pick the command for the **current host**.
+
 ## Run
 
 From the repo root:
 
-```bash
+Linux:
+
+```
 bash scripts/run-slint.sh
 bash scripts/run-slint.sh -- path/to/app.log
+```
+
+Windows (PowerShell):
+
+```
+.\scripts\run-slint-windows.ps1
+.\scripts\run-slint-windows.ps1 -- path/to/app.log
 ```
 
 ## Layout
@@ -33,12 +44,14 @@ See [`docs/architecture.md`](../../docs/architecture.md).
 
 Daily (incremental, `opt-level = 3`, no fat LTO):
 
-```bash
+```
 cargo build --profile release-dev -p noviewlog-slint
 ```
 
 Publish (fat LTO):
 
-```bash
+```
 cargo build --release -p noviewlog-slint
 ```
+
+Windows folder staging: `.\scripts\publish-slint-windows.ps1`.

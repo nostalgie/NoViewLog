@@ -1,5 +1,5 @@
 ---
-description: NoViewLog stack and repo map — Rust engine + Slint UI
+description: NoViewLog stack, host OS table, repo map — Linux and Windows equal
 alwaysApply: true
 ---
 
@@ -8,19 +8,44 @@ alwaysApply: true
 Native **desktop** log viewer: Rust engine + Slint UI. No WebView, no separate
 frontend. Log viewport is rendered by Rust (`fontdue` bitmap).
 
-Active UI: **Slint** on `main` (`crates/noviewlog-slint/`). See `active-ui-line.mdc`.
+Active UI: **Slint** on `main` (`crates/noviewlog-slint/`). There is no second
+UI track. Binary: `noviewlog-slint`.
 
 `npm` / `node` in README are **commands noviewlog wraps** (via PTY), not this
 repo's tech stack.
 
-## Build
+**Linux and Windows are equally supported.** macOS and other OSes are
+best-effort.
 
-After Slint or shared engine changes used by Slint →
-`bash scripts/run-slint.sh` or `cargo build --profile release-dev -p noviewlog-slint`.
-Windows release staging → `bash scripts/publish-slint-windows.sh` (native
-MSVC). See `slint-release-build.mdc`.
+## Host OS (mandatory)
 
-Do **not** ask the user to rebuild manually.
+Detect the **current host** before any build, run, or verify. Never run the
+other OS’s script.
+
+| Host | Daily run | Binary |
+|------|-----------|--------|
+| Linux | `bash scripts/run-slint.sh` | `target/release-dev/noviewlog-slint` |
+| Windows | `.\scripts\run-slint-windows.ps1` | `target\release-dev\noviewlog-slint.exe` |
+
+Build only (both, after the toolchain is in `PATH`):
+`cargo build --profile release-dev -p noviewlog-slint`
+
+- Windows scripts import MSVC when `link.exe` is missing.
+- **Never** on Windows: `run-slint.sh`, `setup-slint-deps.sh`, `.deps`.
+- **Never** on Linux: `run-slint-windows.ps1` / `publish-slint-windows.ps1`.
+- Debug `cargo run` is not the product path.
+- Do **not** ask the user to rebuild. Profiles:
+  [slint-release-build.mdc](slint-release-build.mdc).
+
+## Session start (before any edit or branch)
+
+1. `git branch --show-current` and `git status -sb`
+2. Auto-resync per [git-workflow.mdc](git-workflow.mdc): if on `main` and
+   behind, ff-pull; if on a merged PR branch, `git checkout -B main origin/main`
+   and delete the feature branch. Do not wait to be asked.
+3. Product UI work → stay on or use a feature branch off `main`
+4. **Do not** create/switch branches unless the user asked or the task needs it
+5. Confirm the binary (`noviewlog-slint`) before compiling
 
 ## Not in this repo (do not search unless explicitly asked)
 
@@ -41,11 +66,13 @@ Do **not** ask the user to rebuild manually.
 | Process spawn (PTY) | `crates/noviewlog-core/src/pty.rs` |
 | Bitmap viewport (fontdue) | `crates/noviewlog-core/src/viewport.rs` |
 | Bundled presets | `presets/defaults.yaml` |
-| User config (runtime) | `~/.config/noviewlog/config.yaml` |
+| User config | `~/.config/noviewlog/config.yaml` · Windows: `%USERPROFILE%\.config\noviewlog\config.yaml` |
 
 ## Agent behavior
 
-- Do **not** run exploratory glob/grep for CSS, JS, `package.json`, or frontend components before starting a task.
-- UI work → `crates/noviewlog-slint/` on `main` / feature branch off `main`.
+- Do **not** run exploratory glob/grep for CSS, JS, `package.json`, or frontend
+  components before starting a task.
+- UI work → `crates/noviewlog-slint/` only (never desktop chrome elsewhere).
 - Logic and process handling → `crates/noviewlog-core/`.
+- Feature branches → base off `main`.
 - English only in commits, PRs, and tracked docs/comments.

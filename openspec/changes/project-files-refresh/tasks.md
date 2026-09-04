@@ -19,4 +19,4 @@
 
 - [x] 4.1 Update `docs/terminals.md` Persistence (FILES belong to the active Project; Refresh)
 - [x] 4.2 `cargo test -p noviewlog-core --lib`
-- [x] 4.3 `bash scripts/run-slint.sh` or `cargo build --profile release-dev -p noviewlog-slint`
+- [x] 4.3 Host OS daily run (`bash scripts/run-slint.sh` or `.\scripts\run-slint-windows.ps1`) or `cargo build --profile release-dev -p noviewlog-slint`

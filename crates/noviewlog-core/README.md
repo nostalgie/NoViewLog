@@ -30,6 +30,6 @@ data flow.
 
 ## Tests
 
-```bash
+```
 cargo test -p noviewlog-core --lib
 ```

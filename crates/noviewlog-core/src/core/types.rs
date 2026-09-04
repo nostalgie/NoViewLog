@@ -186,7 +186,8 @@ pub struct ProjectConfig {
     pub active_program: usize,
 }
 
-/// Top-level store persisted as `~/.config/noviewlog/projects.yaml`.
+/// Top-level store persisted as `~/.config/noviewlog/projects.yaml`
+/// (Windows: `%USERPROFILE%\.config\noviewlog\projects.yaml`).
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ProjectsStore {
     #[serde(default)]

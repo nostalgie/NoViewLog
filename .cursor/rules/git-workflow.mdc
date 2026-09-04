@@ -5,6 +5,9 @@ alwaysApply: true
 
 # Git workflow (agents)
 
+Commands below are the same in bash and PowerShell. On Windows PowerShell use
+`git commit -m "title" -m "body"` — **never** a bash heredoc (`cat <<'EOF'`).
+
 ## Branches
 
 1. Run `git branch --show-current` before creating or switching branches.
@@ -43,7 +46,7 @@ If the current branch is not `main`:
 2. If **not** merged: stay on the feature branch.
 3. If merged, point local `main` at `origin/main` (local `main` is often behind; a plain `git checkout main` can overwrite uncommitted files):
 
-```bash
+```
 git checkout -B main origin/main
 git branch -d <feature-branch>
 # Remote may already be gone (GitHub "Automatically delete head branches").
