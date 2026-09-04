@@ -4,6 +4,7 @@ mod app_state;
 mod engine_bridge;
 mod input;
 mod launch_args;
+mod launch_preview;
 mod stats_sync;
 mod ui;
 mod window_chrome;

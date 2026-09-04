@@ -123,6 +123,19 @@ fn status_bar_press_dismisses_rename() {
 }
 
 #[test]
+fn launch_preview_press_dismisses_rename() {
+    let src = app_slint();
+    let idx = src
+        .find("root.launch-preview-text")
+        .expect("launch-preview-text");
+    let window = &src[idx.saturating_sub(700)..idx];
+    assert!(
+        window.contains("dismiss-any-rename-if-any()"),
+        "launch preview strip must dismiss rename on pointer-down"
+    );
+}
+
+#[test]
 fn rename_fields_use_even_inner_padding() {
     let theme = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/theme.slint");
     let theme = fs::read_to_string(&theme).unwrap();

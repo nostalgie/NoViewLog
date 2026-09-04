@@ -17,6 +17,8 @@ pub enum RenameHit {
     Viewport,
     FindBar,
     StatusBar,
+    /// Stopped-Terminal launch preview strip above the viewport.
+    LaunchPreview,
     FollowChip,
     WrapChip,
     MenuBar,
@@ -53,6 +55,7 @@ pub fn click_away_dismisses(hit: RenameHit, pointer: RenamePointer) -> bool {
             | RenameHit::Viewport
             | RenameHit::FindBar
             | RenameHit::StatusBar
+            | RenameHit::LaunchPreview
             | RenameHit::FollowChip
             | RenameHit::WrapChip
             | RenameHit::MenuBar
@@ -90,6 +93,7 @@ mod tests {
         RenameHit::Viewport,
         RenameHit::FindBar,
         RenameHit::StatusBar,
+        RenameHit::LaunchPreview,
         RenameHit::FollowChip,
         RenameHit::WrapChip,
         RenameHit::MenuBar,
@@ -172,6 +176,7 @@ mod tests {
             RenameHit::Viewport,
             RenameHit::FindBar,
             RenameHit::StatusBar,
+            RenameHit::LaunchPreview,
             RenameHit::FollowChip,
             RenameHit::WrapChip,
             RenameHit::MenuBar,
@@ -185,7 +190,7 @@ mod tests {
             RenameHit::SidebarPlus,
             RenameHit::FilterRow,
         ];
-        assert_eq!(variants.len(), 19);
+        assert_eq!(variants.len(), 20);
         for hit in variants {
             let _ = click_away_dismisses(hit, RenamePointer::Down);
             let _ = click_away_dismisses(hit, RenamePointer::Leave);
