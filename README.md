@@ -4,15 +4,16 @@ NoViewLog is a native desktop log viewer: a Rust engine plus a **Slint** UI.
 There is no WebView or separate frontend. The log viewport is rendered by Rust
 (`fontdue` bitmap).
 
-**Status:** active development. The primary supported platform is **Ubuntu
-Linux**. Other operating systems (including Windows) are best-effort — they may
-work, but they are not the main development focus yet.
+**Status:** active development. **Linux** and **Windows** are equally
+supported. macOS and other OSes are best-effort.
 
 ## Features
 
 ### Sessions
 
-- Launch a command through a PTY (`bash scripts/run-slint.sh -- …`) or open a log file (CLI path, `--file` / `-f`, or File → Open log file)
+- Launch a command through a PTY (`bash scripts/run-slint.sh -- …` on Linux,
+  `.\scripts\run-slint-windows.ps1 -- …` on Windows) or open a log file (CLI
+  path, `--file` / `-f`, or File → Open log file)
 - Run multiple independent terminals under **TERMINALS**; log files under **FILES** — switching the viewport does not stop other live sessions
 - Type into a live process on the Terminal tab; copy and paste (including middle-click paste)
 - Open a log in a dedicated view-only file session (no PTY or stdin); reopening the same path switches to it and reloads
@@ -43,7 +44,7 @@ work, but they are not the main development focus yet.
 ### Config
 
 - User config: `~/.config/noviewlog/config.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`)
-- Projects store: `~/.config/noviewlog/projects.yaml`
+- Projects store: `~/.config/noviewlog/projects.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\projects.yaml`)
 - Settings: maximum scrollback lines
 - Bundled filter presets in [`presets/defaults.yaml`](presets/defaults.yaml)
   (`node-dev`, `node-errors`, `php-dev`, `php-errors`, `python-dev`,
@@ -53,10 +54,9 @@ work, but they are not the main development focus yet.
   the bundled definition; new ids are added. Bundled presets you omit still load
 - Other CLI flags: `--file` / `-f`, `--config` / `-c`
 
-## Run (Ubuntu / Linux)
+## Run (Linux)
 
-Primary target: Ubuntu. Requires [Rust](https://rustup.rs/) and native build
-tools:
+Requires [Rust](https://rustup.rs/) and native build tools. On Ubuntu:
 
 ```bash
 sudo apt install build-essential pkg-config libssl-dev
@@ -85,9 +85,6 @@ Projects live in `~/.config/noviewlog/projects.yaml` (see
 [`docs/terminals.md`](docs/terminals.md)).
 
 ## Run (Windows)
-
-Windows is supported on a best-effort basis while the project is in active
-development. Ubuntu remains the reference environment.
 
 Prerequisites: Windows 10+ x64.
 
@@ -127,14 +124,20 @@ cargo build --profile release-dev -p noviewlog-slint
 
 Binary: `target\release-dev\noviewlog-slint.exe`.
 
-### Windows publish (optional)
+### Windows publish
 
-Stage a copyable folder with fat LTO (`--release`):
+Stage a copyable folder with fat LTO (`--release`). From PowerShell:
 
 ```powershell
-& "C:\Program Files\Git\bin\bash.exe" scripts/publish-slint-windows.sh
-# or, if bash is in PATH:
+.\scripts\publish-slint-windows.ps1
+```
+
+Git Bash (if you prefer the shell script):
+
+```powershell
 bash scripts/publish-slint-windows.sh
+# or, if bash is not in PATH:
+& "C:\Program Files\Git\bin\bash.exe" scripts/publish-slint-windows.sh
 ```
 
 Output: `dist\noviewlog-slint-win-x64\NoViewLog.exe`. Copy that folder to the
@@ -151,7 +154,7 @@ macOS and other OSes may work but are not actively tested.
 
 ## Tests
 
-```bash
+```
 cargo test -p noviewlog-core --lib
 cargo test -p noviewlog-slint --lib --test inline_rename_wiring --test chrome_icon_wiring
 ```

@@ -1,8 +1,9 @@
 # Architecture
 
 NoViewLog is a native desktop log viewer. **Slint** (`noviewlog-slint`) is the
-desktop UI. The shared engine lives in `noviewlog-core`. Primary development
-target is Ubuntu Linux; other platforms are best-effort.
+desktop UI. The shared engine lives in `noviewlog-core`. **Linux** and
+**Windows** are equally supported; macOS and other OSes are best-effort. Daily
+build/run: pick the Host OS row in [`AGENTS.md`](../AGENTS.md).
 
 ## Vocabulary
 
@@ -90,4 +91,5 @@ interactive shell, or file load). Details:
 
 ## Agent docs
 
-See [`AGENTS.md`](../AGENTS.md) and [`.cursor/rules/`](../.cursor/rules/).
+See [`AGENTS.md`](../AGENTS.md) (Host OS table first) and
+[`.cursor/rules/`](../.cursor/rules/).

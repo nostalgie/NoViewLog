@@ -47,9 +47,8 @@ chrome. Prefer `AppButton`.
 
 ## Agent obligations
 
-- After chrome icon/button/font changes: rebuild
-  `cargo build --profile release-dev -p noviewlog-slint` (Windows:
-  `.\scripts\run-slint-windows.ps1` or MSVC env + same cargo).
+- After chrome icon/button/font changes: rebuild using the Host OS row in
+  `AGENTS.md` / `project-context.mdc` (`release-dev`).
 - Do **not** rely on a hand-picked glyph grep. Run:
 
 ```

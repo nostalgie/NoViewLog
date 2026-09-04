@@ -5,47 +5,36 @@ alwaysApply: true
 
 # Terminal flood / Follow: run the app
 
-`cargo test` and a green compile do **not** prove `cat` is smooth.
-Ingest can busy-loop the event loop at 100% CPU while tests still pass.
-A **debug** binary (`cargo run` without an optimized profile) also pegs ~100% of a
-core on the same flood even when `release-dev` sits ~25% — measuring the wrong
-binary is how false “fixed” reports happen.
+`cargo test` and a green compile do **not** prove flood is smooth. Ingest can
+busy-loop the event loop at 100% CPU while tests still pass. A **debug** binary
+also pegs ~100% of a core on the same flood even when `release-dev` sits ~25% —
+measuring the wrong binary is how false “fixed” reports happen.
+
+Linux and Windows use the **same acceptance**. Pick the command column for the
+**current host**.
+
+## Acceptance (both hosts)
 
 After **any** change to PTY ingest, HOST_TICK, Follow, WRAP, Viewport paint,
 or live Terminal rendering:
 
-1. Do **not** tell the user to rebuild or "try cat again".
-2. Kill leftover `noviewlog-slint` PIDs (stale process = stale 100% CPU).
-3. Build the daily profile: `cargo build --profile release-dev -p noviewlog-slint`
-   (or `bash scripts/run-slint.sh`, which MUST be `cargo run --profile release-dev`).
-4. Run **that** binary (`target/release-dev/noviewlog-slint`), not
-   `target/debug/noviewlog-slint`.
-5. After launch, print `readlink -f /proc/<pid>/exe` — it MUST contain
-   `target/release-dev/`. If it contains `target/debug/`, **fail** — you are
-   measuring the wrong binary.
-6. Reproduce with a **visible** window, Follow **on**, WRAP **on** and WRAP
-   **off**: interactive Terminal (in-app shell) or the same flood via CLI
-   launch — `cat` a large access-log style file (long URLs). Sample CPU
-   (`pidstat` / `top` for that PID) for several seconds while `cat` runs.
-7. **Fail the task** if that PID pegs ~100% of a core, the tail
-   teleports, WRAP-on Follow is unusable, or the status line counter sticks
-   at `max_scrollback` (~10000/10000) and “pages” every ring trim — Follow
-   must look like a native terminal (monotonic line total, live screen).
-   `cargo test` passing is not acceptance. Report PID, `%CPU`, and
-   `/proc/<pid>/exe`.
-8. If there is no `DISPLAY`, say so and do **not** claim the hitch is fixed.
+1. Do **not** tell the user to rebuild or "try the flood again".
+2. Kill leftover `noviewlog-slint` processes (stale process = stale 100% CPU).
+3. Build/run the daily **`release-dev`** binary — never `target/debug/`.
+4. Visible window, Follow **on**, WRAP **on** and WRAP **off**.
+5. **Fail** if that PID pegs ~100% of a core, the tail teleports, WRAP-on Follow
+   is unusable, or the status line sticks at `max_scrollback` (~10000/10000) and
+   “pages” every ring trim. Follow must look like a native terminal (monotonic
+   line total, live screen). `cargo test` passing is not acceptance.
+6. If there is no display session, say so and do **not** claim the hitch is fixed.
 
-## Windows (same acceptance, different commands)
+## Host commands
 
-1. Kill leftover `noviewlog-slint` processes (`Get-Process noviewlog-slint -ErrorAction SilentlyContinue | Stop-Process`).
-2. Build/run via `.\scripts\run-slint-windows.ps1` or
-   `cargo build --profile release-dev -p noviewlog-slint` (MSVC env required).
-3. Confirm the running binary path contains `target\release-dev\`, not
-   `target\debug\`:
-   `(Get-Process noviewlog-slint).Path`
-4. Reproduce with a visible window, Follow **on**, WRAP **on** and **off**:
-   `type big.log` (or `Get-Content big.log`) in the in-app terminal.
-5. Sample CPU for several seconds: `Get-Process noviewlog-slint |
-   Select-Object Id, CPU, Path` twice with `Start-Sleep` between samples.
-6. **Fail** on the same criteria as Linux (~100% of a core, tail teleport,
-   counter stuck at max scrollback). Report PID, CPU trend, and `.Path`.
+| Step | Linux | Windows |
+|------|-------|---------|
+| Kill leftovers | stop leftover `noviewlog-slint` PIDs | `Get-Process noviewlog-slint -ErrorAction SilentlyContinue \| Stop-Process` |
+| Daily run | `bash scripts/run-slint.sh` (must be `cargo run --profile release-dev`) | `.\scripts\run-slint-windows.ps1` (MSVC env required / imported by the script) |
+| Prove binary | `readlink -f /proc/<pid>/exe` contains `target/release-dev/` — **fail** if `target/debug/` | `(Get-Process noviewlog-slint).Path` contains `target\release-dev\` — **fail** if `target\debug\` |
+| Flood | `cat` a large access-log style file (long URLs) in the in-app terminal | `type big.log` or `Get-Content big.log` in the in-app terminal |
+| Sample CPU | `pidstat` / `top` for that PID for several seconds | `Get-Process noviewlog-slint \| Select-Object Id, CPU, Path` twice with `Start-Sleep` between samples |
+| Report | PID, `%CPU`, `/proc/<pid>/exe` | PID, CPU trend, `.Path` |

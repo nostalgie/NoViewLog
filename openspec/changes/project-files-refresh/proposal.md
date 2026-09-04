@@ -26,4 +26,4 @@ Opened log files are not saved with a Project, so nginx (and similar) logs have 
 - `noviewlog-core`: `engine/projects.rs` snapshot/restore, `engine/file_session.rs` reload, `Command::ReloadFile`, lazy load on `terminal_switch`.
 - `noviewlog-slint`: FILES row refresh icon, File → Reload log. No `Theme.accent` chrome.
 - Docs: `docs/terminals.md`.
-- Verify: `cargo test -p noviewlog-core --lib`; `bash scripts/run-slint.sh` (or `cargo build --profile release-dev -p noviewlog-slint`).
+- Verify: `cargo test -p noviewlog-core --lib`; Host OS daily run (`bash scripts/run-slint.sh` or `.\scripts\run-slint-windows.ps1`) or `cargo build --profile release-dev -p noviewlog-slint`.

@@ -3,6 +3,7 @@ schema: spec-driven
 context: |
   Product: NoViewLog — native desktop log viewer (Rust engine + Slint UI).
   No WebView, no separate frontend. Log viewport is a fontdue bitmap rendered in Rust.
+  Linux and Windows are equally supported; pick the current host's run script.
 
   Tech stack:
   - Rust workspace: noviewlog-core (engine) + noviewlog-slint (desktop UI)
@@ -24,9 +25,11 @@ context: |
   - Slint calls Engine via typed Command (preferred) or JSON for tests
   - Key modules: engine/, terminal_state, log_view, pty, viewport, core/*
 
-  Verify gates (run after implementation):
-  - Slint or shared engine changes: bash scripts/run-slint.sh
-    or cargo build --profile release-dev -p noviewlog-slint
+  Verify gates (run after implementation; pick the current host):
+  - Slint or shared engine changes:
+    Linux: bash scripts/run-slint.sh
+    Windows: .\scripts\run-slint-windows.ps1
+    or (both, toolchain in PATH): cargo build --profile release-dev -p noviewlog-slint
   - Engine / parser / filters: cargo test -p noviewlog-core --lib
 
   Git workflow:
@@ -65,6 +68,7 @@ rules:
 operations:
   apply:
     guidance:
-      - Run bash scripts/run-slint.sh after Slint or shared engine changes
+      - After Slint or shared engine changes, run the Host OS daily command
+        (Linux: bash scripts/run-slint.sh; Windows: .\scripts\run-slint-windows.ps1)
       - Run cargo test -p noviewlog-core --lib when touching engine/parser
       - Do not commit unless the user asks

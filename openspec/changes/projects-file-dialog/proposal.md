@@ -24,4 +24,4 @@ The PROJECTS list in the left sidebar competes with TERMINALS and FILES for vert
 
 - `noviewlog-slint`: File menu, new Projects overlay component, sidebar PROJECTS block removed. `docs/terminals.md` Persistence/chrome note.
 - `noviewlog-core`: `project_create` writes an empty Project then opens it.
-- Verify: `cargo test -p noviewlog-core --lib`, `cargo build --release -p noviewlog-slint` (or `bash scripts/run-slint.sh`).
+- Verify: `cargo test -p noviewlog-core --lib`; Host OS daily run (`bash scripts/run-slint.sh` or `.\scripts\run-slint-windows.ps1`) or `cargo build --profile release-dev -p noviewlog-slint`.

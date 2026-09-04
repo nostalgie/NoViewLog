@@ -93,9 +93,11 @@ CLI launch with a log file still configures the initial session as a file sessio
 ## Persistence
 
 Filter presets, scrollback, viewport font, and sidebar section expand state live in
-`~/.config/noviewlog/config.yaml`.
+`~/.config/noviewlog/config.yaml` (Windows:
+`%USERPROFILE%\.config\noviewlog\config.yaml`).
 
-**Projects / Programs** are stored in `~/.config/noviewlog/projects.yaml`:
+**Projects / Programs** are stored in `~/.config/noviewlog/projects.yaml`
+(Windows: `%USERPROFILE%\.config\noviewlog\projects.yaml`):
 
 - A **Project** groups one or more **Programs**
 - Each Program saves launch (`command` / `args` / `cwd` **or** `log_file`) and filter tabs

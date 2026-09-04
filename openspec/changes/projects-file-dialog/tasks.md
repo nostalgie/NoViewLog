@@ -12,5 +12,5 @@
 
 ## 3. Verify
 
-- [x] 3.1 `cargo build --release -p noviewlog-slint` (or `bash scripts/run-slint.sh`)
+- [x] 3.1 Host OS daily run or `cargo build --profile release-dev -p noviewlog-slint`
 - [x] 3.2 `cargo test -p noviewlog-core --lib`

@@ -24,17 +24,9 @@ alwaysApply: true
 - MUST show only while an active drag targets a **different** index than the source (`drop-to != drag-from`)
 - MUST NOT remain visible when idle; clear drag state on pointer-up / rename start
 
-## Rename focus (do not conflate)
-
-- **Mouse leave / `has-hover` false** while renaming → MUST NOT end rename; keep typing
-- **Real focus loss** (`has-focus` false because viewport/console/another widget took focus) → MUST dismiss rename (commit/cancel per policy)
-- Do **NOT** `self.focus()` on every blur — that traps the editor when the console intentionally takes focus
-- Gate sidebar/tab `FocusScope.focus-on-click` and tab `Flickable.interactive` while renaming so mouse leave does not steal focus
-- Wire viewport click / viewport focus to dismiss tab **and** terminal rename
-- Leftover sidebar stretch under FILES/TERMINALS MUST dismiss rename
-  (`sidebar-dead-space` TouchArea). See [inline-rename-dismiss.mdc](inline-rename-dismiss.mdc)
-
 ## Rename / text fields
+
+- Click-away vs mouse-leave: [inline-rename-dismiss.mdc](inline-rename-dismiss.mdc) — do not restate it here.
 
 - Do **not** use fluent `LineEdit` for tab or terminal inline rename — it paints a bright accent focus bar (`FluentPalette.accent-background`)
 - Prefer square `TextInput` inside a `Rectangle` with `border-radius: 0`, `border-color: Theme.border` (or width 0), never accent
@@ -42,5 +34,6 @@ alwaysApply: true
 ## Agent obligations
 
 - When polishing Slint chrome, **do not reintroduce** accent borders or accent drop strips “for clarity”
-- After chrome border changes: rebuild `noviewlog-slint` and treat source + running UI as the check — do not mark done on grep alone
+- After chrome border changes: rebuild using the Host OS row (`release-dev`)
+  and treat source + running UI as the check — do not mark done on grep alone
 - The classic false positive: blaming rename focus while the real bug is `TabChip` `show-drop-before` with `background: Theme.accent`
