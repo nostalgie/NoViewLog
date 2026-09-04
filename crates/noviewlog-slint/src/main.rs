@@ -200,6 +200,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     {
+        let ui_quit = ui.as_weak();
+        ui.window().on_close_requested(move || {
+            let Some(ui) = ui_quit.upgrade() else {
+                return slint::CloseRequestResponse::HideWindow;
+            };
+            ui.invoke_open_quit_confirm();
+            slint::CloseRequestResponse::KeepWindowShown
+        });
+    }
+
+    {
         let logical_size = logical_size.clone();
         let force_render = force_render.clone();
         let timer = timer.clone();

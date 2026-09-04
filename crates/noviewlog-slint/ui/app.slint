@@ -704,6 +704,25 @@ export component AppWindow inherits Window {
         about-dlg.close();
     }
 
+    function close-quit-confirm() {
+        quit-dlg.close();
+    }
+
+    // Called from Rust `on_close_requested` (caption X, File → Exit, Alt+F4).
+    public function open-quit-confirm() {
+        root.close-chrome-menus();
+        projects-dlg.close();
+        edit-launch-dlg.close();
+        settings-dlg.close();
+        about-dlg.close();
+        quit-dlg.show();
+    }
+
+    function confirm-quit() {
+        quit-dlg.close();
+        root.hide();
+    }
+
     // 1px CSD outline (Theme.window-border) — keeps frameless window distinct from neighbors.
     // Hidden when maximized so the edge sits flush with the screen.
     csd-frame := Rectangle {
@@ -2875,6 +2894,29 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    quit-dlg := PopupWindow {
+        x: (parent.width - Theme.overlay-width) / 2;
+        y: max(48px, (parent.height - 220px) / 2);
+        width: Theme.overlay-width;
+        close-policy: close-on-click-outside;
+
+        FormDialogPanel {
+            title: "Close NoViewLog?";
+            ok-text: "Close";
+            cancel-text: "Cancel";
+            width: 100%;
+            cancelled => { root.close-quit-confirm(); }
+            confirmed => { root.confirm-quit(); }
+
+            Text {
+                text: "Running terminals will stop. Project settings stay saved.";
+                color: Theme.text-secondary;
+                font-size: 12px;
+                wrap: word-wrap;
             }
         }
     }
