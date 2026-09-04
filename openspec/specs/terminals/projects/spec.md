@@ -19,32 +19,38 @@ the tab strip. FILES sessions MAY keep a restored filter tab.
 - **THEN** the viewport shows the Terminal tab for the active live session
 - **AND** the filter tabs are still present in the strip
 
-### Requirement: Project open auto-starts sessions
+### Requirement: Project open leaves live Programs stopped
 
-Opening or restoring a Project SHALL start sessions without requiring the user
-to press Start:
+Opening or restoring a Project SHALL restore live Programs **stopped**. The user
+MUST press Start on the TERMINALS row to start a saved `command` (on Windows,
+`wsl: true` runs that command inside WSL). Live Programs with no command SHALL
+NOT spawn an interactive shell until the user types on the Terminal tab or
+explicitly Starts.
 
-- Live Program with a saved `command` → start that process (on Windows,
-  `wsl: true` runs the command inside WSL)
-- Live Program with no command → start an interactive shell (WSL bash when
-  `wsl: true`)
-- FILES Program → begin loading the log file
+FILES Programs MAY begin loading the log file on open.
 
-Empty Projects (zero Programs) SHALL still create one live Terminal and start an
-interactive shell.
+Empty Projects (zero Programs) SHALL still create one live Terminal that is
+**not** running.
 
-#### Scenario: Cold open runs without Start
+CLI launch (`noviewlog-slint -- cmd …` / `finish_startup` with a process or
+log-file launch) MAY start that one-shot session. That is an explicit launch
+argument, not Project restore. Restoring the last Project on startup MUST NOT
+auto-start live Programs.
+
+#### Scenario: Cold open stays stopped
 
 - **GIVEN** a Project with a live Program that has a saved launch command
 - **WHEN** the user opens the Project or the app restores it on startup
-- **THEN** that session’s process is started
+- **THEN** that session is not running and no PTY is spawned
 - **AND** the active tab is Terminal
+- **AND** Start on the TERMINALS row starts the saved command
 
-#### Scenario: Blank Program gets a shell
+#### Scenario: Blank Program stays stopped
 
 - **GIVEN** a live Program with no saved command
 - **WHEN** the Project is opened
-- **THEN** an interactive shell PTY is started for that session
+- **THEN** no interactive shell PTY is started
+- **AND** typing on the Terminal tab MAY start an interactive shell
 
 ### Requirement: WSL launch mode on Programs
 
@@ -87,14 +93,22 @@ session. Manual Start remains available.
 - **THEN** the session reports not running
 - **AND** no new interactive shell is started automatically
 
-### Requirement: Empty viewport hints are not the open path
+### Requirement: Empty viewport hints are the stopped-open path
 
 Empty-center viewport messages for a stopped empty buffer SHALL use ASCII text
-and MUST NOT imply that Start lives on a filter tab. Project open SHALL rely on
-auto-start + Terminal tab selection, not on those hints.
+and MUST NOT imply that Start lives on a filter tab. Project open of a live
+Program SHALL leave the session stopped, so these hints (`EMPTY_TERMINAL_TAB_STOPPED`
+and the filter-tab variant) ARE the open path — not fallback-only copy.
 
 #### Scenario: Filter-tab empty copy has no play glyph
 
 - **GIVEN** a stopped live session somehow shows an empty filter tab
 - **THEN** the center message points at Start on the TERMINALS row
 - **AND** the message does not contain a Unicode play glyph
+
+#### Scenario: Terminal tab hint after Project open
+
+- **GIVEN** a restored live Program with a saved command and an empty buffer
+- **WHEN** the Project is opened
+- **THEN** the Terminal tab shows the stopped empty-buffer hint
+- **AND** the session is not running

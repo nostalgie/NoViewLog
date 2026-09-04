@@ -1,5 +1,5 @@
 ---
-description: Project open — Terminal tab + auto-start (Linux/Windows)
+description: Project open — Terminal tab, manual Start (Linux/Windows)
 alwaysApply: true
 ---
 
@@ -15,9 +15,18 @@ startup), **same on Linux and Windows**:
 1. **Terminal tab** — every restored **live** TERMINALS session selects the
    primary Terminal tab (`active_view == 0`), even if YAML saved a filter tab.
    Do **not** leave the user on an empty filter tab after open.
-2. **Auto-start** — start without pressing Start: saved `command` → process;
-   no command → interactive shell; FILES → begin load.
-3. Empty viewport “Press Start” hints are fallback copy only, not the open path.
+2. **Manual Start** — live Programs stay **stopped**. A saved `command` does
+   **not** spawn a PTY until the user presses Start on the TERMINALS row.
+   Blank live terminals do **not** spawn a shell until the user types or
+   explicitly Starts. Do **not** auto-start an interactive shell for Programs
+   that have a saved command.
+3. **FILES** — file sessions MAY begin load on open (existing FILES behavior).
+   Do **not** auto-spawn a process/PTY for live Programs.
+4. Empty viewport “Press Start” / type-to-open hints **are** the open path
+   for stopped Programs (`EMPTY_TERMINAL_TAB_STOPPED`).
+5. **CLI launch** (`noviewlog-slint -- cmd …` / `finish_startup` with a
+   process or log-file launch) MAY start that one-shot command. Restoring the
+   last Project on startup MUST NOT auto-start.
 
-Do not “fix” Project open by restoring the last filter tab or leaving
-sessions stopped for the user to click Start.
+Do not “fix” Project open by restoring the last filter tab, and do **not**
+reintroduce auto-start of saved process commands on open.

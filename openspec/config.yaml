@@ -41,8 +41,9 @@ context: |
   Always-on agent constraints (see .cursor/rules/):
   - UI chrome: no Theme.accent borders or accent drop markers
   - Inline rename: square TextInput, not fluent LineEdit
-  - Project open: Terminal tab + auto-start (see project-open-autostart.mdc,
-    docs/terminals.md); do not restore onto an empty filter tab stopped
+  - Project open: Terminal tab + manual Start (see project-open-autostart.mdc,
+    docs/terminals.md); do not restore onto an empty filter tab; do not
+    auto-start saved process commands
   - Do not add GitHub Actions unless explicitly requested
 
   Spec domain folders (create on first change in that area):

@@ -11,7 +11,10 @@ use crate::core::types::{
 use crate::log_view::TERMINAL_TAB_NAME;
 
 impl Engine {
-    /// Complete host startup: CLI launch, last-project restore, or interactive shell.
+    /// Complete host startup: CLI launch, last-project restore, or a stopped boot terminal.
+    ///
+    /// CLI process / file launch is an explicit argument and MAY auto-start that
+    /// one-shot session. Restoring the last Project MUST NOT start Programs.
     ///
     /// Returns `true` when the last active project was restored.
     pub fn finish_startup(&mut self, launch: LaunchConfig) -> bool {
@@ -185,7 +188,9 @@ impl Engine {
         self.active_project = Some(proj_idx);
         self.projects.active_project = proj_idx;
         self.persist_projects_store();
-        self.auto_start_restored_project_sessions();
+        // CLI `auto_start_launch` must not fire on restored Programs after open.
+        self.auto_start_launch = false;
+        self.begin_restored_file_loads();
         self.mark_all_views_dirty();
         self.mark_viewport_dirty();
         self.last_stats_at = None;
@@ -196,41 +201,27 @@ impl Engine {
         self.push_event(json!({"type":"status","message": self.status_message}));
     }
 
-    /// Start every restored session so cold open lands on a live Terminal tab
-    /// without pressing Start. Files begin loading; process launches and blank
-    /// live terminals get a PTY / interactive shell.
-    fn auto_start_restored_project_sessions(&mut self) {
-        let plan: Vec<(String, bool, bool)> = self
+    /// Begin FILES loads for restored log-file Programs. Live Programs stay
+    /// stopped until the user presses Start (or types into a blank Terminal).
+    fn begin_restored_file_loads(&mut self) {
+        let file_ids: Vec<String> = self
             .terminals
             .iter()
-            .map(|t| {
-                (
-                    t.id.clone(),
-                    t.is_file_session(),
-                    t.launch.command.is_some(),
-                )
-            })
+            .filter(|t| t.is_file_session())
+            .map(|t| t.id.clone())
             .collect();
-        if plan.is_empty() {
+        if file_ids.is_empty() {
             return;
         }
         let resume_id = self
             .terminals
             .get(self.active_terminal)
             .map(|t| t.id.clone());
-        for (id, is_file, has_command) in plan {
+        for id in file_ids {
             self.terminal_switch(&id);
-            if is_file {
-                if let Some(path) = self.active_terminal().launch.log_file.clone() {
-                    self.active_terminal_mut().process_started = true;
-                    self.start_log_file_load(&path);
-                }
-            } else if has_command {
+            if let Some(path) = self.active_terminal().launch.log_file.clone() {
                 self.active_terminal_mut().process_started = true;
-                self.start_launch_process();
-            } else {
-                // Blank live terminal — interactive shell so typing works immediately.
-                self.start_interactive_shell();
+                self.start_log_file_load(&path);
             }
         }
         if let Some(id) = resume_id {

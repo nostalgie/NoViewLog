@@ -39,7 +39,7 @@ Publish (Windows, native MSVC): `.\scripts\publish-slint-windows.ps1`
 |-----|----------|
 | [`README.md`](README.md) | Users: run on Linux and Windows, filters |
 | [`docs/architecture.md`](docs/architecture.md) | Engine ↔ UI boundary |
-| [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs / Project open + auto-start |
+| [`docs/terminals.md`](docs/terminals.md) | Terminals / tabs / Project open + manual Start |
 | [`.cursor/rules/`](.cursor/rules/) | Enforced agent details (do not copy into this file) |
 | [`openspec/specs/`](openspec/specs/) | Living behavior specs (grow via archived changes) |
 | [`openspec/changes/`](openspec/changes/) | Active change proposals and artifacts |

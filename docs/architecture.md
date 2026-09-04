@@ -74,7 +74,7 @@ Click a collapsed preview (or disclosure cue) to toggle; View → Expand/Collaps
 | Module | Responsibility |
 |--------|----------------|
 | `engine` | Session façade: commands, tick, stats, multi-terminal, Projects |
-| `engine/projects` | Project open/create, Program restore, auto-start on open |
+| `engine/projects` | Project open/create, Program restore, manual Start |
 | `terminal_state` / `TerminalState` | Per-terminal bag (views, buffer, file window) |
 | `log_view` | Per-tab filters + search + flat lines |
 | `pty` | Process I/O |
@@ -84,8 +84,8 @@ Click a collapsed preview (or disclosure cue) to toggle; View → Expand/Collaps
 ## Projects (high level)
 
 Programs persist in `projects.yaml`. **Open / cold start** always selects the
-**Terminal** tab on live sessions and **auto-starts** them (saved command,
-interactive shell, or file load). Details:
+**Terminal** tab on live sessions and leaves Programs **stopped** until Start
+(FILES may begin load). CLI launch MAY start a one-shot command. Details:
 [`docs/terminals.md`](terminals.md),
 [`openspec/specs/terminals/projects/spec.md`](../openspec/specs/terminals/projects/spec.md).
 
