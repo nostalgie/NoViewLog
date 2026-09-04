@@ -160,8 +160,7 @@ cargo test -p noviewlog-core --lib
 cargo test -p noviewlog-slint --lib --test inline_rename_wiring --test chrome_icon_wiring
 ```
 
-On Windows CI (`.github/workflows/windows-slint.yml`) the same core/Slint tests run,
-plus `cargo build --profile release-dev -p noviewlog-slint`.
+There is no GitHub Actions CI. Run those tests locally (and `cargo build --profile release-dev -p noviewlog-slint` after Slint or engine UI changes). Do not add workflows unless explicitly requested — this project is moving to a self-hosted server.
 
 ## Architecture
 

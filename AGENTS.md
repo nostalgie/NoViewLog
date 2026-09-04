@@ -106,4 +106,6 @@ Details live in the always-on rules — do not restate them here:
 ## Safety
 
 - Do not commit secrets, `target/`, `.deps/`, `dist/`, or local `sample/`.
-- Do not add GitHub Actions workflows unless explicitly requested.
+- Do not add GitHub Actions workflows. They were removed on purpose; this
+  project will move to a self-hosted server. Do not recreate `.github/workflows`
+  or any third-party CI until the user explicitly requests it.
