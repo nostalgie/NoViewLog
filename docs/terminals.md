@@ -93,6 +93,14 @@ CLI launch with a log file still configures the initial session as a file sessio
 }
 ```
 
+## Quit
+
+Closing the Window (caption X, **File → Exit**, Alt+F4 / taskbar) **always**
+shows an in-app confirm overlay, even with a single stopped Terminal. Cancel,
+Escape, or click-outside dismiss the overlay and keep the app open. Confirm
+hides the Window; live PTYs stop when the process exits. Project settings are
+already persisted and are not a save prompt.
+
 ## Persistence
 
 Filter presets, scrollback, viewport font, and sidebar section expand state live in
