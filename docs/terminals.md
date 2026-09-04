@@ -132,12 +132,16 @@ Same on Linux and Windows:
 3. Empty viewport hints (stopped / empty buffer) are ASCII and **are** the open
    path for Programs (`EMPTY_TERMINAL_TAB_STOPPED`). Filter-tab empty copy
    points at Start on the TERMINALS row.
+4. While a live Terminal is stopped, a one-line chrome strip above the viewport
+   shows the saved launch (command/args, WSL, cwd) so Start is predictable.
+   The strip hides while the process is running and is not shown for FILES.
 
 ### After Start / Stop
 
 - Manual **Start** on a TERMINALS row still starts saved command / interactive shell
 - **Stop** kills that PTY; Programs with a saved command stay stopped after Stop or
-  process exit (no auto shell respawn)
+  process exit (no auto shell respawn). The launch preview strip returns while
+  stopped (including leftover output).
 - **Refresh** on a FILES row (or File → Reload log) re-reads that path from disk;
   it is not Follow/tail
 
@@ -156,6 +160,8 @@ Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`).
   a blank shell row has Edit + Close, not Stop. Dialogs use **`AppButton`**, not fluent `Button`.
 - Chrome text uses bundled **Noto Sans**; the log viewport bitmap uses mono
   (bundled Noto Sans Mono / system Cascadia when available).
+- Stopped live Terminals show a launch-summary strip (`Theme.bg-bar`) above the
+  viewport; Start/Stop stays on the TERMINALS row.
 - Inline rename: TERMINALS rows and filter tabs only — **FILES rows cannot be
   renamed**. Click-away (including empty sidebar space) ends rename.
 - When a Project is open, its name appears above TERMINALS. TERMINALS supports

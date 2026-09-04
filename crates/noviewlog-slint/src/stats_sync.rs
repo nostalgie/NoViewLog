@@ -7,6 +7,7 @@ use noviewlog_core::core::types::{clamp_max_scrollback_lines, FilterType};
 use noviewlog_core::{StatsSnapshot, StatsTerminal, TERMINAL_TAB_NAME};
 use slint::{Model, SharedString, Timer, VecModel};
 
+use crate::launch_preview::{format_launch_preview, LaunchPreview};
 use crate::ui::{AppWindow, FilterInfo, ProjectInfo, TabInfo, TerminalInfo};
 
 /// Pending debounced find `search_set` payload: query, regex, case, whole-word.
@@ -49,6 +50,7 @@ pub(crate) fn apply_stats(
     apply_stats_to_selection(stats, has_selection, ui);
     apply_stats_to_running(stats, pty_running);
     apply_stats_to_view_chrome(stats, ui, viewport_font_size, syncing_follow);
+    apply_stats_to_launch_preview(stats, ui);
     tabs_changed || terms_changed || filters_changed
 }
 
@@ -472,6 +474,36 @@ fn apply_stats_to_selection(stats: &StatsSnapshot, has_selection: &Rc<Cell<bool>
 
 fn apply_stats_to_running(stats: &StatsSnapshot, pty_running: &Rc<Cell<bool>>) {
     pty_running.set(stats.running);
+}
+
+fn apply_stats_to_launch_preview(stats: &StatsSnapshot, ui: &AppWindow) {
+    let show = stats.has_active_terminal && !stats.is_file_session && !stats.running;
+    if ui.get_show_launch_preview() != show {
+        ui.set_show_launch_preview(show);
+    }
+    if !show {
+        if !ui.get_launch_preview_text().is_empty() {
+            ui.set_launch_preview_text(SharedString::default());
+        }
+        return;
+    }
+    let text = stats
+        .terminals
+        .iter()
+        .find(|t| t.index == stats.active_terminal)
+        .map(|t| {
+            format_launch_preview(LaunchPreview {
+                command: t.launch_command.as_str(),
+                args: t.launch_args.as_str(),
+                cwd: t.launch_cwd.as_str(),
+                wsl: t.launch_wsl,
+                wsl_distro: t.launch_wsl_distro.as_str(),
+            })
+        })
+        .unwrap_or_else(|| "Type to open a shell".to_string());
+    if ui.get_launch_preview_text().as_str() != text {
+        ui.set_launch_preview_text(SharedString::from(text));
+    }
 }
 
 fn apply_stats_to_view_chrome(

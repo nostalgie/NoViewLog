@@ -70,6 +70,9 @@ export component AppWindow inherits Window {
     in-out property <int> active-terminal-index: 0;
     // Active session is a read-only log file (hide Follow; primary tab = filename).
     in-out property <bool> is-file-session: false;
+    // Stopped live Terminal: one-line launch summary above the viewport.
+    in-out property <bool> show-launch-preview: false;
+    in-out property <string> launch-preview-text: "";
     in-out property <bool> terminals-section-expanded: true;
     in-out property <bool> files-section-expanded: true;
     in property <bool> host-is-windows: false;
@@ -2104,6 +2107,37 @@ export component AppWindow inherits Window {
                     spacing: 0px;
                     vertical-stretch: 1;
                     horizontal-stretch: 1;
+
+                    if root.show-launch-preview: TouchArea {
+                        height: 22px;
+                        vertical-stretch: 0;
+                        mouse-cursor: default;
+                        pointer-event(event) => {
+                            if (event.kind == PointerEventKind.down) {
+                                root.dismiss-any-rename-if-any();
+                            }
+                        }
+                        Rectangle {
+                            height: 22px;
+                            width: 100%;
+                            background: Theme.bg-bar;
+                            border-width: 0px;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+
+                                Text {
+                                    text: root.launch-preview-text;
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
 
                     HorizontalLayout {
                         spacing: 0px;

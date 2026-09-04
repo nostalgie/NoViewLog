@@ -135,3 +135,24 @@ fn shell_only_terminal_row_has_no_stop_button() {
         "blank TERMINALS rows still expose Edit Launch"
     );
 }
+
+#[test]
+fn launch_preview_strip_is_theme_bar_not_accent() {
+    let app = fs::read_to_string(ui_dir().join("app.slint")).unwrap();
+    let idx = app
+        .find("if root.show-launch-preview:")
+        .expect("show-launch-preview strip");
+    let chunk = &app[idx..idx.saturating_add(1600).min(app.len())];
+    assert!(
+        chunk.contains("background: Theme.bg-bar"),
+        "launch preview must use Theme.bg-bar"
+    );
+    assert!(
+        !chunk.contains("Theme.accent"),
+        "launch preview must not use Theme.accent"
+    );
+    assert!(
+        chunk.contains("overflow: elide"),
+        "launch preview text must elide"
+    );
+}
