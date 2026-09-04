@@ -573,3 +573,280 @@ fn selection_materializes_live_grid_under_follow() {
     );
 }
 
+fn seed_follow_live_grid_with_scrollback(engine: &mut Engine) {
+    engine
+        .send_command(Command::Resize {
+            width: 800,
+            height: 400,
+        })
+        .expect("resize");
+    engine
+        .send_command(Command::SetWrapLines { wrap: true })
+        .expect("wrap");
+    engine
+        .send_command(Command::SetFollow { follow: true })
+        .expect("follow");
+    engine.push_lines_for_test([
+        "Windows PowerShell".into(),
+        "Copyright (C) Microsoft Corporation. All rights reserved.".into(),
+        "PS C:\\projects\\noviewlog>".into(),
+    ]);
+    engine.mark_running_for_test();
+    engine.ensure_live_screen_for_test();
+    {
+        let term = engine.active_terminal_mut();
+        term.ingest.feed(
+            b"Linux Dima-PC 6.18.33.2-microsoft-standard-WSL2 uname\r\n",
+            &mut term.buffer,
+            &mut term.parser,
+        );
+    }
+    assert!(
+        engine.paints_live_vt_grid_for_test(),
+        "precondition: Follow live-grid paint"
+    );
+}
+
+fn assert_overlay_has_banner_and_tail(engine: &Engine, via: &str) {
+    let texts = engine.flat_line_texts_for_test();
+    let joined = texts.join("\n");
+    assert!(
+        texts.iter().any(|l| l.contains("Windows PowerShell")),
+        "{via}: overlay must include committed banner, got {joined:?}"
+    );
+    assert!(
+        texts.iter().any(|l| l.contains("Linux Dima-PC")),
+        "{via}: overlay must include live tail, got {joined:?}"
+    );
+    let max = engine.max_scroll_offset_for_test();
+    let y = engine.scroll_offset_y_for_test();
+    assert!(
+        y <= max + 0.5,
+        "{via}: scroll_y must be in overlay range (y={y} max={max})"
+    );
+}
+
+#[test]
+fn scrollbar_and_wheel_materialize_the_same_overlay_after_follow() {
+    let mut wheel = Engine::new();
+    seed_follow_live_grid_with_scrollback(&mut wheel);
+    wheel
+        .send_command(Command::ScrollLines { delta: -3 })
+        .expect("wheel up");
+    assert!(
+        !wheel.auto_follow_for_test(),
+        "wheel away from Follow must leave live-grid paint"
+    );
+    assert_overlay_has_banner_and_tail(&wheel, "wheel");
+
+    let mut bar = Engine::new();
+    seed_follow_live_grid_with_scrollback(&mut bar);
+    bar.send_command(Command::Scroll { offset: 0.0 })
+        .expect("scrollbar to top");
+    assert!(
+        !bar.auto_follow_for_test(),
+        "scrollbar away from Follow must leave live-grid paint"
+    );
+    assert_overlay_has_banner_and_tail(&bar, "scrollbar");
+
+    let wheel_lines = wheel.flat_line_texts_for_test();
+    let bar_lines = bar.flat_line_texts_for_test();
+    assert_eq!(
+        wheel_lines, bar_lines,
+        "scrollbar and wheel must compose the same overlay"
+    );
+}
+
+#[test]
+fn unfiltered_filter_tab_shows_live_overlay_while_running() {
+    let mut engine = Engine::new();
+    engine
+        .send_command(Command::Resize {
+            width: 800,
+            height: 400,
+        })
+        .expect("resize");
+    engine
+        .send_command(Command::SetFollow { follow: true })
+        .expect("follow");
+    engine.mark_running_for_test();
+    engine.ensure_live_screen_for_test();
+    {
+        let term = engine.active_terminal_mut();
+        term.ingest.feed(
+            b"uname-a-kernel-line\r\n",
+            &mut term.buffer,
+            &mut term.parser,
+        );
+    }
+    assert_eq!(
+        engine.buffer_record_count_for_test(),
+        0,
+        "short output must stay on the live screen"
+    );
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    assert_eq!(engine.active_tab_index_for_test(), 1);
+    let texts = engine.flat_line_texts_for_test();
+    assert!(
+        texts.iter().any(|t| t.contains("uname-a-kernel-line")),
+        "empty filter tab must show live overlay, got {texts:?}"
+    );
+}
+
+#[test]
+fn include_filter_tab_keeps_matching_live_overlay_only() {
+    let mut engine = Engine::new();
+    engine
+        .send_command(Command::Resize {
+            width: 800,
+            height: 400,
+        })
+        .expect("resize");
+    engine.mark_running_for_test();
+    engine.ensure_live_screen_for_test();
+    {
+        let term = engine.active_terminal_mut();
+        term.ingest.feed(
+            b"keep-me visible\r\ndrop-this line\r\n",
+            &mut term.buffer,
+            &mut term.parser,
+        );
+    }
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    engine
+        .send_command_json(
+            r#"{"cmd":"filter_add","type":"include","pattern":"keep-me","regex":false}"#,
+        )
+        .expect("filter_add");
+    engine.rebuild_if_needed_for_test();
+
+    let texts = engine.flat_line_texts_for_test();
+    assert!(
+        texts.iter().any(|t| t.contains("keep-me visible")),
+        "include filter must keep matching overlay lines, got {texts:?}"
+    );
+    assert!(
+        texts.iter().all(|t| !t.contains("drop-this")),
+        "include filter must drop non-matching overlay lines, got {texts:?}"
+    );
+    assert_eq!(
+        engine.buffer_record_count_for_test(),
+        0,
+        "overlay filter must not commit live-screen frames as Records"
+    );
+}
+
+#[test]
+fn include_filter_tab_keeps_committed_matches_across_overlay_only() {
+    let mut engine = Engine::new();
+    engine
+        .send_command(Command::Resize {
+            width: 800,
+            height: 400,
+        })
+        .expect("resize");
+    engine.mark_running_for_test();
+    engine.ensure_live_screen_for_test();
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_add"}"#)
+        .expect("tab_add");
+    engine
+        .send_command_json(
+            r#"{"cmd":"filter_add","type":"include","pattern":"KEEP-","regex":false}"#,
+        )
+        .expect("filter_add");
+    engine.rebuild_if_needed_for_test();
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_switch","index":0}"#)
+        .expect("tab_switch terminal");
+
+    let mut blob = Vec::new();
+    for i in 0..80 {
+        blob.extend(format!("KEEP-{i:03} matching line\r\n").into_bytes());
+        blob.extend(format!("drop-{i:03} noise\r\n").into_bytes());
+    }
+    {
+        let term = engine.active_terminal_mut();
+        term.ingest.feed(&blob, &mut term.buffer, &mut term.parser);
+    }
+    let records = engine.buffer_record_count_for_test();
+    assert!(
+        records > 40,
+        "enough lines must scroll off the VT screen, got {records} Records"
+    );
+
+    let stale_lines = engine.view_flat_line_count_for_test(1).unwrap();
+    engine.rebuild_if_needed_for_test();
+    assert_eq!(
+        engine.view_flat_line_count_for_test(1),
+        Some(stale_lines),
+        "inactive filter tab must stay stale until selected"
+    );
+
+    engine
+        .send_command_json(r#"{"cmd":"tab_switch","index":1}"#)
+        .expect("tab_switch filter");
+    let texts = engine.flat_line_texts_for_test();
+    assert!(
+        texts.iter().any(|t| t.contains("KEEP-000")),
+        "switch onto filter tab must show committed matches, got {texts:?}"
+    );
+    let overlay_n = engine.overlay_len_for_test();
+    let committed_keep = texts.len().saturating_sub(overlay_n);
+    assert!(
+        committed_keep > 11,
+        "committed matching prefix must exceed one live screen, got committed={committed_keep} overlay={overlay_n} texts={texts:?}"
+    );
+
+    let id = engine.active_terminal().id.clone();
+    engine
+        .pty_tx
+        .try_send(PtyEvent::Bytes {
+            id: id.clone(),
+            data: b"\rKEEP-live spinner-aaaa".to_vec(),
+        })
+        .expect("overlay-only");
+    engine.poll_pty();
+    engine.rebuild_if_needed_for_test();
+    let after_spinner = engine.flat_line_texts_for_test();
+    assert!(
+        after_spinner.iter().any(|t| t.contains("KEEP-000")),
+        "overlay-only ingest must not drop committed matches, got {after_spinner:?}"
+    );
+    let after_overlay_n = engine.overlay_len_for_test();
+    let after_committed = after_spinner.len().saturating_sub(after_overlay_n);
+    assert_eq!(
+        after_committed, committed_keep,
+        "overlay-only must not change committed matching count ({committed_keep} -> {after_committed})"
+    );
+
+    engine
+        .pty_tx
+        .try_send(PtyEvent::Bytes {
+            id,
+            data: b"\rx".to_vec(),
+        })
+        .expect("shorter overlay");
+    engine.poll_pty();
+    engine.rebuild_if_needed_for_test();
+    let after_short = engine.flat_line_texts_for_test();
+    assert!(
+        after_short.iter().any(|t| t.contains("KEEP-000")),
+        "shorter overlay-only frame must not drop committed matches, got {after_short:?}"
+    );
+    let short_overlay_n = engine.overlay_len_for_test();
+    let short_committed = after_short.len().saturating_sub(short_overlay_n);
+    assert_eq!(
+        short_committed, committed_keep,
+        "committed matching count must stay stable while overlay tail may change"
+    );
+}
+

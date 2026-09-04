@@ -30,6 +30,11 @@ impl FilterEngine {
     }
 
     pub fn is_visible(&self, record: &LogRecord) -> bool {
+        self.is_visible_text(&record.text)
+    }
+
+    /// Same include/exclude rules as Records, for live-screen overlay lines.
+    pub fn is_visible_text(&self, text: &str) -> bool {
         let filters = &self.filters;
         if !filters.iter().any(|f| f.enabled) {
             return true;
@@ -41,7 +46,7 @@ impl FilterEngine {
                 if filter
                     .regex
                     .as_ref()
-                    .is_some_and(|re| re.is_match(&record.text))
+                    .is_some_and(|re| re.is_match(text))
                 {
                     return false;
                 }
@@ -59,7 +64,7 @@ impl FilterEngine {
                 && f.filter_type == FilterType::Include
                 && f.regex
                     .as_ref()
-                    .is_some_and(|re| re.is_match(&record.text))
+                    .is_some_and(|re| re.is_match(text))
         })
     }
 

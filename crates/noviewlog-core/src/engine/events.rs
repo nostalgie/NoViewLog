@@ -37,6 +37,13 @@ pub struct StatsTerminal {
     /// Space-joined launch args for Edit Launch chrome.
     #[serde(default)]
     pub launch_args: String,
+    /// Saved launch cwd (Linux path when `launch_wsl`). Not the live OSC 7 cwd.
+    #[serde(default)]
+    pub launch_cwd: String,
+    #[serde(default)]
+    pub launch_wsl: bool,
+    #[serde(default)]
+    pub launch_wsl_distro: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

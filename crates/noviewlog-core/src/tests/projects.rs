@@ -181,6 +181,79 @@ fn exit_with_launch_command_does_not_respawn_shell() {
 }
 
 #[test]
+fn typing_after_program_exit_does_not_spawn_shell() {
+    let mut engine = engine_isolated();
+    engine
+        .send_command_json(r#"{"cmd":"program_set_launch","command":"uname","args":["-a"]}"#)
+        .expect("launch");
+    engine.push_lines_for_test([
+        "Linux Dima-PC uname-a-output".into(),
+        "trailing-line".into(),
+    ]);
+    let id = engine.active_terminal_id_for_test();
+    engine.set_pty_generation_for_test(1);
+    engine.mark_running_for_test();
+    engine.inject_pty_exit_for_test(&id, 0, 1);
+    engine.poll_pty_for_test();
+    assert!(!engine.active_terminal_running_for_test());
+
+    engine.handle_key(b"\r");
+    engine.poll_pty_for_test();
+
+    assert!(
+        !engine.active_terminal_running_for_test(),
+        "Enter after a Program exits must not start a shell"
+    );
+    assert!(
+        !engine.has_pty_for_test(&id),
+        "Enter after a Program exits must not create a PTY"
+    );
+    let texts = engine.flat_line_texts_for_test();
+    let uname_hits = texts
+        .iter()
+        .filter(|l| l.contains("uname-a-output"))
+        .count();
+    assert_eq!(
+        uname_hits, 1,
+        "finished Program output must not be duplicated, got {texts:?}"
+    );
+}
+
+#[test]
+fn program_start_clears_previous_scrollback() {
+    let mut engine = engine_isolated();
+    #[cfg(windows)]
+    engine
+        .send_command_json(
+            r#"{"cmd":"program_set_launch","command":"cmd","args":["/c","echo","ok"]}"#,
+        )
+        .expect("launch");
+    #[cfg(not(windows))]
+    engine
+        .send_command_json(r#"{"cmd":"program_set_launch","command":"true"}"#)
+        .expect("launch");
+    engine.push_lines_for_test(["OLD-BANNER-LINE".into(), "second-line".into()]);
+    assert!(
+        engine.buffer_record_count_for_test() > 0,
+        "precondition: leftover scrollback in the record buffer"
+    );
+    engine
+        .send_command_json(r#"{"cmd":"terminal_start"}"#)
+        .expect("start");
+    let leftover = engine
+        .active_terminal()
+        .buffer
+        .raw_lines()
+        .iter()
+        .any(|l| l.contains("OLD-BANNER-LINE"));
+    assert!(
+        !leftover,
+        "Start must drop the previous session, got {:?}",
+        engine.active_terminal().buffer.raw_lines()
+    );
+}
+
+#[test]
 fn projects_store_yaml_round_trip() {
     let store = ProjectsStore {
         projects: vec![ProjectConfig {
@@ -426,4 +499,40 @@ fn project_open_replaces_leftover_files() {
 
     let _ = std::fs::remove_file(&path_a);
     let _ = std::fs::remove_file(&path_b);
+}
+
+#[test]
+fn program_set_launch_keeps_wsl_through_project_open() {
+    let mut engine = engine_isolated();
+    engine
+        .send_command_json(r#"{"cmd":"project_create","name":"WslProj"}"#)
+        .expect("create");
+    engine
+        .send_command_json(
+            r#"{"cmd":"program_set_launch","command":"uname","args":["-a"],"cwd":"/home/me","wsl":true,"wsl_distro":"Ubuntu"}"#,
+        )
+        .expect("launch");
+
+    let launch = &engine.active_terminal().launch;
+    assert!(launch.wsl, "Edit Launch must keep wsl");
+    assert_eq!(launch.command.as_deref(), Some("uname"));
+    assert_eq!(launch.args, vec!["-a".to_string()]);
+    assert_eq!(launch.cwd.as_deref(), Some("/home/me"));
+    assert_eq!(launch.wsl_distro.as_deref(), Some("Ubuntu"));
+
+    let stored = &engine.projects.projects[0].programs[0].launch;
+    assert!(stored.wsl);
+    assert_eq!(stored.wsl_distro.as_deref(), Some("Ubuntu"));
+
+    let project_id = engine.projects.projects[0].id.clone();
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"project_open","project_id":"{project_id}"}}"#
+        ))
+        .expect("reopen");
+    let restored = &engine.active_terminal().launch;
+    assert!(restored.wsl);
+    assert_eq!(restored.command.as_deref(), Some("uname"));
+    assert_eq!(restored.wsl_distro.as_deref(), Some("Ubuntu"));
+    assert_eq!(restored.cwd.as_deref(), Some("/home/me"));
 }

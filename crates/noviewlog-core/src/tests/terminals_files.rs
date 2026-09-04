@@ -424,6 +424,53 @@ fn selection_text_with_no_selection_returns_none() {
     assert!(engine.selection_text_for_test().is_none());
 }
 
+#[cfg(windows)]
+#[test]
+fn wsl_mode_spawns_wsl_exe_under_conpty() {
+    use crate::core::types::LaunchConfig;
+    use crate::engine::Engine;
+    use std::time::{Duration, Instant};
+
+    let mut engine = Engine::new();
+    engine.skip_projects_persist = true;
+    engine.set_launch(LaunchConfig {
+        command: Some("uname".into()),
+        args: vec!["-a".into()],
+        cwd: Some("/".into()),
+        wsl: true,
+        ..LaunchConfig::default()
+    });
+    let status = engine.status_message_for_test();
+    assert!(
+        !status.contains("Failed to start"),
+        "CreateProcess/ConPTY must accept wsl.exe: {status}"
+    );
+    assert!(
+        status.to_ascii_lowercase().contains("wsl"),
+        "status should show wsl.exe spawn: {status}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut screen = String::new();
+    while Instant::now() < deadline {
+        engine.poll_pty_for_test();
+        engine.tick();
+        screen = engine.live_screen_text_for_test();
+        let lower = screen.to_ascii_lowercase();
+        if lower.contains("linux")
+            || lower.contains("distribution")
+            || screen.contains("дистриб")
+            || screen.contains("GNU")
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    panic!(
+        "WSL ConPTY produced no live-screen text (uname or missing-distro message). status={status} screen={screen:?}"
+    );
+}
+
 #[test]
 fn set_launch_starts_command_immediately() {
     use crate::engine::Engine;

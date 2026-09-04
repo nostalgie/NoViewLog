@@ -1,9 +1,34 @@
 use super::*;
 
 impl Engine {
+    /// Leave Follow live-grid paint and rebuild the WRAP-aware overlay so
+    /// scrollbar and wheel share one coordinate space.
+    ///
+    /// Returns `(was_live, old_max)` so an absolute scrollbar offset can be
+    /// remapped from the inflated Follow range onto overlay visual height.
+    fn materialize_overlay_for_user_scroll(&mut self) -> (bool, f32) {
+        if !self.paints_live_vt_grid() {
+            return (false, self.max_scroll_offset());
+        }
+        let old_max = self.max_scroll_offset();
+        self.active_view_mut().auto_follow = false;
+        self.materialize_live_terminal_tab();
+        self.last_stats_at = None;
+        (true, old_max)
+    }
+
     pub(crate) fn scroll_by_lines(&mut self, delta: i32) {
         if delta == 0 {
             return;
+        }
+        if !self.active_terminal().is_file_session() {
+            let (was_live, _) = self.materialize_overlay_for_user_scroll();
+            if was_live {
+                // Wheel from Follow starts at the overlay tail (history above
+                // the live screen), not in the inflated live-grid range.
+                let max = self.max_scroll_offset();
+                self.active_terminal_mut().scroll_offset_y = max;
+            }
         }
         let row_stride = self.renderer.metrics().row_stride;
         let max_scroll = if self.active_terminal().is_file_session()
@@ -28,6 +53,13 @@ impl Engine {
         if direction == 0 {
             return;
         }
+        if !self.active_terminal().is_file_session() {
+            let (was_live, _) = self.materialize_overlay_for_user_scroll();
+            if was_live {
+                let max = self.max_scroll_offset();
+                self.active_terminal_mut().scroll_offset_y = max;
+            }
+        }
         let page = self.viewport_height as f32 * 0.9;
         let max_scroll = if self.active_terminal().is_file_session()
             && self.active_terminal().file_backed.is_some()
@@ -44,6 +76,21 @@ impl Engine {
         if self.active_terminal().is_file_session() && self.active_view().uses_match_index() {
             self.apply_match_window();
         }
+        self.mark_viewport_dirty();
+    }
+
+    /// Absolute scrollbar position (live Terminal overlay, not FILES).
+    pub(crate) fn scroll_to_offset(&mut self, offset: f32) {
+        let (was_live, old_max) = self.materialize_overlay_for_user_scroll();
+        let new_max = self.max_scroll_offset();
+        let mapped = if was_live && old_max > 0.5 {
+            (offset / old_max) * new_max
+        } else {
+            offset
+        };
+        self.active_terminal_mut().scroll_offset_y = mapped.clamp(0.0, new_max);
+        self.sync_follow_from_scroll();
+        self.maybe_prefetch_file_window();
         self.mark_viewport_dirty();
     }
 
@@ -109,8 +156,14 @@ impl Engine {
             return;
         }
         let max_scroll = self.max_scroll_offset();
+        if max_scroll <= 0.5 {
+            // Overlay fits in the viewport. Do not toggle Follow: turning it
+            // back on would paint the live VT grid and hide committed
+            // scrollback that still fits on screen (scrollbar vs wheel).
+            return;
+        }
         let scroll_y = self.active_terminal().scroll_offset_y;
-        let at_bottom = max_scroll <= 0.5 || scroll_y >= max_scroll - 1.0;
+        let at_bottom = scroll_y >= max_scroll - 1.0;
         let was_follow = self.active_view().auto_follow;
         let view = self.active_view_mut();
         if view.auto_follow == at_bottom {

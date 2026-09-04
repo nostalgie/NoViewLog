@@ -119,6 +119,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         has_launch: false,
         launch_command: SharedString::from(""),
         launch_args: SharedString::from(""),
+        launch_cwd: SharedString::from(""),
+        launch_wsl: false,
+        launch_wsl_distro: SharedString::from(""),
     }]));
     ui.set_terminals_model(ModelRc::from(terminals_model.clone()));
     let files_model = Rc::new(VecModel::<TerminalInfo>::from(vec![]));
@@ -129,6 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_active_project_name(SharedString::from(""));
     ui.set_active_terminal_index(0);
     ui.set_is_file_session(false);
+    ui.set_host_is_windows(cfg!(windows));
     ui.set_terminals_section_expanded(true);
     ui.set_files_section_expanded(true);
 
@@ -1114,7 +1118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let force_render = force_render.clone();
         let timer = timer.clone();
         let timer_fast = timer_fast.clone();
-        ui.on_program_set_launch(move |terminal_id, command, args_text, cwd| {
+        ui.on_program_set_launch(move |terminal_id, command, args_text, cwd, wsl, wsl_distro| {
             let args: Vec<String> = args_text
                 .as_str()
                 .split_whitespace()
@@ -1122,6 +1126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect();
             let cmd = command.as_str().trim();
             let cwd_s = cwd.as_str().trim();
+            let distro = wsl_distro.as_str().trim();
             let _ = engine.borrow_mut().send_command(Command::ProgramSetLaunch {
                 terminal_id: Some(terminal_id.as_str().to_string()),
                 command: if cmd.is_empty() {
@@ -1134,6 +1139,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None
                 } else {
                     Some(cwd_s.to_string())
+                },
+                wsl,
+                wsl_distro: if distro.is_empty() {
+                    None
+                } else {
+                    Some(distro.to_string())
                 },
             });
             force_render.set(true);

@@ -49,7 +49,7 @@ pub struct LogView {
     /// Maintained visual-row prefix index for Wrap ON scroll (invalidated on geometry/flat change).
     visual_row_index: RefCell<Arc<VisualRowIndex>>,
     filter_engine: FilterEngine,
-    /// Live VT overlay line count at the end of `flat_lines` (Terminal tab only).
+    /// Live VT overlay line count at the end of `flat_lines`.
     overlay_len: usize,
     /// Whole-file match byte offsets for file-session filter tabs (`None` scan = idle).
     pub match_offsets: Vec<u64>,
@@ -285,6 +285,7 @@ impl LogView {
             self.search_match_scan_end = 0;
             self.invalidate_visual_row_index();
         } else if self.flat_lines_record_cursor < buffer.records_len() {
+            self.strip_live_overlay();
             let cursor = self.flat_lines_record_cursor;
             let appended = rebuild_flat_lines_for_records(
                 &buffer.records()[cursor..],
@@ -354,6 +355,7 @@ impl LogView {
                         &self.expanded_record_ids,
                     ));
                     self.flat_lines_record_cursor = buffer.records_len();
+                    self.overlay_len = 0;
                     self.search_full_rescan = true;
                     self.search_match_scan_end = 0;
                     self.invalidate_visual_row_index();
@@ -519,6 +521,29 @@ impl LogView {
             }
         }
         self.overlay_len = 0;
+    }
+
+    /// Replace the live VT overlay, keeping only lines that pass this view's
+    /// include/exclude and severity. Returns whether the tail changed.
+    pub fn set_filtered_live_overlay(&mut self, overlay: Vec<FlatLine>) -> bool {
+        let filtered: Vec<FlatLine> = overlay
+            .into_iter()
+            .filter(|line| {
+                self.filter_engine.is_visible_text(&line.raw)
+                    && self.severity_filter.allows(line.level)
+            })
+            .collect();
+        let start = self.flat_lines.len().saturating_sub(self.overlay_len);
+        let same = self.overlay_len == filtered.len()
+            && self.flat_lines[start..]
+                .iter()
+                .zip(filtered.iter())
+                .all(|(a, b)| a.raw == b.raw);
+        if same {
+            return false;
+        }
+        self.set_live_overlay(filtered);
+        true
     }
 
     /// Replace the live VT overlay at the end of `flat_lines`.

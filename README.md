@@ -23,6 +23,7 @@ supported. macOS and other OSes are best-effort.
 
 - **File → Projects…** — create, open, rename, or delete Projects (Programs with launch + filter tabs)
 - Opening a Project (or restoring the last Project on startup) replaces TERMINALS and FILES, selects the **Terminal** tab on each live session, and **auto-starts** processes / shells / file loads (no extra Start click)
+- On Windows, Edit Launch can enable **WSL** so a Program’s command (or an empty-command bash) runs inside a distro
 - See [`docs/terminals.md`](docs/terminals.md) (Persistence → Project open / cold start)
 
 ### Tabs and filters

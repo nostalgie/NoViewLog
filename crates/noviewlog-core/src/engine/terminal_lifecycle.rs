@@ -212,6 +212,7 @@ impl Engine {
                         self.status_message = message.clone();
                         active_changed = true;
                         self.mark_all_views_dirty();
+                        self.materialize_live_terminal_tab();
                         self.mark_viewport_dirty();
                         self.push_event(json!({"type":"exit","code": code, "message": message}));
                     }
@@ -247,7 +248,9 @@ impl Engine {
         self.flush_idle_pending();
     }
 
-    /// Patch Terminal tab flat lines for a volatile VT update; dirty other views.
+    /// Patch Terminal tab flat lines for a volatile VT update.
+    /// Filter tabs are not live-patched; the active filter tab is dirtied only
+    /// when Records commit so rebuild_if_needed can rescan the ≤30k ring.
     ///
     /// When the ring drops a flat-line prefix, anchors `scroll_offset_y` (and selection)
     /// so scrolled-up content does not slide under the viewport — same idea as FILES
@@ -266,8 +269,16 @@ impl Engine {
         let viewport_width = self.viewport_width;
 
         let terminal = &mut self.terminals[term_idx];
+        let active_view = terminal.active_view;
+        let records_changed = new_total != old_total || shifted_raw_lines > 0;
         for (i, view) in terminal.views.iter_mut().enumerate() {
             if i == 0 {
+                continue;
+            }
+            // Inactive filter tabs stay stale until selected. Overlay-only
+            // frames must not rebuild or replace an active filter tab with
+            // the ~40-row live screen (that was the 1↔11 jump).
+            if !records_changed || i != active_view {
                 continue;
             }
             view.mark_flat_lines_dirty();
@@ -412,11 +423,30 @@ impl Engine {
         let cmdline = crate::spawn_resolve::format_spawn_cmdline(&command, &args, cwd.as_deref());
         self.status_message = format!("Running: {cmdline}");
         self.push_event(json!({"type":"status","message": self.status_message}));
+        // New Program: drop the previous child's screen. Keeping it as
+        // scrollback made Follow (live grid) and overlay (wheel / Enter)
+        // show different buffers, and typing after exit spawned a shell
+        // on top of uname output.
+        let term_size = self.viewport_pty_size();
+        let generation = self.bump_pty_generation_for(&id);
+        if let Some(pty) = self.ptys.get_mut(&id) {
+            pty.stop();
+        }
+        {
+            let terminal = self.active_terminal_mut();
+            terminal.buffer.clear();
+            terminal
+                .ingest
+                .reset_with_size(term_size.cols as usize, term_size.rows as usize);
+            terminal.scroll_offset_y = 0.0;
+            for view in &mut terminal.views {
+                view.clear_flat_lines();
+            }
+        }
         self.active_terminal_mut().exit_code = None;
         self.active_terminal_mut().running = true;
         self.sync_terminal_geometry();
         let size = self.viewport_pty_size();
-        let generation = self.bump_pty_generation_for(&id);
         let start_result = {
             let pty = self.ptys.entry(id.clone()).or_default();
             let _ = pty.set_size(size);

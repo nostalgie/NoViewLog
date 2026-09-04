@@ -122,3 +122,16 @@ fn terminal_row_status_dot_is_colored_per_section() {
         "FILES rows wire status-dot-color to Theme.include"
     );
 }
+
+#[test]
+fn shell_only_terminal_row_has_no_stop_button() {
+    let app = fs::read_to_string(ui_dir().join("app.slint")).unwrap();
+    assert!(
+        app.contains("show-run-stop: term.has-launch"),
+        "Play/Stop is only for Programs with a saved command, not a blank shell"
+    );
+    assert!(
+        app.contains("show-edit-launch: true"),
+        "blank TERMINALS rows still expose Edit Launch"
+    );
+}

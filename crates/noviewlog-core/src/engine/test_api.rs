@@ -88,6 +88,17 @@ impl Engine {
             .ensure_live_screen(&mut terminal.buffer);
     }
 
+    #[cfg(test)]
+    pub fn live_screen_text_for_test(&self) -> String {
+        if !self.has_active_terminal() {
+            return String::new();
+        }
+        self.active_terminal()
+            .ingest
+            .live_screen_lines()
+            .join("\n")
+    }
+
     /// Append lines like PTY ingest (`mark_dirty = false`) so inactive views keep
     /// their record cursors and catch up incrementally when selected.
     #[cfg(test)]
@@ -230,6 +241,11 @@ impl Engine {
         self.active_view().auto_follow
     }
 
+    #[cfg(test)]
+    pub fn paints_live_vt_grid_for_test(&self) -> bool {
+        self.paints_live_vt_grid()
+    }
+
     pub fn scroll_offset_y_for_test(&self) -> f32 {
         self.active_terminal().scroll_offset_y
     }
@@ -320,6 +336,11 @@ impl Engine {
     #[cfg(test)]
     pub fn match_offsets_len_for_test(&self) -> usize {
         self.active_view().match_offsets.len()
+    }
+
+    #[cfg(test)]
+    pub fn overlay_len_for_test(&self) -> usize {
+        self.active_view().overlay_len()
     }
 
     #[cfg(test)]
