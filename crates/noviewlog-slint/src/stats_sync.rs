@@ -234,6 +234,9 @@ fn stats_terminal_to_info(term: &StatsTerminal) -> TerminalInfo {
         has_launch: term.has_launch,
         launch_command: SharedString::from(term.launch_command.as_str()),
         launch_args: SharedString::from(term.launch_args.as_str()),
+        launch_cwd: SharedString::from(term.launch_cwd.as_str()),
+        launch_wsl: term.launch_wsl,
+        launch_wsl_distro: SharedString::from(term.launch_wsl_distro.as_str()),
     }
 }
 
@@ -268,6 +271,9 @@ fn terminals_model_differs(model: &VecModel<TerminalInfo>, next: &[TerminalInfo]
             || cur.has_launch != term.has_launch
             || cur.launch_command != term.launch_command
             || cur.launch_args != term.launch_args
+            || cur.launch_cwd != term.launch_cwd
+            || cur.launch_wsl != term.launch_wsl
+            || cur.launch_wsl_distro != term.launch_wsl_distro
         {
             return true;
         }

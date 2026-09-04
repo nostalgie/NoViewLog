@@ -110,15 +110,28 @@ The live VT screen of a running Terminal SHALL remain in the emulator grid. The 
 - **WHEN** live output causes rows to scroll off the top of the VT screen
 - **THEN** those rows are committed into the Record buffer as scrollback
 
-### Requirement: Filter tabs see committed scrollback only
+### Requirement: Filter tabs show committed scrollback plus filtered live overlay
 
-Filter tabs SHALL present Records from committed scrollback. In-place live-screen frames (spinners, the current prompt line) MUST NOT appear on a filter tab until the corresponding rows have scrolled off the VT screen and been committed.
+Live Terminal filter tabs SHALL rebuild from the session Record ring (at most `max_scrollback_lines`, ≤30k) when the user switches onto that tab, when its include/exclude or severity filters change, and when new rows commit while that tab is selected. After that rebuild, the engine SHALL apply the current live-screen overlay once as a filtered tail so short in-screen output (for example `uname`) is visible. Overlay frames MUST NOT become a Record per spinner tick. Overlay-only PTY updates MUST NOT replace the tab with only the current live screen or drop already-rebuilt committed matches. Inactive filter tabs SHALL stay stale until selected. File-session filter tabs keep the whole-file match index; live Terminals MUST NOT use that path.
 
-#### Scenario: Spinner stays on the Terminal tab
+#### Scenario: Unfiltered filter tab shows short live output
+
+- **WHEN** a running Program has output still on the live screen (not yet scrolled into Records) and the user opens a filter tab with no include/exclude rules
+- **THEN** that tab shows the live overlay text
+- **AND** the Record buffer length does not increase solely because the overlay was shown
+
+#### Scenario: Spinner does not add Records on a filter tab
 
 - **WHEN** a process redraws a spinner on the live screen and a filter tab is open
 - **THEN** the Terminal tab shows the spinner updating in place
 - **AND** the filter tab does not gain a new Record for each spinner frame
+- **AND** already-rebuilt committed matching lines on that filter tab remain
+
+#### Scenario: Switch onto include filter after scrollback commit
+
+- **WHEN** matching lines have scrolled off the VT screen into Records and the user switches onto an include filter tab
+- **THEN** that tab shows those committed matching lines
+- **AND** a later overlay-only live-screen update does not drop that committed prefix
 
 ### Requirement: Cheap committed ingest under flood
 

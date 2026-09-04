@@ -763,7 +763,9 @@ export component TerminalRow inherits TouchArea {
     in property <bool> running;
     in property <bool> active;
     in property <bool> show-close;
-    // Live terminals: show Run when stopped / Stop when running. Files: false.
+    // Pencil: Edit Launch (live terminals). FILES: false.
+    in property <bool> show-edit-launch: false;
+    // Play/Stop only when a Program has a saved command. Shell-only rows: false.
     in property <bool> show-run-stop: false;
     in property <bool> show-refresh: false;
     in property <string> term-id: "";
@@ -1044,7 +1046,7 @@ export component TerminalRow inherits TouchArea {
         }
 
         // Action icons share one row so Path geometry aligns on a common baseline.
-        if root.show-run-stop || root.show-refresh || root.show-close: VerticalLayout {
+        if root.show-edit-launch || root.show-run-stop || root.show-refresh || root.show-close: VerticalLayout {
             horizontal-stretch: 0;
             vertical-stretch: 1;
             alignment: center;
@@ -1053,7 +1055,7 @@ export component TerminalRow inherits TouchArea {
                 spacing: 0;
                 alignment: center;
 
-                if root.show-run-stop: TerminalRowIcon {
+                if root.show-edit-launch: TerminalRowIcon {
                     kind: "edit";
                     icon-opacity: root.renaming ? 0.0 : 1.0;
                     enabled: !root.renaming;

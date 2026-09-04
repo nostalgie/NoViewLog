@@ -730,6 +730,14 @@ impl Engine {
             }
             scroll_offset_y = new_scroll;
             self.active_terminal_mut().scroll_offset_y = scroll_offset_y;
+        } else if !self.active_terminal().is_file_session() {
+            // Live-grid Follow uses a taller (ring + screen) range. After
+            // leaving Follow, clamp so overlay paint cannot skip the top.
+            let local_max = self.local_window_max_scroll();
+            if scroll_offset_y > local_max {
+                scroll_offset_y = local_max;
+                self.active_terminal_mut().scroll_offset_y = scroll_offset_y;
+            }
         }
 
         if !running && flat_lines.is_empty() {
@@ -813,12 +821,16 @@ impl Engine {
         if !self.has_active_terminal() {
             return;
         }
-        // Terminal tab: auto-start an interactive shell so typing works without ▶ Start.
+        // Terminal tab: auto-start an interactive shell so typing works without Start.
+        // Programs with a saved command stay stopped after exit (no shell spawn).
         if !self.active_terminal().running {
             if self.active_terminal().active_view != 0 {
                 return;
             }
             if self.active_terminal().is_file_session() {
+                return;
+            }
+            if self.active_terminal().launch.command.is_some() {
                 return;
             }
             self.start_interactive_shell();
@@ -978,8 +990,8 @@ impl Engine {
         let before_records = view.flat_lines_record_cursor;
         let before_lines = view.flat_lines.len();
         let search_was_dirty = view.is_search_dirty();
-        let rebuild_committed = is_live_terminal_tab
-            && (view.is_flat_lines_dirty() || view.flat_lines_record_cursor < records_len);
+        let rebuild_committed =
+            !is_file && (view.is_flat_lines_dirty() || view.flat_lines_record_cursor < records_len);
         if rebuild_committed {
             view.strip_live_overlay();
         }
@@ -989,14 +1001,26 @@ impl Engine {
             let view = views.get_mut(active).expect("active view");
             view.rebuild(buffer)
         };
-        if is_live_terminal_tab
-            && (rebuild_committed || terminal.views[0].overlay_len() == 0)
-        {
+        // Live overlay is a snapshot at rebuild time, not a per-ingest patch.
+        // Filter tabs: apply once after a committed rebuild so short `uname` is
+        // visible, then leave the tail alone on overlay-only PTY frames.
+        let overlay_changed = if is_file {
+            false
+        } else if is_live_terminal_tab {
+            if rebuild_committed || terminal.views[0].overlay_len() == 0 {
+                let overlay = terminal.ingest.overlay_flat_lines();
+                terminal.views[0].set_live_overlay(overlay);
+            }
+            false
+        } else if rebuild_committed {
             let overlay = terminal.ingest.overlay_flat_lines();
-            terminal.views[0].set_live_overlay(overlay);
-        }
+            terminal.views[active].set_filtered_live_overlay(overlay)
+        } else {
+            false
+        };
         let view = terminal.views.get_mut(active).expect("active view");
         let changed = search_was_dirty
+            || overlay_changed
             || view.flat_lines_record_cursor != before_records
             || view.flat_lines.len() != before_lines;
         if let Some(row) = scroll_row {
@@ -1031,6 +1055,7 @@ impl Engine {
         // Flush tab strip chrome on the next tick (do not wait for the 250ms stats throttle).
         self.last_stats_at = None;
         self.sync_active_project_from_terminals();
+        let _ = self.rebuild_if_needed();
     }
 
     pub(crate) fn close_tab(&mut self, index: usize) {
@@ -1056,6 +1081,7 @@ impl Engine {
         self.mark_viewport_dirty();
         self.last_stats_at = None;
         self.sync_active_project_from_terminals();
+        let _ = self.rebuild_if_needed();
     }
 
     pub(crate) fn restore_tab(&mut self) {
@@ -1071,18 +1097,26 @@ impl Engine {
         self.mark_viewport_dirty();
         self.last_stats_at = None;
         self.sync_active_project_from_terminals();
+        let _ = self.rebuild_if_needed();
     }
 
     pub(crate) fn switch_tab(&mut self, index: usize) {
         let terminal = self.active_terminal_mut();
         if index < terminal.views.len() && index != terminal.active_view {
+            let is_file = terminal.is_file_session();
             terminal.active_view = index;
             terminal.scroll_offset_y = 0.0;
             terminal.scroll_x = 0.0;
             terminal.selection = None;
+            // Live filter tabs scan the ≤30k Record ring on select (not a
+            // FILES match index). Overlay snapshot is applied in rebuild_if_needed.
+            if index != 0 && !is_file {
+                terminal.views[index].mark_flat_lines_dirty();
+            }
             self.mark_viewport_dirty();
             self.last_stats_at = None;
             self.sync_active_project_from_terminals();
+            let _ = self.rebuild_if_needed();
         }
     }
 

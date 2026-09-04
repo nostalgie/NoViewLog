@@ -28,6 +28,9 @@ impl Engine {
                 program_id: t.program_id.clone(),
                 launch_command: t.launch.command.clone().unwrap_or_default(),
                 launch_args: t.launch.args.join(" "),
+                launch_cwd: t.launch.cwd.clone().unwrap_or_default(),
+                launch_wsl: t.launch.wsl,
+                launch_wsl_distro: t.launch.wsl_distro.clone().unwrap_or_default(),
             };
             if t.is_file_session() {
                 files.push(row);

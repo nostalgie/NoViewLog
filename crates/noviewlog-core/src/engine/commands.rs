@@ -202,6 +202,10 @@ pub enum Command {
         args: Vec<String>,
         #[serde(default)]
         cwd: Option<String>,
+        #[serde(default)]
+        wsl: bool,
+        #[serde(default)]
+        wsl_distro: Option<String>,
     },
     SetSettings {
         max_scrollback_lines: usize,
@@ -310,12 +314,7 @@ impl Engine {
                         self.scroll_file_to_global_offset(offset);
                     }
                 } else {
-                    let max_scroll = self.max_scroll_offset();
-                    self.active_terminal_mut().scroll_offset_y =
-                        offset.clamp(0.0, max_scroll);
-                    self.sync_follow_from_scroll();
-                    self.maybe_prefetch_file_window();
-                    self.mark_viewport_dirty();
+                    self.scroll_to_offset(offset);
                 }
             }
             Command::ScrollLines { delta } => self.scroll_by_lines(delta),
@@ -346,6 +345,9 @@ impl Engine {
                         self.mark_viewport_dirty();
                     } else {
                         self.materialize_live_terminal_tab();
+                        let max = self.max_scroll_offset();
+                        let y = self.active_terminal().scroll_offset_y.min(max);
+                        self.active_terminal_mut().scroll_offset_y = y;
                     }
                     self.last_stats_at = None;
                 }
@@ -415,7 +417,16 @@ impl Engine {
                 command,
                 args,
                 cwd,
-            } => self.program_set_launch(terminal_id.as_deref(), command, args, cwd),
+                wsl,
+                wsl_distro,
+            } => self.program_set_launch(
+                terminal_id.as_deref(),
+                command,
+                args,
+                cwd,
+                wsl,
+                wsl_distro,
+            ),
             Command::SetSettings {
                 max_scrollback_lines,
             } => self.set_settings(max_scrollback_lines),

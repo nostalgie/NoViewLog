@@ -312,6 +312,8 @@ impl Engine {
         command: Option<String>,
         args: Vec<String>,
         cwd: Option<String>,
+        wsl: bool,
+        wsl_distro: Option<String>,
     ) {
         let id = terminal_id
             .map(|s| s.to_string())
@@ -330,8 +332,14 @@ impl Engine {
         term.launch.command = cmd;
         term.launch.args = args;
         term.launch.cwd = cwd.filter(|c| !c.trim().is_empty());
-        term.launch.wsl = false;
-        term.launch.wsl_distro = None;
+        term.launch.wsl = wsl;
+        term.launch.wsl_distro = if wsl {
+            wsl_distro
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
         term.launch.log_file = None;
         if let Some(ref cwd) = term.launch.cwd {
             term.cwd = cwd.clone();

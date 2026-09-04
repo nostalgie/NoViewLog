@@ -28,7 +28,7 @@ import {
     SectionDot,
     EngineScrollBar,
 } from "sidebar.slint";
-import { FormTextField, FormDialogPanel } from "form-dialogs.slint";
+import { FormTextField, FormCheckField, FormDialogPanel } from "form-dialogs.slint";
 import { ProjectsDialog } from "projects-dialog.slint";
 
 // Bundled proportional UI face (OFL) — matches Linux Noto look on Windows.
@@ -72,6 +72,7 @@ export component AppWindow inherits Window {
     in-out property <bool> is-file-session: false;
     in-out property <bool> terminals-section-expanded: true;
     in-out property <bool> files-section-expanded: true;
+    in property <bool> host-is-windows: false;
 
     // Per-tab IN/OUT filters (hidden / no-op on the Terminal tab; engine rejects those filters).
     in-out property <[FilterInfo]> filters-model;
@@ -180,7 +181,7 @@ export component AppWindow inherits Window {
     callback project-create(name: string);
     callback project-rename(id: string, name: string);
     callback project-delete(id: string);
-    callback program-set-launch(terminal-id: string, command: string, args-text: string, cwd: string);
+    callback program-set-launch(terminal-id: string, command: string, args-text: string, cwd: string, wsl: bool, wsl-distro: string);
 
     // IN/OUT filters → engine filter_add / filter_toggle / filter_remove / filter_update / filter_clear.
     // filter-type is "include" or "exclude"; use-regex is the draft `.*` toggle.
@@ -323,12 +324,16 @@ export component AppWindow inherits Window {
     property <string> launch-command-draft: "";
     property <string> launch-args-draft: "";
     property <string> launch-cwd-draft: "";
+    property <bool> launch-wsl-draft: false;
+    property <string> launch-wsl-distro-draft: "";
 
-    function open-edit-launch(term-id: string, command: string, args-text: string, cwd: string) {
+    function open-edit-launch(term-id: string, command: string, args-text: string, cwd: string, wsl: bool, wsl-distro: string) {
         root.launch-edit-terminal-id = term-id;
         root.launch-command-draft = command;
         root.launch-args-draft = args-text;
         root.launch-cwd-draft = cwd;
+        root.launch-wsl-draft = wsl;
+        root.launch-wsl-distro-draft = wsl-distro;
         edit-launch-dlg.show();
     }
 
@@ -337,7 +342,9 @@ export component AppWindow inherits Window {
             root.launch-edit-terminal-id,
             root.launch-command-draft,
             root.launch-args-draft,
-            root.launch-cwd-draft
+            root.launch-cwd-draft,
+            root.launch-wsl-draft,
+            root.launch-wsl-distro-draft
         );
         edit-launch-dlg.close();
     }
@@ -1359,7 +1366,8 @@ export component AppWindow inherits Window {
                                         running: term.running;
                                         active: term.index == root.active-terminal-index;
                                         show-close: root.terminals-model.length > 1;
-                                        show-run-stop: true;
+                                        show-edit-launch: true;
+                                        show-run-stop: term.has-launch;
                                         can-rename: true;
                                         status-dot-color: term.running ? Theme.accent : Theme.text-muted;
                                         term-id: term.id;
@@ -1392,7 +1400,9 @@ export component AppWindow inherits Window {
                                                 term.id,
                                                 term.launch-command,
                                                 term.launch-args,
-                                                term.cwd
+                                                term.launch-cwd,
+                                                term.launch-wsl,
+                                                term.launch-wsl-distro
                                             );
                                         }
                                         wheel(dy) => { root.scroll-terminals-by(dy); }
@@ -2666,7 +2676,7 @@ export component AppWindow inherits Window {
 
     edit-launch-dlg := PopupWindow {
         x: (parent.width - Theme.overlay-width) / 2;
-        y: max(48px, (parent.height - 360px) / 2);
+        y: max(48px, (parent.height - 480px) / 2);
         width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
@@ -2690,8 +2700,20 @@ export component AppWindow inherits Window {
                 accepted => { root.confirm-edit-launch(); }
                 cancelled => { edit-launch-dlg.close(); }
             }
+            if root.host-is-windows: FormCheckField {
+                label: "Run in WSL";
+                checked <=> root.launch-wsl-draft;
+            }
+            if root.host-is-windows && root.launch-wsl-draft: FormTextField {
+                label: "WSL distro (empty = default)";
+                text <=> root.launch-wsl-distro-draft;
+                accepted => { root.confirm-edit-launch(); }
+                cancelled => { edit-launch-dlg.close(); }
+            }
             FormTextField {
-                label: "Working directory";
+                label: root.host-is-windows && root.launch-wsl-draft
+                    ? "Working directory (Linux path, e.g. /home/...)"
+                    : "Working directory";
                 text <=> root.launch-cwd-draft;
                 accepted => { root.confirm-edit-launch(); }
                 cancelled => { edit-launch-dlg.close(); }

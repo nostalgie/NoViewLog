@@ -1172,6 +1172,12 @@ impl TerminalIngest {
         (self.emu.cols(), self.emu.rows())
     }
 
+    /// Current VT screen as painted lines (Follow live grid), including the
+    /// in-progress row. Used by tests that must not wait for Record commit.
+    pub fn live_screen_lines(&self) -> Vec<String> {
+        self.emu.screen_lines()
+    }
+
     /// Ensure the live screen exists even before the first PTY byte (empty
     /// grid with a visible caret at 0,0). Does not write Records.
     pub fn ensure_live_screen(&mut self, _buffer: &mut RecordBuffer) {}
