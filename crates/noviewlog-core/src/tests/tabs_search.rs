@@ -397,7 +397,7 @@ fn search_highlight_marks_active_match() {
     let highlighted = highlight_search_in_segments(&segments, &pattern, Some((8, 11)));
     let styled: Vec<_> = highlighted
         .iter()
-        .filter_map(|s| s.style)
+        .filter_map(|s| s.style.clone())
         .collect();
     assert_eq!(styled.len(), 2);
     assert!(styled[0].search);

@@ -560,4 +560,70 @@ impl Engine {
         let sel = self.active_terminal().selection.filter(|s| !s.is_empty())?;
         Some(selection_plain_text(&self.active_view().flat_lines, &sel))
     }
+
+    /// Open the OSC 8 hyperlink under a viewport point (if any).
+    ///
+    /// Called on pointer-up without a drag; a miss is a silent no-op.
+    pub(crate) fn open_link_at(&mut self, x: f32, y: f32) {
+        if !self.has_active_terminal() {
+            return;
+        }
+        let view = self.active_view();
+        let metrics = self.renderer.metrics();
+        let visual = build_visual_lines(
+            &view.flat_lines,
+            view.wrap_lines,
+            self.viewport_width,
+            metrics.cell_width,
+        );
+        if visual.is_empty() {
+            return;
+        }
+        let terminal = self.active_terminal();
+        let pos = pos_at_pixel(
+            x,
+            y,
+            terminal.scroll_offset_y,
+            terminal.scroll_x,
+            view.wrap_lines,
+            metrics,
+            &visual,
+            &view.flat_lines,
+        );
+        let Some(line) = view.flat_lines.get(pos.line_index) else {
+            return;
+        };
+        let off = pos.byte_offset.min(line.raw.len());
+        let mut cursor = 0usize;
+        for seg in &line.segments {
+            let seg_end = cursor + seg.text.len();
+            if off >= cursor && off < seg_end {
+                if let Some(uri) = seg.style.as_ref().and_then(|s| s.link.clone()) {
+                    open_url(&uri);
+                }
+                return;
+            }
+            cursor = seg_end;
+        }
+    }
+}
+
+/// Launch the OS opener for an OSC 8 URI (xdg-open / open / cmd start).
+fn open_url(uri: &str) {
+    let result = if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", uri])
+            .spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(uri).spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(uri)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+    if let Err(e) = result {
+        let _ = e; // opener missing / spawn failed — non-fatal
+    }
 }

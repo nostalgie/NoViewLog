@@ -293,7 +293,7 @@ pub struct TextSegment {
     pub style: Option<TextStyle>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TextStyle {
     pub fg: Option<(u8, u8, u8)>,
     pub bg: Option<(u8, u8, u8)>,
@@ -303,6 +303,8 @@ pub struct TextStyle {
     pub search: bool,
     pub search_current: bool,
     pub selected: bool,
+    /// OSC 8 hyperlink target for this run (`None` = plain text).
+    pub link: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

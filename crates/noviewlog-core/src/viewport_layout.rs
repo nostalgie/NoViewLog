@@ -1,4 +1,4 @@
-use crate::color_emoji::{display_cell_count, is_zero_width_emoji_mark};
+use crate::color_emoji::{char_kind, display_cell_count, CharKind};
 use crate::core::types::FlatLine;
 use crate::viewport::ViewportMetrics;
 
@@ -450,7 +450,7 @@ fn wrap_flat_line(flat_index: usize, raw: &str, max_cols: usize) -> Vec<VisualLi
     let mut col = 0usize;
 
     for (byte_idx, ch) in raw.char_indices() {
-        if is_zero_width_emoji_mark(ch) {
+        if char_kind(ch) != CharKind::Advance {
             continue;
         }
         if col >= max_cols {
@@ -734,7 +734,7 @@ pub fn slice_segments(
         let local_end = (end - seg_start).min(seg.text.len());
         out.push(TextSegment {
             text: seg.text[local_start..local_end].to_string(),
-            style: seg.style,
+            style: seg.style.clone(),
         });
     }
     out
