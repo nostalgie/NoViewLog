@@ -23,6 +23,8 @@
 //! on-screen region is rendered live and repaints in place, so spinners replace
 //! correctly while every finalized line (tables, ✔ steps, banners) survives.
 
+use std::sync::Arc;
+
 use vte::{Params, Parser, Perform};
 
 use crate::core::ansi::{ansi_256_color, ansi_basic_color};
@@ -49,6 +51,8 @@ struct Pen {
     bold: bool,
     dim: bool,
     underline: bool,
+    /// Active OSC 8 hyperlink (not an SGR property; separate lifecycle).
+    link: Option<Arc<str>>,
 }
 
 impl Pen {
@@ -159,6 +163,7 @@ impl Row {
         };
         let mut out = String::new();
         let mut cur = Pen::default();
+        let mut cur_link: Option<Arc<str>> = None;
         for cell in &self.cells[..last] {
             if cell.pen != cur {
                 out.push_str("\x1b[");
@@ -166,10 +171,24 @@ impl Row {
                 out.push('m');
                 cur = cell.pen.clone();
             }
+            if cell.pen.link != cur_link {
+                if cur_link.is_some() {
+                    out.push_str("\x1b]8;;\x07");
+                }
+                if let Some(uri) = &cell.pen.link {
+                    out.push_str("\x1b]8;;");
+                    out.push_str(uri);
+                    out.push('\x07');
+                }
+                cur_link = cell.pen.link.clone();
+            }
             out.push(cell.ch);
         }
         if !cur.is_default() {
             out.push_str("\x1b[0m");
+        }
+        if cur_link.is_some() {
+            out.push_str("\x1b]8;;\x07");
         }
         out
     }
@@ -209,6 +228,7 @@ fn pen_to_style(pen: &Pen) -> Option<TextStyle> {
         search: false,
         search_current: false,
         selected: false,
+        link: pen.link.clone(),
     })
 }
 
@@ -1000,6 +1020,27 @@ impl Perform for TerminalEmulator {
                     }
                 }
             }
+            return;
+        }
+        // OSC 8 ; params ; uri — hyperlink start; empty uri closes it.
+        // URIs may contain ';', so rejoin everything after the params field.
+        if params.first().is_some_and(|p| p == b"8") {
+            if params.len() >= 2 {
+                let mut uri = String::new();
+                for (i, part) in params.iter().enumerate().skip(2) {
+                    if i > 2 {
+                        uri.push(';');
+                    }
+                    if let Ok(s) = std::str::from_utf8(part) {
+                        uri.push_str(s);
+                    }
+                }
+                self.pen.link = if uri.is_empty() {
+                    None
+                } else {
+                    Some(Arc::from(uri))
+                };
+            }
         }
     }
 }
@@ -1293,6 +1334,49 @@ mod tests {
         feed(&mut emu, b"\x1b[2X");
         assert_eq!(emu.screen_lines(), vec!["a".to_string()]);
         assert_eq!(emu.screen_cursor(), ScreenCursor { line: 0, col: 1 });
+    }
+
+    #[test]
+    fn osc8_grid_roundtrip_through_serialization() {
+        let mut emu = TerminalEmulator::new(80, 24);
+        feed(&mut emu, b"\x1b]8;;https://example.com\x07visit\x1b]8;;\x07 ok");
+        // Serialize → line parser must restore the link style on "visit" only.
+        let segs = crate::core::ansi::parse_ansi_line(&emu.screen_lines()[0]);
+        assert_eq!(
+            segs.iter().map(|s| s.text.as_str()).collect::<String>(),
+            "visit ok"
+        );
+        let linked: Vec<&str> = segs
+            .iter()
+            .filter(|s| s.style.as_ref().is_some_and(|st| st.link.is_some()))
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(linked, vec!["visit"]);
+        // Overlay/grid FlatLines carry the link in segment styles.
+        let flat = emu.overlay_flat_lines();
+        assert!(flat[0].segments.iter().any(|s| {
+            s.text == "visit" && s.style.as_ref().is_some_and(|st| st.link.is_some())
+        }));
+    }
+
+    #[test]
+    fn osc8_reopen_replaces_uri() {
+        let mut emu = TerminalEmulator::new(80, 24);
+        feed(
+            &mut emu,
+            b"\x1b]8;;https://a\x07A\x1b]8;;https://b\x07B\x1b]8;;\x07",
+        );
+        let segs = crate::core::ansi::parse_ansi_line(&emu.screen_lines()[0]);
+        let a = segs.iter().find(|s| s.text == "A").unwrap();
+        let b = segs.iter().find(|s| s.text == "B").unwrap();
+        assert_eq!(
+            a.style.as_ref().unwrap().link.as_deref(),
+            Some("https://a")
+        );
+        assert_eq!(
+            b.style.as_ref().unwrap().link.as_deref(),
+            Some("https://b")
+        );
     }
 
     #[test]

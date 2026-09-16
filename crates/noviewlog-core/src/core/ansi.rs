@@ -7,6 +7,8 @@
 
 use crate::core::types::{TextSegment, TextStyle};
 
+use std::sync::Arc;
+
 fn is_csi_param(c: char) -> bool {
     matches!(c as u8, 0x30..=0x3F)
 }
@@ -31,6 +33,8 @@ pub fn strip_ansi(input: &str) -> String {
 pub fn parse_ansi_line(input: &str) -> Vec<TextSegment> {
     let mut segments = Vec::new();
     let mut current = TextStyle::default();
+    // Currently active OSC 8 URI (`None` = plain text).
+    let mut current_link: Option<Arc<str>> = None;
     let mut text = String::new();
     let mut chars = input.chars().peekable();
 
@@ -41,7 +45,7 @@ pub fn parse_ansi_line(input: &str) -> Vec<TextSegment> {
         let style = if current == &TextStyle::default() {
             None
         } else {
-            Some(*current)
+            Some(current.clone())
         };
         segments.push(TextSegment {
             text: std::mem::take(text),
@@ -72,21 +76,38 @@ pub fn parse_ansi_line(input: &str) -> Vec<TextSegment> {
                     if final_byte == Some('m') && intermediate.is_empty() && !params.contains('?') {
                         flush(&mut text, &current, &mut segments);
                         apply_sgr(&mut current, &params);
+                        current.link = current_link.clone();
                     }
                     // Non-SGR CSI (cursor, erase, etc.) is dropped.
                 }
                 Some(']') => {
-                    // OSC: skip until BEL or ST
                     chars.next();
+                    // Capture the OSC body (until BEL or ST) before dropping it.
+                    let mut body = String::new();
+                    let mut terminated = false;
                     while let Some(c) = chars.next() {
                         if c == '\u{07}' {
+                            terminated = true;
                             break;
                         }
                         if c == '\u{1b}' {
                             if chars.peek() == Some(&'\\') {
                                 chars.next();
                             }
+                            terminated = true;
                             break;
+                        }
+                        body.push(c);
+                    }
+                    if terminated {
+                        if let Some(uri) = parse_osc8_uri(&body) {
+                            flush(&mut text, &current, &mut segments);
+                            current_link = if uri.is_empty() {
+                                None // OSC 8 with empty URI closes the link
+                            } else {
+                                Some(Arc::from(uri))
+                            };
+                            current.link = current_link.clone();
                         }
                     }
                 }
@@ -195,6 +216,15 @@ fn apply_sgr(style: &mut TextStyle, params: &str) {
     }
 }
 
+/// OSC 8 body `8;params;uri` → the URI (`Some("")` when the link closes).
+/// Returns `None` for non-OSC-8 bodies.
+pub fn parse_osc8_uri(body: &str) -> Option<&str> {
+    let rest = body.strip_prefix("8;")?;
+    // Params run to the first ';'; the URI is everything after it.
+    let (_, uri) = rest.split_once(';')?;
+    Some(uri)
+}
+
 pub(crate) fn ansi_basic_color(index: u32, bright: bool) -> (u8, u8, u8) {
     // GitHub-dark-ish palette close to common terminal themes.
     let colors = if bright {
@@ -263,13 +293,13 @@ pub fn overlay_styles(base: &[TextSegment], overlays: &[TextSegment]) -> Vec<Tex
     let mut base_styles: Vec<Option<TextStyle>> = Vec::with_capacity(plain.len());
     for seg in base {
         for _ in seg.text.bytes() {
-            base_styles.push(seg.style);
+            base_styles.push(seg.style.clone());
         }
     }
     let mut over_styles: Vec<Option<TextStyle>> = Vec::with_capacity(plain.len());
     for seg in overlays {
         for _ in seg.text.bytes() {
-            over_styles.push(seg.style);
+            over_styles.push(seg.style.clone());
         }
     }
 
@@ -282,9 +312,9 @@ pub fn overlay_styles(base: &[TextSegment], overlays: &[TextSegment]) -> Vec<Tex
         while j < bytes.len() && (bytes[j] & 0b1100_0000) == 0b1000_0000 {
             j += 1;
         }
-        let mut style = base_styles[i];
-        if let Some(over) = over_styles[i] {
-            style = Some(merge_style(style.unwrap_or_default(), over));
+        let mut style = base_styles[i].clone();
+        if let Some(over) = &over_styles[i] {
+            style = Some(merge_style(style.unwrap_or_default(), over.clone()));
         }
         let ch = &plain[i..j];
         if let Some(last) = out.last_mut() {
@@ -325,6 +355,7 @@ fn merge_style(base: TextStyle, over: TextStyle) -> TextStyle {
         search: over.search || base.search,
         search_current: over.search_current || base.search_current,
         selected: over.selected || base.selected,
+        link: over.link.or(base.link),
     }
 }
 
@@ -337,7 +368,7 @@ mod tests {
         let segs = parse_ansi_line("\u{1b}[32m✔ Building...\u{1b}[0m");
         let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "✔ Building...");
-        assert!(segs.iter().any(|s| s.style.is_some_and(|st| st.fg == Some((63, 185, 80)))));
+        assert!(segs.iter().any(|s| s.style.as_ref().is_some_and(|st| st.fg == Some((63, 185, 80)))));
     }
 
     #[test]
@@ -350,7 +381,7 @@ mod tests {
         let segs = parse_ansi_line("\u{1b}[?25l\u{1b}[32mOK\u{1b}[0m\u{1b}[?25h");
         assert_eq!(strip_ansi("\u{1b}[?25l\u{1b}[32mOK\u{1b}[0m\u{1b}[?25h"), "OK");
         assert_eq!(segs[0].text, "OK");
-        assert!(segs[0].style.unwrap().fg.is_some());
+        assert!(segs[0].style.clone().unwrap().fg.is_some());
     }
 
     #[test]
@@ -363,5 +394,52 @@ mod tests {
     #[test]
     fn strip_ansi_plain() {
         assert_eq!(strip_ansi("hello"), "hello");
+    }
+
+    #[test]
+    fn osc8_hyperlink_becomes_link_style() {
+        let line = "\u{1b}]8;;https://example.com/docs\u{7}docs\u{1b}]8;;\u{7} after";
+        let segs = parse_ansi_line(line);
+        let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "docs after");
+
+        let linked = segs
+            .iter()
+            .find(|s| s.style.as_ref().is_some_and(|st| st.link.is_some()))
+            .expect("linked segment");
+        assert_eq!(linked.text, "docs");
+        assert_eq!(
+            linked.style.as_ref().unwrap().link.as_deref(),
+            Some("https://example.com/docs")
+        );
+        assert!(
+            segs.iter()
+                .all(|s| s.style.as_ref().and_then(|st| st.link.as_deref()) != Some("https://example.com/docs")
+                    || s.text == "docs"),
+            "link must close at the empty OSC 8"
+        );
+    }
+
+    #[test]
+    fn osc8_st_terminated_and_stripped() {
+        let line = "\u{1b}]8;;file:///tmp/x\u{1b}\\click\u{1b}]8;;\u{1b}\\";
+        assert_eq!(strip_ansi(line), "click");
+        let segs = parse_ansi_line(line);
+        assert!(segs[0].style.as_ref().unwrap().link.is_some());
+    }
+
+    #[test]
+    fn osc7_still_ignored_by_line_parser() {
+        let segs = parse_ansi_line("\u{1b}]7;file:///home/user\u{7}text");
+        assert_eq!(strip_ansi("\u{1b}]7;file:///home/user\u{7}text"), "text");
+        assert!(segs.iter().all(|s| s.style.as_ref().is_none()));
+    }
+
+    #[test]
+    fn sgr_after_osc8_keeps_link() {
+        let line = "\u{1b}]8;;https://a.b\u{7}\u{1b}[4mlinked\u{1b}[0m\u{1b}]8;;\u{7}";
+        let segs = parse_ansi_line(line);
+        let st = segs[0].style.as_ref().unwrap();
+        assert!(st.underline && st.link.is_some());
     }
 }

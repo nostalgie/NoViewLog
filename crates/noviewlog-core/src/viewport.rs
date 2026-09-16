@@ -4,8 +4,8 @@ use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSetting
 use fontdue::Font;
 
 use crate::color_emoji::{
-    blit_color_emoji, display_cell_count, is_color_emoji_candidate, is_zero_width_emoji_mark,
-    ColorEmojiAtlas,
+    blit_color_emoji, blit_color_emoji_span, char_kind, display_cell_count, display_items,
+    is_color_emoji_candidate, CharKind, ColorEmojiAtlas,
 };
 use crate::core::ansi::strip_ansi;
 use crate::core::types::{
@@ -760,13 +760,13 @@ fn highlight_selection_in_segments(
         if seg_start < abs_start {
             out.push(TextSegment {
                 text: seg.text[..abs_start - seg_start].to_string(),
-                style: seg.style,
+                style: seg.style.clone(),
             });
         }
 
         let local_start = abs_start.saturating_sub(seg_start);
         let local_end = (abs_end - seg_start).min(seg.text.len());
-        let mut style = seg.style.unwrap_or_default();
+        let mut style = seg.style.clone().unwrap_or_default();
         style.selected = true;
         out.push(TextSegment {
             text: seg.text[local_start..local_end].to_string(),
@@ -776,7 +776,7 @@ fn highlight_selection_in_segments(
         if seg_end > abs_end {
             out.push(TextSegment {
                 text: seg.text[local_end..].to_string(),
-                style: seg.style,
+                style: seg.style.clone(),
             });
         }
     }
@@ -805,7 +805,7 @@ fn draw_segments(
         if text.is_empty() {
             continue;
         }
-        let (fg, bold, bg) = style_to_draw(segment.style);
+        let (fg, bold, bg, underline) = style_to_draw(segment.style.as_ref());
         let text_w = text_width(&text, cell_width) as i32;
         if *cursor_x + text_w <= 0 {
             *cursor_x += text_w;
@@ -821,6 +821,22 @@ fn draw_segments(
                 text_w.max(0) as usize,
                 (clip.1 - clip.0).ceil().max(1.0) as usize,
                 bg_color,
+                Some(clip),
+            );
+        }
+        if underline {
+            // Thin bar near the baseline, spanning the whole segment.
+            let uy = (row_top + row_height * 0.82).floor() as i32;
+            let uh = ((row_height / 14.0).round() as usize).max(1);
+            fill_rect(
+                out,
+                width,
+                height,
+                *cursor_x,
+                uy,
+                text_w.max(0) as usize,
+                uh,
+                fg,
                 Some(clip),
             );
         }
@@ -850,18 +866,19 @@ fn draw_segments(
     drew_any
 }
 
-fn style_to_draw(style: Option<LineStyle>) -> ([u8; 4], bool, Option<[u8; 4]>) {
+/// (fg, bold, bg, underline) for a segment style.
+fn style_to_draw(style: Option<&LineStyle>) -> ([u8; 4], bool, Option<[u8; 4]>, bool) {
     let Some(style) = style else {
-        return (DEFAULT_FG, false, None);
+        return (DEFAULT_FG, false, None, false);
     };
     if style.search_current {
-        return (DEFAULT_FG, false, Some(SEARCH_CURRENT_BG));
+        return (DEFAULT_FG, false, Some(SEARCH_CURRENT_BG), style.underline);
     }
     if style.search {
-        return (DEFAULT_FG, false, Some(SEARCH_BG));
+        return (DEFAULT_FG, false, Some(SEARCH_BG), style.underline);
     }
     if style.selected {
-        return (DEFAULT_FG, false, Some(SELECTION_BG));
+        return (DEFAULT_FG, false, Some(SELECTION_BG), style.underline);
     }
     let mut fg = if style.dim { DIM_FG } else { DEFAULT_FG };
     if let Some((r, g, b)) = style.fg {
@@ -871,7 +888,13 @@ fn style_to_draw(style: Option<LineStyle>) -> ([u8; 4], bool, Option<[u8; 4]>) {
     if style.search {
         bg = Some(SEARCH_BG);
     }
-    (fg, style.bold, bg)
+    // OSC 8 links are always underlined (click affordance).
+    (
+        fg,
+        style.bold,
+        bg,
+        style.underline || style.link.is_some(),
+    )
 }
 
 fn text_width(text: &str, cell_width: u32) -> u32 {
@@ -904,31 +927,42 @@ fn draw_text(
     let width_i = width as i32;
     let cell_w = cell_width as i32;
     let mut col: i32 = 0;
-    for ch in text.chars() {
-        // VS16 / ZWJ / other VS: consume without a cell advance (no tofu).
-        if is_zero_width_emoji_mark(ch) {
+    for item in display_items(text) {
+        let item_x = x + col * cell_w;
+        let span = item.cells as i32;
+        col += span.max(0);
+        if span == 0 {
+            // Combining mark: overlay ink onto the previous cell, no advance.
+            let prev_x = item_x - cell_w;
+            if prev_x + cell_w <= 0 || prev_x >= width_i {
+                continue;
+            }
+            draw_char_at(
+                fonts, glyph_cache, out, width, height, prev_x, row_top, clip,
+                item.text, color, bold, font_size,
+            );
             continue;
         }
-        let cell_x = x + col * cell_w;
-        col += 1;
-        if cell_x + cell_w <= 0 {
+        if item_x + span * cell_w <= 0 {
             continue;
         }
-        if cell_x >= width_i {
+        if item_x >= width_i {
             break;
         }
-        // Prefer CBDT color emoji for pictograph ranges when the system font has ink.
-        if is_color_emoji_candidate(ch) {
+        if item.text.chars().count() > 1 {
+            // Multi-scalar cluster (ZWJ sequence, flag pair, keycap): prefer
+            // the composite CBDT glyph spanning the item's cells.
             if let Some(atlas) = color_emoji {
-                if let Some(glyph) = atlas.glyph(ch) {
-                    blit_color_emoji(
+                if let Some(glyph) = atlas.glyph_cluster(item.text) {
+                    blit_color_emoji_span(
                         out,
                         width,
                         height,
-                        cell_x,
+                        item_x,
                         row_top,
                         row_height,
                         cell_width,
+                        item.cells.max(1) as u32,
                         &glyph,
                         clip,
                     );
@@ -936,33 +970,99 @@ fn draw_text(
                 }
             }
         }
-        let font = fonts.pick(ch);
-        let ch_str = ch.to_string();
-        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-        layout.reset(&LayoutSettings {
-            x: 0.0,
-            y: row_top,
-            ..Default::default()
-        });
-        layout.append(&[font], &TextStyle::new(&ch_str, font_size, 0));
-        for glyph in layout.glyphs() {
-            let metrics = font.metrics(glyph.parent, font_size);
-            let glyph_x = cell_x + metrics.xmin;
-            let cached = glyph_cache.rasterize(font, glyph.key);
-            blit_glyph(
-                out,
-                width,
-                height,
-                glyph_x,
-                glyph.y as i32,
-                &cached.bitmap,
-                cached.width,
-                cached.height,
-                color,
-                bold,
-                clip,
-            );
+        // Per-scalar paint within the item (single chars or cluster fallback).
+        let mut sub_col = 0i32;
+        for mch in item.text.chars() {
+            match char_kind(mch) {
+                CharKind::SilentSkip => continue,
+                CharKind::Overlay => {
+                    if sub_col > 0 {
+                        draw_char_at(
+                            fonts, glyph_cache, out, width, height, item_x + (sub_col - 1) * cell_w,
+                            row_top, clip, &mch.to_string(), color, bold, font_size,
+                        );
+                    }
+                }
+                CharKind::Advance => {
+                    let cell_x = item_x + sub_col * cell_w;
+                    sub_col += 1;
+                    if cell_x + cell_w <= 0 || cell_x >= width_i {
+                        continue;
+                    }
+                    // Prefer CBDT color emoji for pictograph ranges when present.
+                    if is_color_emoji_candidate(mch) {
+                        if let Some(atlas) = color_emoji {
+                            if let Some(glyph) = atlas.glyph(mch) {
+                                blit_color_emoji(
+                                    out,
+                                    width,
+                                    height,
+                                    cell_x,
+                                    row_top,
+                                    row_height,
+                                    cell_width,
+                                    &glyph,
+                                    clip,
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    draw_char_at(
+                        fonts, glyph_cache, out, width, height, cell_x, row_top,
+                        clip, &mch.to_string(), color, bold, font_size,
+                    );
+                }
+            }
         }
+    }
+}
+
+/// Rasterize one scalar at a fixed cell position via fontdue (no advance).
+#[allow(clippy::too_many_arguments)]
+fn draw_char_at(
+    fonts: &FontStack,
+    glyph_cache: &mut GlyphCache,
+    out: &mut [u8],
+    width: u32,
+    height: u32,
+    cell_x: i32,
+    row_top: f32,
+    clip: Option<(f32, f32)>,
+    ch_str: &str,
+    color: [u8; 4],
+    bold: bool,
+    font_size: f32,
+) {
+    let ch = match ch_str.chars().next() {
+        Some(c) => c,
+        None => return,
+    };
+    let font = fonts.pick(ch);
+    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+    layout.reset(&LayoutSettings {
+        x: 0.0,
+        y: row_top,
+        ..Default::default()
+    });
+    layout.append(&[font], &TextStyle::new(ch_str, font_size, 0));
+    for glyph in layout.glyphs() {
+        let metrics = font.metrics(glyph.parent, font_size);
+        let glyph_x = cell_x + metrics.xmin;
+        let cached = glyph_cache.rasterize(font, glyph.key);
+        blit_glyph(
+            out,
+            width,
+            height,
+            glyph_x,
+            glyph.y as i32,
+            &cached.bitmap,
+            cached.width,
+            cached.height,
+            color,
+            bold,
+            clip,
+        );
     }
 }
 
@@ -1058,7 +1158,7 @@ mod tests {
 
     #[test]
     fn text_width_ignores_ansi_bytes() {
-        let mut renderer = ViewportRenderer::new();
+        let renderer = ViewportRenderer::new();
         let cell = renderer.metrics.cell_width;
         let plain = text_width("http://localhost:1337", cell);
         let with_ansi = text_width(
@@ -1080,8 +1180,8 @@ mod tests {
         let joined: String = highlighted.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "http://localhost:1337");
         assert_eq!(highlighted.len(), 2);
-        assert!(highlighted[0].style.is_some_and(|s| s.search_current));
-        assert!(!highlighted[1].style.is_some_and(|s| s.search));
+        assert!(highlighted[0].style.as_ref().is_some_and(|s| s.search_current));
+        assert!(!highlighted[1].style.as_ref().is_some_and(|s| s.search));
     }
 
     #[test]
@@ -1463,6 +1563,125 @@ mod tests {
         assert!(
             char_column_lit(&buf_bare, width, marker_col, cell, 0.0),
             "expected '#' after bare emoji in display cell 1"
+        );
+    }
+
+    #[test]
+    fn combining_mark_overlays_base_cell_and_does_not_advance() {
+        let mut renderer = ViewportRenderer::new();
+        let cell = renderer.metrics.cell_width;
+        // "a" + U+0301 + "#": the '#' must land in display cell 1 (mark overlays cell 0).
+        let combined = FlatLine {
+            record_id: 1,
+            line_index: 0,
+            segments: vec![TextSegment {
+                text: "a\u{0301}#".to_string(),
+                style: None,
+            }],
+            raw: "a\u{0301}#".to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
+        let bare = FlatLine {
+            record_id: 2,
+            line_index: 0,
+            segments: vec![TextSegment {
+                text: "a#".to_string(),
+                style: None,
+            }],
+            raw: "a#".to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
+        let width = 120u32;
+        let height = 40u32;
+        let mut buf_combined = vec![0u8; (width * height * 4) as usize];
+        let mut buf_bare = vec![0u8; (width * height * 4) as usize];
+        renderer
+            .render(&mut buf_combined, width, height, &[combined], 0.0, 0.0, false, None, None, None, None, None)
+            .unwrap();
+        renderer
+            .render(&mut buf_bare, width, height, &[bare], 0.0, 0.0, false, None, None, None, None, None)
+            .unwrap();
+        assert!(
+            char_column_lit(&buf_combined, width, 0, cell, 0.0),
+            "base 'a' cell must have ink"
+        );
+        assert!(
+            char_column_lit(&buf_combined, width, 1, cell, 0.0),
+            "expected '#' in display cell 1 after combining mark"
+        );
+        assert!(
+            !char_column_lit(&buf_combined, width, 2, cell, 0.0),
+            "combining mark must not spill into cell 2 (tofu advance)"
+        );
+        // Arabic: base + fatha + shadda renders, no extra cell.
+        let arabic = FlatLine {
+            record_id: 3,
+            line_index: 0,
+            segments: vec![TextSegment {
+                text: "\u{0627}\u{064E}\u{0651}".to_string(),
+                style: None,
+            }],
+            raw: "\u{0627}\u{064E}\u{0651}".to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
+        let mut buf_ar = vec![0u8; (width * height * 4) as usize];
+        renderer
+            .render(&mut buf_ar, width, height, &[arabic], 0.0, 0.0, false, None, None, None, None, None)
+            .unwrap();
+        assert!(
+            char_column_lit(&buf_ar, width, 0, cell, 0.0),
+            "Arabic base cell must have ink"
+        );
+        assert!(
+            !char_column_lit(&buf_ar, width, 1, cell, 0.0),
+            "harakat must not occupy their own cells"
+        );
+    }
+
+    #[test]
+    fn flag_pair_spans_two_cells_and_marker_lands_after() {
+        let mut renderer = ViewportRenderer::new();
+        let cell = renderer.metrics.cell_width;
+        // US flag + '#': '#' must land in display cell 2 (flag spans 2 cells).
+        let line = FlatLine {
+            record_id: 1,
+            line_index: 0,
+            segments: vec![TextSegment {
+                text: "\u{1F1FA}\u{1F1F8}#".to_string(),
+                style: None,
+            }],
+            raw: "\u{1F1FA}\u{1F1F8}#".to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
+        let width = 120u32;
+        let height = 40u32;
+        let mut buf = vec![0u8; (width * height * 4) as usize];
+        renderer
+            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
+            .unwrap();
+        assert!(
+            char_column_lit(&buf, width, 0, cell, 0.0),
+            "flag must paint its first cell"
+        );
+        assert!(
+            char_column_lit(&buf, width, 2, cell, 0.0),
+            "expected '#' in display cell 2 after a 2-cell flag"
+        );
+        assert!(
+            !char_column_lit(&buf, width, 3, cell, 0.0),
+            "flag must not occupy a third cell"
         );
     }
 

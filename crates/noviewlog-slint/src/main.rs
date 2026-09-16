@@ -573,6 +573,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 1 => {
                     selecting.set(false);
+                    // Click (no drag) on an OSC 8 hyperlink opens it.
+                    if engine.borrow().selection_text().is_none() {
+                        let _ = engine.borrow_mut().send_command(Command::OpenLinkAt {
+                            x: px,
+                            y: py,
+                        });
+                    }
                 }
                 _ => {}
             }

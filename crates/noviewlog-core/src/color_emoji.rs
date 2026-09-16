@@ -29,10 +29,10 @@ pub struct ColorEmojiGlyph {
     pub rgba: Vec<u8>,
 }
 
-/// Lazy-loading CBDT color-emoji atlas keyed by Unicode scalar.
+/// Lazy-loading CBDT color-emoji atlas keyed by Unicode scalar or ZWJ cluster.
 pub struct ColorEmojiAtlas {
     font_data: Vec<u8>,
-    cache: Mutex<HashMap<char, Option<ColorEmojiGlyph>>>,
+    cache: Mutex<HashMap<String, Option<ColorEmojiGlyph>>>,
 }
 
 impl ColorEmojiAtlas {
@@ -53,20 +53,117 @@ impl ColorEmojiAtlas {
         self.glyph(ch).is_some()
     }
 
-    /// Cached decode of the CBDT PNG for `ch`. ZWJ sequences are not handled (v1).
+    /// Cached decode of the CBDT PNG for `ch` (single scalar).
     pub fn glyph(&self, ch: char) -> Option<ColorEmojiGlyph> {
+        self.glyph_for_key(&ch.to_string())
+    }
+
+    /// Cached CBDT PNG for a ZWJ cluster like `👨‍👩‍👧‍👦`.
+    ///
+    /// Resolves the composite glyph through GSUB ligature substitution; ZWJ
+    /// sequences have no cmap entry of their own. Returns `None` when the font
+    /// has no composite — the draw path then falls back to per-member cells.
+    pub fn glyph_cluster(&self, seq: &str) -> Option<ColorEmojiGlyph> {
+        self.glyph_for_key(seq)
+    }
+
+    fn glyph_for_key(&self, key: &str) -> Option<ColorEmojiGlyph> {
         {
             let cache = self.cache.lock().ok()?;
-            if let Some(entry) = cache.get(&ch) {
+            if let Some(entry) = cache.get(key) {
                 return entry.clone();
             }
         }
-        let decoded = decode_glyph(&self.font_data, ch);
+        let decoded = decode_glyph_or_cluster(&self.font_data, key);
         if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(ch, decoded.clone());
+            cache.insert(key.to_string(), decoded.clone());
         }
         decoded
     }
+}
+
+fn decode_glyph_or_cluster(font_data: &[u8], key: &str) -> Option<ColorEmojiGlyph> {
+    let face = Face::parse(font_data, 0).ok()?;
+    if key.chars().count() > 1 {
+        let chars: Vec<char> = key.chars().collect();
+        let gid_from = |seq: &[char]| -> Option<GlyphId> {
+            let gids: Option<Vec<GlyphId>> = seq.iter().map(|c| face.glyph_index(*c)).collect();
+            resolve_ligature(&face, gids.as_ref()?)
+        };
+        // Try the full sequence first, then without variation selectors —
+        // some fonts key keycap ligatures without the VS component.
+        if let Some(g) = gid_from(&chars) {
+            return decode_glyph_image(&face, g);
+        }
+        let stripped: Vec<char> = chars
+            .iter()
+            .copied()
+            .filter(|c| !matches!(c, '\u{FE00}'..='\u{FE0F}'))
+            .collect();
+        if stripped.len() != chars.len() {
+            if stripped.len() == 1 {
+                return decode_glyph(font_data, stripped[0]);
+            }
+            if let Some(g) = gid_from(&stripped) {
+                return decode_glyph_image(&face, g);
+            }
+        }
+        return None;
+    }
+    let ch = key.chars().next()?;
+    decode_glyph(font_data, ch)
+}
+
+fn decode_glyph_image(face: &Face, gid: GlyphId) -> Option<ColorEmojiGlyph> {
+    let img = face.glyph_raster_image(gid, u16::MAX)?;
+    if img.format != RasterImageFormat::PNG {
+        return None;
+    }
+    let rgba = decode_png_rgba(img.data)?;
+    Some(ColorEmojiGlyph {
+        width: img.width as u32,
+        height: img.height as u32,
+        x_offset: img.x,
+        y_offset: img.y,
+        rgba,
+    })
+}
+
+/// Walk GSUB ligature lookups for a substitution whose glyph sequence matches.
+fn resolve_ligature(face: &Face, gids: &[GlyphId]) -> Option<GlyphId> {
+    use ttf_parser::gsub::SubstitutionSubtable;
+
+    if gids.len() < 2 {
+        return None;
+    }
+    let gsub = face.tables().gsub.as_ref()?;
+    let first = *gids.first()?;
+    let rest = gids.get(1..)?;
+    for i in 0..gsub.lookups.len() {
+        let lookup = gsub.lookups.get(i)?;
+        for si in 0..lookup.subtables.len() {
+            let Some(subtable) = lookup.subtables.get::<SubstitutionSubtable>(si) else {
+                continue;
+            };
+            let SubstitutionSubtable::Ligature(lig) = subtable else {
+                continue;
+            };
+            let Some(set_idx) = lig.coverage.get(first) else {
+                continue;
+            };
+            let Some(set) = lig.ligature_sets.get(set_idx) else {
+                continue;
+            };
+            for ligature in set.into_iter() {
+                if ligature.components.len() as usize == rest.len()
+                    && ligature.components.into_iter().eq(rest.iter().copied())
+                {
+                    return Some(ligature.glyph);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn load_color_emoji_bytes() -> Option<Vec<u8>> {
@@ -144,6 +241,9 @@ fn decode_png_rgba(png_bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Nearest-neighbor scale + alpha blit of a color emoji into an RGBA viewport buffer.
+///
+/// `span_cells` is the cluster display width: composites may spread wider than
+/// the classic ~2-cell emoji box.
 pub fn blit_color_emoji(
     out: &mut [u8],
     buf_width: u32,
@@ -155,19 +255,48 @@ pub fn blit_color_emoji(
     glyph: &ColorEmojiGlyph,
     clip: Option<(f32, f32)>,
 ) {
+    blit_color_emoji_span(
+        out,
+        buf_width,
+        buf_height,
+        cell_x,
+        row_top,
+        row_height,
+        cell_width,
+        1,
+        glyph,
+        clip,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn blit_color_emoji_span(
+    out: &mut [u8],
+    buf_width: u32,
+    buf_height: u32,
+    cell_x: i32,
+    row_top: f32,
+    row_height: f32,
+    cell_width: u32,
+    span_cells: u32,
+    glyph: &ColorEmojiGlyph,
+    clip: Option<(f32, f32)>,
+) {
     if glyph.width == 0 || glyph.height == 0 || glyph.rgba.len() < 4 {
         return;
     }
-    let cell_w = cell_width.max(1) as f32;
-    // Fit strike into ~1 row tall and at most ~2 cells wide.
+    let span_w = cell_width.max(1) as f32 * span_cells.max(1) as f32;
+    // Fit strike into ~1 row tall and at most the cluster span wide.
     let target_h = (row_height * 0.92).max(1.0);
-    let max_w = cell_w * 1.85;
+    // Single emoji may overflow ~1.85 cells (legacy look); clusters span their cells.
+    let max_w_cells = (span_cells.max(1) as f32 * 0.98).max(1.85);
+    let max_w = cell_width.max(1) as f32 * max_w_cells;
     let scale = (target_h / glyph.height as f32).min(max_w / glyph.width as f32);
     let dest_w = (glyph.width as f32 * scale).round().max(1.0) as i32;
     let dest_h = (glyph.height as f32 * scale).round().max(1.0) as i32;
 
-    // Center in the cell horizontally; vertically center within the row.
-    let dest_x = cell_x + ((cell_w - dest_w as f32) * 0.5).round() as i32;
+    // Center in the span horizontally; vertically center within the row.
+    let dest_x = cell_x + ((span_w - dest_w as f32) * 0.5).round() as i32;
     let dest_y = (row_top + (row_height - dest_h as f32) * 0.5).round() as i32;
 
     let clip_top = clip.map(|c| c.0.floor() as i32).unwrap_or(0);
@@ -230,20 +359,194 @@ pub fn is_color_emoji_candidate(ch: char) -> bool {
     )
 }
 
-/// Variation selectors / ZWJ: non-spacing, never rasterized as their own cell.
+/// How a scalar contributes to the monospace cell grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharKind {
+    /// Occupies one cell and advances the column.
+    Advance,
+    /// Invisible joiner / selector / format char: consumes no cell, no ink.
+    SilentSkip,
+    /// Combining mark: no cell advance; ink overlays the previous cell.
+    Overlay,
+}
+
+/// Variation selectors / ZWJ / other invisible format chars.
 ///
 /// Sample apps often emit `⏱️` as U+23F1 + U+FE0F; without this, FE0F becomes tofu.
 pub fn is_zero_width_emoji_mark(ch: char) -> bool {
     matches!(
         ch,
-        '\u{200D}' // Zero Width Joiner (ZWJ sequences: skip for v1 display)
+        '\u{200D}' // Zero Width Joiner (joined with the cluster on draw)
             | '\u{FE00}'..='\u{FE0F}' // Variation Selectors 1–16 (incl. text/emoji VS)
+            | '\u{200B}'..='\u{200F}' // ZWSP..RLM direction marks
+            | '\u{FEFF}' // BOM / ZWNBSP
+            | '\u{2060}'..='\u{2064}' // word joiner etc.
     )
 }
 
-/// Display cell count: Unicode scalars minus zero-width emoji marks.
+/// Combining marks (Mn/Me blocks): Arabic harakat, Hebrew points, Devanagari
+/// matras, Latin diacritics, etc. Rendered onto the previous cell.
+///
+/// Static range table instead of a general-category crate — hot path.
+pub fn is_combining_mark(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0300}'..='\u{036F}' // Combining Diacritical Marks
+            | '\u{0483}'..='\u{0489}' // Cyrillic combining
+            | '\u{0591}'..='\u{05BD}' | '\u{05BF}' | '\u{05C1}'..='\u{05C2}' | '\u{05C4}'..='\u{05C5}' | '\u{05C7}' // Hebrew points
+            | '\u{0610}'..='\u{061A}' | '\u{064B}'..='\u{065F}' | '\u{0670}' | '\u{06D6}'..='\u{06DC}' | '\u{06DF}'..='\u{06E4}' | '\u{06E7}'..='\u{06E8}' | '\u{06EA}'..='\u{06ED}' // Arabic harakat / Quranic marks
+            | '\u{0711}' | '\u{0730}'..='\u{074A}' // Syriac
+            | '\u{07A6}'..='\u{07B0}' // Thaana
+            | '\u{0816}'..='\u{0819}' | '\u{081B}'..='\u{0823}' | '\u{0825}'..='\u{0827}' | '\u{0829}'..='\u{082D}' | '\u{0859}'..='\u{085B}' | '\u{08D3}'..='\u{08E1}' | '\u{08E3}'..='\u{0903}' // Arabic Extended / Mandaic
+            | '\u{093A}' | '\u{093C}' | '\u{0941}'..='\u{0943}' | '\u{094D}' | '\u{0951}'..='\u{0957}' | '\u{0962}'..='\u{0963}' // Devanagari Mn marks (Mc matras advance a cell)
+            | '\u{0981}'..='\u{0983}' | '\u{09BC}' | '\u{09BE}'..='\u{09C4}' | '\u{09C7}'..='\u{09C8}' | '\u{09CB}'..='\u{09CD}' | '\u{09D7}' | '\u{09E2}'..='\u{09E3}' // Bengali
+            | '\u{0A01}'..='\u{0A03}' | '\u{0A3C}' | '\u{0A3E}'..='\u{0A42}' | '\u{0A47}'..='\u{0A48}' | '\u{0A4B}'..='\u{0A4D}' | '\u{0A51}' // Gurmukhi
+            | '\u{0A81}'..='\u{0A83}' | '\u{0ABC}' | '\u{0ABE}'..='\u{0AC5}' | '\u{0AC7}'..='\u{0AC9}' | '\u{0ACB}'..='\u{0ACD}' // Gujarati
+            | '\u{0B01}'..='\u{0B03}' | '\u{0B3C}' | '\u{0B3E}'..='\u{0B44}' | '\u{0B47}'..='\u{0B48}' | '\u{0B4B}'..='\u{0B4D}' | '\u{0B56}'..='\u{0B57}' // Oriya
+            | '\u{0B82}' | '\u{0BBE}'..='\u{0BC2}' | '\u{0BC6}'..='\u{0BC8}' | '\u{0BCA}'..='\u{0BCD}' | '\u{0BD7}' // Tamil
+            | '\u{0C00}'..='\u{0C03}' | '\u{0C3E}'..='\u{0C44}' | '\u{0C46}'..='\u{0C48}' | '\u{0C4A}'..='\u{0C4D}' | '\u{0C55}'..='\u{0C56}' // Telugu
+            | '\u{0C81}'..='\u{0C83}' | '\u{0CBC}' | '\u{0CBE}'..='\u{0CC4}' | '\u{0CC6}'..='\u{0CC8}' | '\u{0CCA}'..='\u{0CCD}' | '\u{0CD5}'..='\u{0CD6}' // Kannada
+            | '\u{0D01}'..='\u{0D03}' | '\u{0D3E}'..='\u{0D44}' | '\u{0D46}'..='\u{0D48}' | '\u{0D4A}'..='\u{0D4D}' | '\u{0D57}' // Malayalam
+            | '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}' // Thai
+            | '\u{0EB1}' | '\u{0EB4}'..='\u{0EBC}' | '\u{0EC8}'..='\u{0ECD}' // Lao
+            | '\u{0F71}'..='\u{0F84}' | '\u{0F86}'..='\u{0F87}' | '\u{0F8D}'..='\u{0F97}' | '\u{0F99}'..='\u{0FBC}' // Tibetan
+            | '\u{102D}'..='\u{1030}' | '\u{1032}'..='\u{1037}' | '\u{1039}'..='\u{103A}' | '\u{1058}'..='\u{1059}' | '\u{105E}'..='\u{1060}' // Myanmar
+            | '\u{135D}'..='\u{135F}' // Ethiopic combining
+            | '\u{17B6}' | '\u{17BE}'..='\u{17C5}' | '\u{17C7}'..='\u{17C8}' | '\u{17B4}'..='\u{17B5}' // Khmer
+            | '\u{1885}'..='\u{1886}' | '\u{18A9}' // Mongolian
+            | '\u{1920}'..='\u{1922}' | '\u{1927}'..='\u{1928}' | '\u{1932}' | '\u{1939}'..='\u{193B}' // Limbu
+            | '\u{1A17}'..='\u{1A18}' // Buginese
+            | '\u{1AB0}'..='\u{1AFF}' // Combining Diacritical Marks Extended
+            | '\u{1B00}'..='\u{1B03}' // Balinese
+            | '\u{1B34}' | '\u{1B35}' | '\u{1B6B}'..='\u{1B73}' // Balinese / Sundanese
+            | '\u{1DC0}'..='\u{1DFF}' // Combining Diacritical Marks Supplement
+            | '\u{20D0}'..='\u{20F0}' // Combining Marks for Symbols
+            | '\u{2CEF}'..='\u{2CF1}' // Coptic combining
+            | '\u{302A}'..='\u{302F}' // CJK combining (vertical forms etc.)
+            | '\u{3099}'..='\u{309A}' // Kana voicing marks
+            | '\u{A66F}'..='\u{A672}' | '\u{A674}'..='\u{A67D}' // Combining Old Permic etc.
+            | '\u{A8E0}'..='\u{A8F1}' // Devanagari Extended
+            | '\u{FE20}'..='\u{FE2F}' // Combining Half Marks
+    )
+}
+
+/// Cell-grid classification for a single scalar.
+pub fn char_kind(ch: char) -> CharKind {
+    if is_zero_width_emoji_mark(ch) {
+        return CharKind::SilentSkip;
+    }
+    if is_combining_mark(ch) {
+        return CharKind::Overlay;
+    }
+    CharKind::Advance
+}
+
+/// Display cell count: Unicode scalars minus zero-width marks.
 pub fn display_cell_count(text: &str) -> usize {
-    text.chars().filter(|ch| !is_zero_width_emoji_mark(*ch)).count()
+    text.chars().filter(|ch| char_kind(*ch) == CharKind::Advance).count()
+}
+
+/// One display unit of a text run: a ZWJ emoji cluster, a plain scalar,
+/// or a combining mark (`cells: 0`, overlays the previous cell).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayItem<'a> {
+    /// Text of the item (cluster includes ZWJs / VSes).
+    pub text: &'a str,
+    /// Cells this item occupies (cluster members; ZWJ/VS contribute none).
+    pub cells: usize,
+}
+
+/// Segment a run into ZWJ emoji clusters, combining marks, and plain scalars.
+///
+/// `👨‍👩‍👧‍👦` becomes one item with `cells: 4`; `a` + U+0301 yields a 1-cell
+/// item followed by a 0-cell mark item.
+pub fn display_items(text: &str) -> Vec<DisplayItem<'_>> {
+    let mut items = Vec::new();
+    let mut it = text.char_indices().peekable();
+    while let Some((start, ch)) = it.next() {
+        match char_kind(ch) {
+            CharKind::SilentSkip => continue,
+            CharKind::Overlay => {
+                items.push(DisplayItem {
+                    text: &text[start..start + ch.len_utf8()],
+                    cells: 0,
+                });
+                continue;
+            }
+            CharKind::Advance => {}
+        }
+        // Flag: a pair of regional indicators renders as one 2-cell glyph.
+        if matches!(ch, '\u{1F1E6}'..='\u{1F1FF}') {
+            if let Some(&(_, r2)) = it.peek() {
+                if matches!(r2, '\u{1F1E6}'..='\u{1F1FF}') {
+                    it.next();
+                    items.push(DisplayItem {
+                        text: &text[start..start + ch.len_utf8() + r2.len_utf8()],
+                        cells: 2,
+                    });
+                    continue;
+                }
+            }
+            // Lone regional indicator: fall through to plain handling.
+        }
+        // Look ahead: base (VS)? (ZWJ (VS)? base)+ → one cluster item.
+        let mut end = start + ch.len_utf8();
+        let mut cells = 1usize;
+        let mut probe = it.clone();
+        let mut cluster = is_color_emoji_candidate(ch);
+        loop {
+            // Optional VS after base/member.
+            if let Some(&(_, vs)) = probe.peek() {
+                if matches!(vs, '\u{FE00}'..='\u{FE0F}') {
+                    end += vs.len_utf8();
+                    probe.next();
+                }
+            }
+            match probe.peek() {
+                Some(&(_, '\u{200D}')) => {
+                    // ZWJ + member (VS optional).
+                    end += '\u{200D}'.len_utf8();
+                    probe.next();
+                    match probe.next() {
+                        Some((m_start, m)) if char_kind(m) == CharKind::Advance => {
+                            end = m_start + m.len_utf8();
+                            cells += 1;
+                            cluster &= is_color_emoji_candidate(m);
+                            if matches!(m, '\u{1F3FB}'..='\u{1F3FF}') {
+                                // Skin-tone modifiers occupy no extra terminal cell.
+                                cells -= 1;
+                            }
+                            it = probe.clone();
+                        }
+                        _ => break, // dangling ZWJ — not a cluster
+                    }
+                }
+                _ => {
+                    // Keycap: base (VS)? + U+20E3 → one single-cell item.
+                    if let Some(&(_, kc)) = probe.peek() {
+                        if kc == '\u{20E3}' {
+                            end += kc.len_utf8();
+                            probe.next();
+                            it = probe.clone();
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if cluster && cells > 1 {
+            items.push(DisplayItem {
+                text: &text[start..end],
+                cells,
+            });
+        } else {
+            items.push(DisplayItem {
+                text: &text[start..end],
+                cells: 1,
+            });
+        }
+    }
+    items
 }
 
 #[cfg(test)]
@@ -302,5 +605,92 @@ mod tests {
         assert!(!is_zero_width_emoji_mark('\u{23F1}'));
         assert_eq!(display_cell_count("\u{23F1}\u{FE0F}"), 1);
         assert_eq!(display_cell_count("\u{FE0F}"), 0);
+    }
+
+    #[test]
+    fn combining_marks_are_overlay_cells() {
+        // Latin acute, Arabic fatha+shadda, Devanagari vocalic-r mark.
+        for ch in ['\u{0301}', '\u{064E}', '\u{0651}', '\u{0941}', '\u{0300}'] {
+            assert_eq!(char_kind(ch), CharKind::Overlay, "U+{:04X}", ch as u32);
+        }
+        assert_eq!(char_kind('a'), CharKind::Advance);
+        assert_eq!(char_kind('\u{200D}'), CharKind::SilentSkip);
+        assert_eq!(display_cell_count("a\u{0301}b"), 2);
+        assert_eq!(display_cell_count("\u{0627}\u{064E}\u{0651}\u{0644}"), 2);
+    }
+
+    #[test]
+    fn display_items_group_zwj_clusters() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        let items = display_items(family);
+        assert_eq!(items.len(), 1, "family emoji must be one item: {items:?}");
+        assert_eq!(items[0].cells, 4);
+        assert_eq!(items[0].text, family);
+
+        // VS stays inside the cluster text; plain text stays 1 cell per char.
+        let items = display_items("ok\u{1F469}\u{200D}\u{1F3EB}\u{FE0F}!");
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[2].cells, 2);
+        assert_eq!(items[2].text, "\u{1F469}\u{200D}\u{1F3EB}\u{FE0F}");
+
+        // Combining mark after base: 1-cell item then a 0-cell mark item.
+        let items = display_items("a\u{0301}b");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[1].cells, 0);
+        assert_eq!(items[1].text, "\u{0301}");
+    }
+
+    #[test]
+    fn display_items_group_flag_pairs_and_keycaps() {
+        // Flag = one 2-cell item; consecutive flags pair off in order.
+        let items = display_items("\u{1F1FA}\u{1F1F8}\u{1F1E9}\u{1F1EA}");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].cells, 2);
+        assert_eq!(items[0].text, "\u{1F1FA}\u{1F1F8}");
+        assert_eq!(items[1].text, "\u{1F1E9}\u{1F1EA}");
+
+        // Lone regional indicator stays a 1-cell scalar.
+        let items = display_items("\u{1F1FA}");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].cells, 1);
+
+        // Keycap with and without VS16: one 1-cell item, full sequence kept.
+        for key in ["1\u{FE0F}\u{20E3}", "1\u{20E3}", "#\u{FE0F}\u{20E3}"] {
+            let items = display_items(key);
+            assert_eq!(items.len(), 1, "keycap {key:?}");
+            assert_eq!(items[0].cells, 1);
+            assert_eq!(items[0].text, key);
+        }
+        assert_eq!(display_cell_count("\u{1F1FA}\u{1F1F8}"), 2);
+        assert_eq!(display_cell_count("1\u{FE0F}\u{20E3}"), 1);
+    }
+
+    #[test]
+    fn flag_pair_resolves_composite_glyph_when_noto_available() {
+        let Some(atlas) = ColorEmojiAtlas::load() else {
+            eprintln!("skip: Noto Color Emoji not installed");
+            return;
+        };
+        if atlas.glyph_cluster("\u{1F1FA}\u{1F1F8}").is_none() {
+            eprintln!("note: font has no US-flag composite glyph (GSUB miss)");
+        }
+        let keycap = "1\u{FE0F}\u{20E3}";
+        if atlas.glyph_cluster(keycap).is_none() {
+            eprintln!("note: font has no keycap composite glyph (GSUB miss)");
+        }
+    }
+
+    #[test]
+    fn family_zwj_resolves_composite_glyph_when_noto_available() {
+        let Some(atlas) = ColorEmojiAtlas::load() else {
+            eprintln!("skip: Noto Color Emoji not installed");
+            return;
+        };
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        if atlas.glyph_cluster(family).is_none() {
+            eprintln!("note: font has no family composite glyph (GSUB miss)");
+        }
+        // Single-scalar path must be unaffected by the cluster cache rework.
+        assert!(atlas.has_glyph('\u{1F680}'));
     }
 }

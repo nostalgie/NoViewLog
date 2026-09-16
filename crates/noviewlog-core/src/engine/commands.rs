@@ -159,6 +159,11 @@ pub enum Command {
         #[serde(default = "default_click_count")]
         click_count: u32,
     },
+    /// Open the OSC 8 hyperlink under the viewport point (no-op when none).
+    OpenLinkAt {
+        x: f32,
+        y: f32,
+    },
     SelectionClear,
     TerminalAdd,
     TerminalClose {
@@ -394,6 +399,9 @@ impl Engine {
             Command::SelectionClear => {
                 self.active_terminal_mut().selection = None;
                 self.mark_viewport_dirty();
+            }
+            Command::OpenLinkAt { x, y } => {
+                self.open_link_at(x, y);
             }
             Command::TerminalAdd => self.terminal_add(),
             Command::TerminalClose { terminal_id } => self.terminal_close(terminal_id.as_deref()),
