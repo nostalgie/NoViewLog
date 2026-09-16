@@ -15,12 +15,12 @@ supported; other OSes are best-effort.
 
 **NoViewLog** renders everything modern CLI tools throw at it: ANSI colors, Unicode, emoji, ZWJ sequences, combining diacritics, and clickable hyperlinks.
 
-- **ANSI colors** — full SGR support: 16 colors, 256, truecolor, bold, italic, underline, reverse, dim, strike.
-- **Unicode and emoji** — base emoji, skin tone modifiers, flags, keycaps. Wide glyphs (CJK, emoji) are measured correctly, so columns and tables stay aligned.
-- **ZWJ sequences** — family and profession emoji (👨‍👩‍👧‍👦, 👩‍💻, 🏳️‍🌈) render as a single 2-cell glyph, not as the sum of their components.
-- **Combining diacritics** — Vietnamese, Arabic, Devanagari, Thai, Hebrew. Base + mark is treated as one grapheme cluster; width comes from the base.
+- **ANSI colors** — SGR support: 16 colors, 256, truecolor, bold, underline, dim.
+- **Unicode and emoji** — strict monospace grid (one cell per advance character). Base emoji and skin tone modifiers render via Noto Color Emoji when installed, with a monochrome symbol fallback.
+- **ZWJ sequences** — family and profession emoji (👨‍👩‍👧‍👦, 👩‍💻, 🏳️‍🌈) render as a single composite glyph spanning the cluster's cells, not as the sum of their components (falls back to per-member rendering when the font has no composite).
+- **Combining diacritics** — Vietnamese, Arabic, Devanagari, Thai, Hebrew. Base + mark shares the base's cell; marks never advance the column.
 - **BiDi (RTL)** — planned, not yet implemented. Arabic and Hebrew currently render in logical order, left to right, without shaping. Full UAX #9 reordering (nested LTR runs, bracket mirroring, neutral characters) is on the roadmap.
-- **OSC 8** — clickable hyperlinks in the terminal. Cmd/Ctrl+click opens in the browser or the system handler. Works with every tool that already emits them: GitHub Actions, docker build, cargo, gh, git, `ls --hyperlink`.
+- **OSC 8** — clickable hyperlinks in the terminal. A plain click (no drag selection) opens the link via the system handler. Works with every tool that already emits them: GitHub Actions, docker build, cargo, gh, git, `ls --hyperlink`.
 
 ## Features
 
