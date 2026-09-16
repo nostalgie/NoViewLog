@@ -11,16 +11,24 @@ aggregate logs from remote machines, ship them anywhere, or alert.
 **Status:** active development. **Linux** and **Windows** are equally
 supported; other OSes are best-effort.
 
-## Terminal-grade rendering
+## Rendering
 
-**NoViewLog** renders everything modern CLI tools throw at it: ANSI colors, Unicode, emoji, ZWJ sequences, combining diacritics, and clickable hyperlinks.
+The log viewport is a fixed monospace grid drawn in Rust (`fontdue` bitmaps —
+no WebView). Each advance character occupies one cell; that is the layout
+model for width, wrapping, and selection.
 
-- **ANSI colors** — SGR support: 16 colors, 256, truecolor, bold, underline, dim.
-- **Unicode and emoji** — strict monospace grid (one cell per advance character). Base emoji, skin tone modifiers, flags, and keycaps render via Noto Color Emoji when installed, with a monochrome symbol fallback.
-- **ZWJ sequences** — family and profession emoji (👨‍👩‍👧‍👦, 👩‍💻, 🏳️‍🌈) render as a single composite glyph spanning the cluster's cells, not as the sum of their components (falls back to per-member rendering when the font has no composite).
-- **Combining diacritics** — Vietnamese, Arabic, Devanagari, Thai, Hebrew. Base + mark shares the base's cell; marks never advance the column.
-- **BiDi (RTL)** — planned, not yet implemented. Arabic and Hebrew currently render in logical order, left to right, without shaping. Full UAX #9 reordering (nested LTR runs, bracket mirroring, neutral characters) is on the roadmap.
-- **OSC 8** — clickable hyperlinks in the terminal. A plain click (no drag selection) opens the link via the system handler. Works with every tool that already emits them: GitHub Actions, docker build, cargo, gh, git, `ls --hyperlink`.
+What the viewport actually renders today:
+
+- **ANSI colors** — SGR: 16 colors, 256-color, and truecolor; bold, underline, and dim are applied.
+- **Emoji** — when Noto Color Emoji (CBDT) is installed, base emoji, skin-tone modifiers, ZWJ sequences (👨‍👩‍👧‍👦, 👩‍💻), flag pairs, and keycaps are painted as composite glyphs; without it, a monochrome Noto Sans Symbols fallback covers symbols and everything else falls through to the mono font.
+- **Combining diacritics** — Latin, Arabic, Hebrew, Devanagari, and Thai marks share the base character's cell and never advance the column.
+- **OSC 8 hyperlinks** — links emitted by tools (GitHub Actions, docker build, cargo, gh, git, `ls --hyperlink`) render underlined; a click without a drag selection opens them via the system handler.
+
+What is **not** rendered (yet):
+
+- **BiDi / RTL** — Arabic and Hebrew text renders in logical order, left to right, without shaping (no UAX #9 reordering, no bracket mirroring).
+- **CJK / wide glyphs** — no double-width measuring; CJK text can misalign columns and tables.
+- **SGR italic / reverse / strike** — parsed away, not styled.
 
 ## Features
 
