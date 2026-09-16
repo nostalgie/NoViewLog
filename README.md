@@ -13,13 +13,13 @@ supported; other OSes are best-effort.
 
 ## Terminal-grade rendering
 
-**NoViewLog** renders everything modern CLI tools throw at it: ANSI colors, Unicode, emoji, ZWJ sequences, combining diacritics, RTL text, and clickable hyperlinks.
+**NoViewLog** renders everything modern CLI tools throw at it: ANSI colors, Unicode, emoji, ZWJ sequences, combining diacritics, and clickable hyperlinks.
 
 - **ANSI colors** — full SGR support: 16 colors, 256, truecolor, bold, italic, underline, reverse, dim, strike.
 - **Unicode and emoji** — base emoji, skin tone modifiers, flags, keycaps. Wide glyphs (CJK, emoji) are measured correctly, so columns and tables stay aligned.
 - **ZWJ sequences** — family and profession emoji (👨‍👩‍👧‍👦, 👩‍💻, 🏳️‍🌈) render as a single 2-cell glyph, not as the sum of their components.
 - **Combining diacritics** — Vietnamese, Arabic, Devanagari, Thai, Hebrew. Base + mark is treated as one grapheme cluster; width comes from the base.
-- **BiDi (RTL)** — Arabic and Hebrew render in the correct direction, including nested LTR runs, bracket mirroring, and neutral characters. Implemented at the log-line level, per UAX #9.
+- **BiDi (RTL)** — planned, not yet implemented. Arabic and Hebrew currently render in logical order, left to right, without shaping. Full UAX #9 reordering (nested LTR runs, bracket mirroring, neutral characters) is on the roadmap.
 - **OSC 8** — clickable hyperlinks in the terminal. Cmd/Ctrl+click opens in the browser or the system handler. Works with every tool that already emits them: GitHub Actions, docker build, cargo, gh, git, `ls --hyperlink`.
 
 ## Features
