@@ -1,6 +1,6 @@
 # NoViewLog
 
-NoViewLog is a native desktop log viewer for developers who run builds, dev
+NoViewLog is a native desktop live log workspace for developers who run builds, dev
 servers, and other processes locally and need to actually read their output:
 launch a command through a PTY or open a log file, slice it with filter tabs,
 follow live output, and search large logs fast. The UI is **Slint** rendered by
