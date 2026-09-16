@@ -86,22 +86,26 @@ fn decode_glyph_or_cluster(font_data: &[u8], key: &str) -> Option<ColorEmojiGlyp
     let face = Face::parse(font_data, 0).ok()?;
     if key.chars().count() > 1 {
         let chars: Vec<char> = key.chars().collect();
-        let gids: Option<Vec<GlyphId>> =
-            chars.iter().map(|c| face.glyph_index(*c)).collect();
-        let gids = gids?;
-        if let Some(gid) = resolve_ligature(&face, &gids) {
-            if let Some(img) = face.glyph_raster_image(gid, u16::MAX) {
-                if img.format == RasterImageFormat::PNG {
-                    if let Some(rgba) = decode_png_rgba(img.data) {
-                        return Some(ColorEmojiGlyph {
-                            width: img.width as u32,
-                            height: img.height as u32,
-                            x_offset: img.x,
-                            y_offset: img.y,
-                            rgba,
-                        });
-                    }
-                }
+        let gid_from = |seq: &[char]| -> Option<GlyphId> {
+            let gids: Option<Vec<GlyphId>> = seq.iter().map(|c| face.glyph_index(*c)).collect();
+            resolve_ligature(&face, gids.as_ref()?)
+        };
+        // Try the full sequence first, then without variation selectors —
+        // some fonts key keycap ligatures without the VS component.
+        if let Some(g) = gid_from(&chars) {
+            return decode_glyph_image(&face, g);
+        }
+        let stripped: Vec<char> = chars
+            .iter()
+            .copied()
+            .filter(|c| !matches!(c, '\u{FE00}'..='\u{FE0F}'))
+            .collect();
+        if stripped.len() != chars.len() {
+            if stripped.len() == 1 {
+                return decode_glyph(font_data, stripped[0]);
+            }
+            if let Some(g) = gid_from(&stripped) {
+                return decode_glyph_image(&face, g);
             }
         }
         return None;
@@ -110,10 +114,28 @@ fn decode_glyph_or_cluster(font_data: &[u8], key: &str) -> Option<ColorEmojiGlyp
     decode_glyph(font_data, ch)
 }
 
+fn decode_glyph_image(face: &Face, gid: GlyphId) -> Option<ColorEmojiGlyph> {
+    let img = face.glyph_raster_image(gid, u16::MAX)?;
+    if img.format != RasterImageFormat::PNG {
+        return None;
+    }
+    let rgba = decode_png_rgba(img.data)?;
+    Some(ColorEmojiGlyph {
+        width: img.width as u32,
+        height: img.height as u32,
+        x_offset: img.x,
+        y_offset: img.y,
+        rgba,
+    })
+}
+
 /// Walk GSUB ligature lookups for a substitution whose glyph sequence matches.
 fn resolve_ligature(face: &Face, gids: &[GlyphId]) -> Option<GlyphId> {
     use ttf_parser::gsub::SubstitutionSubtable;
 
+    if gids.len() < 2 {
+        return None;
+    }
     let gsub = face.tables().gsub.as_ref()?;
     let first = *gids.first()?;
     let rest = gids.get(1..)?;
@@ -453,6 +475,20 @@ pub fn display_items(text: &str) -> Vec<DisplayItem<'_>> {
             }
             CharKind::Advance => {}
         }
+        // Flag: a pair of regional indicators renders as one 2-cell glyph.
+        if matches!(ch, '\u{1F1E6}'..='\u{1F1FF}') {
+            if let Some(&(_, r2)) = it.peek() {
+                if matches!(r2, '\u{1F1E6}'..='\u{1F1FF}') {
+                    it.next();
+                    items.push(DisplayItem {
+                        text: &text[start..start + ch.len_utf8() + r2.len_utf8()],
+                        cells: 2,
+                    });
+                    continue;
+                }
+            }
+            // Lone regional indicator: fall through to plain handling.
+        }
         // Look ahead: base (VS)? (ZWJ (VS)? base)+ → one cluster item.
         let mut end = start + ch.len_utf8();
         let mut cells = 1usize;
@@ -485,7 +521,17 @@ pub fn display_items(text: &str) -> Vec<DisplayItem<'_>> {
                         _ => break, // dangling ZWJ — not a cluster
                     }
                 }
-                _ => break,
+                _ => {
+                    // Keycap: base (VS)? + U+20E3 → one single-cell item.
+                    if let Some(&(_, kc)) = probe.peek() {
+                        if kc == '\u{20E3}' {
+                            end += kc.len_utf8();
+                            probe.next();
+                            it = probe.clone();
+                        }
+                    }
+                    break;
+                }
             }
         }
         if cluster && cells > 1 {
@@ -592,6 +638,46 @@ mod tests {
         assert_eq!(items.len(), 3);
         assert_eq!(items[1].cells, 0);
         assert_eq!(items[1].text, "\u{0301}");
+    }
+
+    #[test]
+    fn display_items_group_flag_pairs_and_keycaps() {
+        // Flag = one 2-cell item; consecutive flags pair off in order.
+        let items = display_items("\u{1F1FA}\u{1F1F8}\u{1F1E9}\u{1F1EA}");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].cells, 2);
+        assert_eq!(items[0].text, "\u{1F1FA}\u{1F1F8}");
+        assert_eq!(items[1].text, "\u{1F1E9}\u{1F1EA}");
+
+        // Lone regional indicator stays a 1-cell scalar.
+        let items = display_items("\u{1F1FA}");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].cells, 1);
+
+        // Keycap with and without VS16: one 1-cell item, full sequence kept.
+        for key in ["1\u{FE0F}\u{20E3}", "1\u{20E3}", "#\u{FE0F}\u{20E3}"] {
+            let items = display_items(key);
+            assert_eq!(items.len(), 1, "keycap {key:?}");
+            assert_eq!(items[0].cells, 1);
+            assert_eq!(items[0].text, key);
+        }
+        assert_eq!(display_cell_count("\u{1F1FA}\u{1F1F8}"), 2);
+        assert_eq!(display_cell_count("1\u{FE0F}\u{20E3}"), 1);
+    }
+
+    #[test]
+    fn flag_pair_resolves_composite_glyph_when_noto_available() {
+        let Some(atlas) = ColorEmojiAtlas::load() else {
+            eprintln!("skip: Noto Color Emoji not installed");
+            return;
+        };
+        if atlas.glyph_cluster("\u{1F1FA}\u{1F1F8}").is_none() {
+            eprintln!("note: font has no US-flag composite glyph (GSUB miss)");
+        }
+        let keycap = "1\u{FE0F}\u{20E3}";
+        if atlas.glyph_cluster(keycap).is_none() {
+            eprintln!("note: font has no keycap composite glyph (GSUB miss)");
+        }
     }
 
     #[test]

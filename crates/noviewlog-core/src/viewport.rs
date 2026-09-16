@@ -949,8 +949,9 @@ fn draw_text(
         if item_x >= width_i {
             break;
         }
-        if span > 1 {
-            // ZWJ cluster: prefer the composite CBDT glyph spanning all cells.
+        if item.text.chars().count() > 1 {
+            // Multi-scalar cluster (ZWJ sequence, flag pair, keycap): prefer
+            // the composite CBDT glyph spanning the item's cells.
             if let Some(atlas) = color_emoji {
                 if let Some(glyph) = atlas.glyph_cluster(item.text) {
                     blit_color_emoji_span(
@@ -961,7 +962,7 @@ fn draw_text(
                         row_top,
                         row_height,
                         cell_width,
-                        item.cells as u32,
+                        item.cells.max(1) as u32,
                         &glyph,
                         clip,
                     );
@@ -1157,7 +1158,7 @@ mod tests {
 
     #[test]
     fn text_width_ignores_ansi_bytes() {
-        let mut renderer = ViewportRenderer::new();
+        let renderer = ViewportRenderer::new();
         let cell = renderer.metrics.cell_width;
         let plain = text_width("http://localhost:1337", cell);
         let with_ansi = text_width(
@@ -1643,6 +1644,44 @@ mod tests {
         assert!(
             !char_column_lit(&buf_ar, width, 1, cell, 0.0),
             "harakat must not occupy their own cells"
+        );
+    }
+
+    #[test]
+    fn flag_pair_spans_two_cells_and_marker_lands_after() {
+        let mut renderer = ViewportRenderer::new();
+        let cell = renderer.metrics.cell_width;
+        // US flag + '#': '#' must land in display cell 2 (flag spans 2 cells).
+        let line = FlatLine {
+            record_id: 1,
+            line_index: 0,
+            segments: vec![TextSegment {
+                text: "\u{1F1FA}\u{1F1F8}#".to_string(),
+                style: None,
+            }],
+            raw: "\u{1F1FA}\u{1F1F8}#".to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
+        let width = 120u32;
+        let height = 40u32;
+        let mut buf = vec![0u8; (width * height * 4) as usize];
+        renderer
+            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
+            .unwrap();
+        assert!(
+            char_column_lit(&buf, width, 0, cell, 0.0),
+            "flag must paint its first cell"
+        );
+        assert!(
+            char_column_lit(&buf, width, 2, cell, 0.0),
+            "expected '#' in display cell 2 after a 2-cell flag"
+        );
+        assert!(
+            !char_column_lit(&buf, width, 3, cell, 0.0),
+            "flag must not occupy a third cell"
         );
     }
 
