@@ -1,6 +1,17 @@
 # NoViewLog
 
-Terminal-grade rendering
+NoViewLog is a native desktop log viewer for developers who run builds, dev
+servers, and other processes locally and need to actually read their output:
+launch a command through a PTY or open a log file, slice it with filter tabs,
+follow live output, and search large logs fast. The UI is **Slint** rendered by
+a Rust engine — no WebView, no browser; the log viewport is drawn by Rust
+(`fontdue` bitmap). It is not a log-collection or monitoring tool: it does not
+aggregate logs from remote machines, ship them anywhere, or alert.
+
+**Status:** active development. **Linux** and **Windows** are equally
+supported; other OSes are best-effort.
+
+## Terminal-grade rendering
 
 **NoViewLog** renders everything modern CLI tools throw at it: ANSI colors, Unicode, emoji, ZWJ sequences, combining diacritics, RTL text, and clickable hyperlinks.
 
@@ -10,9 +21,6 @@ Terminal-grade rendering
 - **Combining diacritics** — Vietnamese, Arabic, Devanagari, Thai, Hebrew. Base + mark is treated as one grapheme cluster; width comes from the base.
 - **BiDi (RTL)** — Arabic and Hebrew render in the correct direction, including nested LTR runs, bracket mirroring, and neutral characters. Implemented at the log-line level, per UAX #9.
 - **OSC 8** — clickable hyperlinks in the terminal. Cmd/Ctrl+click opens in the browser or the system handler. Works with every tool that already emits them: GitHub Actions, docker build, cargo, gh, git, `ls --hyperlink`.
-
-**Status:** active development. **Linux** and **Windows** are equally
-supported. macOS and other OSes are best-effort.
 
 ## Features
 
@@ -49,22 +57,16 @@ supported. macOS and other OSes are best-effort.
 - ANSI colors; multiline records such as stack traces are grouped and collapsed by default (click to expand, or View → Expand/Collapse all)
 - Severity gutter cues on leveled records
 
-### Config
+## Run
 
-- User config: `~/.config/noviewlog/config.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`)
-- Projects store: `~/.config/noviewlog/projects.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\projects.yaml`)
-- Settings: maximum scrollback lines
-- Bundled filter presets in [`presets/defaults.yaml`](presets/defaults.yaml)
-  (`node-dev`, `node-errors`, `php-dev`, `php-errors`, `python-dev`,
-  `python-errors`, `go-errors`, `nginx-access`, `docker-compose`). Apply at
-  launch with `--preset` / `-p` (no in-app preset manager yet)
-- Edit or add presets under `presets:` in your user config — same id overrides
-  the bundled definition; new ids are added. Bundled presets you omit still load
-- Other CLI flags: `--file` / `-f`, `--config` / `-c`
+Requires [Rust](https://rustup.rs/). Both platforms build and run
+`noviewlog-slint` with the daily `release-dev` profile; the run scripts build
+on first launch, so there is no separate build step unless you want one:
+`cargo build --profile release-dev -p noviewlog-slint`.
 
-## Run (Linux)
+### Linux
 
-Requires [Rust](https://rustup.rs/) and native build tools. On Ubuntu:
+Native build tools are required. On Ubuntu:
 
 ```bash
 sudo apt install build-essential pkg-config libssl-dev
@@ -77,22 +79,10 @@ bash scripts/run-slint.sh -- npm run dev
 bash scripts/run-slint.sh -- --preset node-dev -- node server.js
 ```
 
-This builds and runs `noviewlog-slint` with the daily `release-dev` profile
-(`opt-level = 3`, incremental, no fat LTO). First run may fetch local fontconfig
-deps via `scripts/setup-slint-deps.sh` into `.deps/`.
+The first run may fetch local fontconfig deps via `scripts/setup-slint-deps.sh`
+into `.deps/`. Binary: `target/release-dev/noviewlog-slint`.
 
-Arguments after `--` are executed in a PTY. Each terminal has its own Terminal
-tab and filter tabs; switching terminals does not stop background sessions.
-See [`docs/terminals.md`](docs/terminals.md) and
-[`docs/architecture.md`](docs/architecture.md).
-
-The bundled presets live in [`presets/defaults.yaml`](presets/defaults.yaml)
-(default `node-dev`). User configuration is stored in
-`~/.config/noviewlog/config.yaml` — add or override entries under `presets:`.
-Projects live in `~/.config/noviewlog/projects.yaml` (see
-[`docs/terminals.md`](docs/terminals.md)).
-
-## Run (Windows)
+### Windows
 
 Prerequisites: Windows 10+ x64.
 
@@ -120,21 +110,15 @@ rustc -vV
 .\scripts\run-slint-windows.ps1 -- --preset node-dev -- node server.js
 ```
 
-This builds and runs `noviewlog-slint` with the daily `release-dev` profile
-(same as Linux: `opt-level = 3`, incremental, no fat LTO). The script imports
-the MSVC environment when `link.exe` is not already in `PATH`.
+The script imports the MSVC environment when `link.exe` is not already in
+`PATH`. Binary: `target\release-dev\noviewlog-slint.exe`.
 
-Build only (after MSVC env is active):
+Do **not** use the Linux `run-slint.sh` / fontconfig `.deps` helpers on
+Windows.
 
-```powershell
-cargo build --profile release-dev -p noviewlog-slint
-```
+#### Windows publish
 
-Binary: `target\release-dev\noviewlog-slint.exe`.
-
-### Windows publish
-
-Stage a copyable folder with fat LTO (`--release`). From PowerShell:
+Stage a copyable folder with fat LTO (`--release`):
 
 ```powershell
 .\scripts\publish-slint-windows.ps1
@@ -151,15 +135,6 @@ bash scripts/publish-slint-windows.sh
 Output: `dist\noviewlog-slint-win-x64\NoViewLog.exe`. Copy that folder to the
 target machine and run `NoViewLog.exe`.
 
-Do **not** use the Linux `run-slint.sh` / fontconfig `.deps` helpers on Windows.
-
-User config on Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`.
-Projects: `%USERPROFILE%\.config\noviewlog\projects.yaml`.
-
-## Other platforms (best-effort)
-
-macOS and other OSes may work but are not actively tested.
-
 ## Tests
 
 ```
@@ -167,7 +142,9 @@ cargo test -p noviewlog-core --lib
 cargo test -p noviewlog-slint --lib --test inline_rename_wiring --test chrome_icon_wiring
 ```
 
-There is no GitHub Actions CI. Run those tests locally (and `cargo build --profile release-dev -p noviewlog-slint` after Slint or engine UI changes). Do not add workflows unless explicitly requested — this project is moving to a self-hosted server.
+Run the tests locally; also rebuild with
+`cargo build --profile release-dev -p noviewlog-slint` after Slint or engine UI
+changes.
 
 ## Architecture
 
@@ -187,6 +164,28 @@ There is no GitHub Actions CI. Run those tests locally (and `cargo build --profi
 3. Exclude rules take precedence.
 
 Severity is applied after include/exclude and is not saved in `config.yaml`.
+
+## Configuration
+
+### File locations
+
+- User config: `~/.config/noviewlog/config.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\config.yaml`)
+- Projects store: `~/.config/noviewlog/projects.yaml` (Windows: `%USERPROFILE%\.config\noviewlog\projects.yaml`)
+- Settings: maximum scrollback lines
+
+### Presets
+
+- Bundled filter presets in [`presets/defaults.yaml`](presets/defaults.yaml)
+  (`node-dev`, `node-errors`, `php-dev`, `php-errors`, `python-dev`,
+  `python-errors`, `go-errors`, `nginx-access`, `docker-compose`)
+- Edit or add presets under `presets:` in your user config — same id overrides
+  the bundled definition; new ids are added. Bundled presets you omit still load
+
+### CLI flags
+
+- `--preset` / `-p` — apply a filter preset at launch (no in-app preset manager yet)
+- `--file` / `-f` — open a log file
+- `--config` / `-c` — use a different config file
 
 ## License
 
