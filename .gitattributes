@@ -1,0 +1,13 @@
+# Internal working materials are excluded from public release exports.
+# `git archive` (used by scripts/publish-release.*) strips these paths via
+# export-ignore; the publish scripts hard-fail if they still show up.
+# The "dir/" form prunes the whole subtree; "dir/**" also marks inner paths.
+openspec/ export-ignore
+openspec/** export-ignore
+.cursor/ export-ignore
+.cursor/** export-ignore
+.kilo/ export-ignore
+.kilo/** export-ignore
+release-notes/ export-ignore
+release-notes/** export-ignore
+AGENTS.md export-ignore
