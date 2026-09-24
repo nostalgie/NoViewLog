@@ -3,8 +3,8 @@
 NoViewLog is a native desktop live log workspace for developers who run builds, dev
 servers, and other processes locally and need to actually read their output:
 launch a command through a PTY or open a log file, slice it with filter tabs,
-follow live output, and search large logs fast. The UI is **Slint** rendered by
-a Rust engine — no WebView, no browser; the log viewport is drawn by Rust
+follow live output, and search large logs fast. The UI is Slint rendered by
+a Rust engine; the log viewport is drawn by Rust
 (`fontdue` bitmap). It is not a log-collection or monitoring tool: it does not
 aggregate logs from remote machines, ship them anywhere, or alert.
 
