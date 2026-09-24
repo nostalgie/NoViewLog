@@ -1,6 +1,6 @@
+use super::USER_CONFIG_LOCK;
 use crate::core::formats::get_builtin_format;
 use crate::core::parser::RecordParser;
-use super::USER_CONFIG_LOCK;
 
 #[test]
 fn strapi_capture_end_to_end_flat_lines() {
@@ -50,7 +50,8 @@ fn strapi_capture_end_to_end_flat_lines() {
         );
         // At least one committed line kept its SGR colour segments.
         assert!(
-            flat.iter().any(|l| l.segments.iter().any(|s| s.style.is_some())),
+            flat.iter()
+                .any(|l| l.segments.iter().any(|s| s.style.is_some())),
             "size={size}: colours lost"
         );
     }
@@ -124,9 +125,7 @@ fn scroll_to_bottom_enables_follow() {
     // Inject enough lines that the viewport can scroll.
     for i in 0..80 {
         engine
-            .send_command_json(&format!(
-                r#"{{"cmd":"stdin","text":"line {i:03}\n"}}"#
-            ))
+            .send_command_json(&format!(r#"{{"cmd":"stdin","text":"line {i:03}\n"}}"#))
             .ok();
     }
     // Without a live PTY, seed flat_lines via load_file is awkward; force scroll APIs.
@@ -198,7 +197,10 @@ fn viewport_font_size_clamps_and_defaults() {
     assert_eq!(clamp_viewport_font_size(13.0), DEFAULT_VIEWPORT_FONT_SIZE);
     assert_eq!(clamp_viewport_font_size(7.0), MIN_VIEWPORT_FONT_SIZE);
     assert_eq!(clamp_viewport_font_size(40.0), MAX_VIEWPORT_FONT_SIZE);
-    assert_eq!(clamp_viewport_font_size(f32::NAN), DEFAULT_VIEWPORT_FONT_SIZE);
+    assert_eq!(
+        clamp_viewport_font_size(f32::NAN),
+        DEFAULT_VIEWPORT_FONT_SIZE
+    );
     assert_eq!(
         crate::core::config::load_bundled_config().viewport_font_size,
         DEFAULT_VIEWPORT_FONT_SIZE

@@ -6,8 +6,11 @@ openspec/ export-ignore
 openspec/** export-ignore
 .cursor/ export-ignore
 .cursor/** export-ignore
-.kilo/ export-ignore
-.kilo/** export-ignore
 release-notes/ export-ignore
 release-notes/** export-ignore
 AGENTS.md export-ignore
+docs-private/ export-ignore
+docs-private/** export-ignore
+docs/marketing/ export-ignore
+docs/marketing/** export-ignore
+docs/code-guidelines.md export-ignore

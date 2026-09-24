@@ -58,7 +58,10 @@ presets:
 "#;
     let cfg = load_config_from_yaml(yaml);
     assert_eq!(cfg.default_preset, "my-custom");
-    assert!(cfg.presets.contains_key("php-dev"), "bundled presets remain");
+    assert!(
+        cfg.presets.contains_key("php-dev"),
+        "bundled presets remain"
+    );
     assert!(cfg.presets.contains_key("my-custom"), "user-added preset");
     let node = &cfg.presets["node-dev"];
     let hide = node

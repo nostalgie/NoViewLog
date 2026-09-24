@@ -106,12 +106,7 @@ impl VisualRowIndex {
         self.valid && self.wrap == wrap
     }
 
-    pub fn rebuild(
-        lines: &[FlatLine],
-        wrap: bool,
-        viewport_width: u32,
-        cell_width: u32,
-    ) -> Self {
+    pub fn rebuild(lines: &[FlatLine], wrap: bool, viewport_width: u32, cell_width: u32) -> Self {
         let mut prefix = Vec::with_capacity(lines.len());
         let mut sum = 0u32;
         if !wrap {
@@ -337,9 +332,9 @@ pub fn collect_visible_visual_lines_counted(
 
     let cols = max_cols(content_width(viewport_width), cell_width).max(1);
     let owned_index;
-    let index = if let Some(idx) = visual_row_index.filter(|i| {
-        i.is_valid_for(lines.len(), true, viewport_width, cell_width)
-    }) {
+    let index = if let Some(idx) =
+        visual_row_index.filter(|i| i.is_valid_for(lines.len(), true, viewport_width, cell_width))
+    {
         idx
     } else {
         owned_index = VisualRowIndex::rebuild(lines, true, viewport_width, cell_width);
@@ -370,12 +365,11 @@ pub fn collect_visible_visual_lines_counted(
     let mut skipped = line_visual_start;
     let mut visited = 0usize;
 
-    for flat_index in flat_start..lines.len() {
+    for (flat_index, line) in lines.iter().enumerate().skip(flat_start) {
         if out.len() >= max_rows {
             break;
         }
         visited += 1;
-        let line = &lines[flat_index];
         let rows = visual_rows_for_line(&line.raw, cols);
         let line_end = skipped + rows;
         if line_end <= first_row {
@@ -517,14 +511,9 @@ pub fn byte_offset_for_char_col(text: &str, col: usize) -> usize {
     if col == 0 {
         return 0;
     }
-    let mut chars = 0usize;
-    for (byte_idx, _) in text.char_indices() {
-        if chars >= col {
-            return byte_idx;
-        }
-        chars += 1;
-    }
-    text.len()
+    text.char_indices()
+        .nth(col)
+        .map_or(text.len(), |(byte_idx, _)| byte_idx)
 }
 
 pub fn selection_slice_range(
@@ -767,10 +756,7 @@ mod tests {
             .map(|i| flat_line(&format!("line-{i}-{}", "x".repeat(i % 40))))
             .collect();
         let idx = VisualRowIndex::rebuild(&lines, true, 80, 8);
-        assert_eq!(
-            idx.total_rows(),
-            count_visual_rows(&lines, true, 80, 8)
-        );
+        assert_eq!(idx.total_rows(), count_visual_rows(&lines, true, 80, 8));
         assert_eq!(
             idx.total_rows(),
             build_visual_lines(&lines, true, 80, 8).len()
@@ -820,10 +806,7 @@ mod tests {
         idx.drop_prefix(10);
         lines.drain(0..10);
         assert_eq!(idx.flat_len(), lines.len());
-        assert_eq!(
-            idx.total_rows(),
-            count_visual_rows(&lines, true, 200, 8)
-        );
+        assert_eq!(idx.total_rows(), count_visual_rows(&lines, true, 200, 8));
         assert!(idx.total_rows() < before);
         let extra = vec![flat_line("new-a"), flat_line("new-b")];
         idx.extend_lines(&extra);
@@ -844,10 +827,7 @@ mod tests {
             visual.len()
         );
         assert!(visual.iter().all(|v| v.flat_index == 0));
-        let joined: String = visual
-            .iter()
-            .map(|v| &line.raw[v.start..v.end])
-            .collect();
+        let joined: String = visual.iter().map(|v| &line.raw[v.start..v.end]).collect();
         assert_eq!(joined, "abcdefghijklmnopqrstuvwxyz");
     }
 
@@ -921,7 +901,7 @@ mod tests {
             0.0,
             scroll_x,
             false,
-            &metrics,
+            metrics,
             &visual,
             &[line.clone()],
         );
@@ -943,7 +923,7 @@ mod tests {
             0.0,
             0.0,
             true,
-            &metrics,
+            metrics,
             &visual,
             &[line],
         );
@@ -953,10 +933,7 @@ mod tests {
 
     #[test]
     fn selection_plain_text_strips_to_raw_plain() {
-        let lines = vec![
-            flat_line("line one"),
-            flat_line("line two"),
-        ];
+        let lines = vec![flat_line("line one"), flat_line("line two")];
         let sel = TextSelection::new(
             TextPos {
                 line_index: 0,

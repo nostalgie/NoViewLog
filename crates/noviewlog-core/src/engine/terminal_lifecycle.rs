@@ -48,7 +48,16 @@ impl Engine {
         }
 
         let mut coalesced: Vec<Coalesced> = Vec::new();
-        let mut byte_budget = PTY_INGEST_BYTES_PER_TICK;
+        // Drain mode (issue #126): when the previous tick held work back, the
+        // reader queue is backing up — widen the budget so ingest can outpace
+        // the writer instead of pinning sustained throughput at base_budget ×
+        // tick rate. The wall-clock guard below keeps either mode UI-safe.
+        let mut byte_budget = if self.pty_hold.is_some() {
+            PTY_INGEST_DRAIN_BYTES_PER_TICK
+        } else {
+            PTY_INGEST_BYTES_PER_TICK
+        };
+        let ingest_started = Instant::now();
         let mut more_pending = false;
 
         let mut pending_events: Vec<PtyEvent> = Vec::new();
@@ -61,7 +70,7 @@ impl Engine {
             }
             let event = if let Some(ev) = pending_events.pop() {
                 ev
-            } else if byte_budget == 0 {
+            } else if byte_budget == 0 || ingest_started.elapsed() >= PTY_INGEST_TIME_BUDGET {
                 break;
             } else {
                 match self.pty_rx.try_recv() {
@@ -548,17 +557,14 @@ impl Engine {
     /// the PTY immediately when the resolution is already cached. Either way
     /// the UI thread performs **zero** filesystem / registry probing here.
     fn queue_spawn(&mut self, terminal_id: &str, pending: PendingSpawn) {
-        let Some(term_idx) = self
-            .terminals
-            .iter()
-            .position(|t| t.id == terminal_id)
-        else {
+        let Some(term_idx) = self.terminals.iter().position(|t| t.id == terminal_id) else {
             return;
         };
-        match self
-            .spawn_resolver
-            .request_fresh(&pending.command, pending.args.clone(), &pending.workdir)
-        {
+        match self.spawn_resolver.request_fresh(
+            &pending.command,
+            pending.args.clone(),
+            &pending.workdir,
+        ) {
             None => {
                 // Cold cache or retrying a stale failure: resolution runs on
                 // the worker kicked above; `advance_pending_spawns` applies
@@ -580,10 +586,11 @@ impl Engine {
             let Some(pending) = term.pending_spawn.as_ref() else {
                 continue;
             };
-            if let Some(result) =
-                self.spawn_resolver
-                    .request(&pending.command, pending.args.clone(), &pending.workdir)
-            {
+            if let Some(result) = self.spawn_resolver.request(
+                &pending.command,
+                pending.args.clone(),
+                &pending.workdir,
+            ) {
                 ready.push((idx, pending.clone(), result));
             }
         }
@@ -652,7 +659,10 @@ impl Engine {
         self.terminals[term_idx].running = false;
         self.ptys.remove(id);
         self.last_stats_at = None;
-        let message = format!("{}: {err} | resolved: {}", pending.fail_prefix, pending.cmdline);
+        let message = format!(
+            "{}: {err} | resolved: {}",
+            pending.fail_prefix, pending.cmdline
+        );
         if term_idx == self.active_terminal {
             self.status_message = message.clone();
             self.mark_viewport_dirty();

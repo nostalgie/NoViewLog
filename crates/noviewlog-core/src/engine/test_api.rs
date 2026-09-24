@@ -62,10 +62,17 @@ impl Engine {
 
     #[cfg(test)]
     pub fn finish_pending_file_window_for_test(&mut self) {
-        while self.has_active_terminal() && self.active_terminal().pending_file_window.is_some() {
-            self.advance_pending_file_window();
+        // Window reads run on worker threads (issue #55): pump ticks until
+        // the result lands in the inbox and is applied.
+        for _ in 0..100_000 {
+            if !self.has_active_terminal() || self.active_terminal().pending_file_window.is_none() {
+                return;
+            }
+            self.apply_file_io_results();
             self.rebuild_if_needed();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        panic!("pending file window never completed");
     }
 
     #[cfg(test)]
@@ -91,9 +98,7 @@ impl Engine {
             return;
         }
         let terminal = self.active_terminal_mut();
-        terminal
-            .ingest
-            .ensure_live_screen(&mut terminal.buffer);
+        terminal.ingest.ensure_live_screen(&mut terminal.buffer);
     }
 
     #[cfg(test)]
@@ -101,10 +106,7 @@ impl Engine {
         if !self.has_active_terminal() {
             return String::new();
         }
-        self.active_terminal()
-            .ingest
-            .live_screen_lines()
-            .join("\n")
+        self.active_terminal().ingest.live_screen_lines().join("\n")
     }
 
     /// Append lines like PTY ingest (`mark_dirty = false`) so inactive views keep
@@ -141,10 +143,7 @@ impl Engine {
         if !self.has_active_terminal() {
             return None;
         }
-        self.active_view()
-            .flat_lines
-            .first()
-            .map(|l| l.raw.clone())
+        self.active_view().flat_lines.first().map(|l| l.raw.clone())
     }
 
     #[cfg(test)]
@@ -349,6 +348,16 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn match_capped_for_test(&self) -> bool {
+        self.active_view().match_capped
+    }
+
+    #[cfg(test)]
+    pub fn set_match_scan_cap_for_test(&mut self, cap: usize) {
+        self.match_scan_cap_override = Some(cap);
+    }
+
+    #[cfg(test)]
     pub fn overlay_len_for_test(&self) -> usize {
         self.active_view().overlay_len()
     }
@@ -374,11 +383,17 @@ impl Engine {
 
     #[cfg(test)]
     pub fn finish_file_match_scan_for_test(&mut self) {
+        // Match scans and their initial match-window reads run on worker
+        // threads (issue #55): post, then pump the inbox until both land.
         for _ in 0..100_000 {
-            if self.active_view().match_scan_pos.is_none() {
+            if self.active_view().match_scan_pos.is_none()
+                && self.active_view().match_window_inflight.is_none()
+            {
                 break;
             }
             self.advance_file_match_scan();
+            self.apply_file_io_results();
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let _ = self.rebuild_if_needed();
     }
@@ -434,8 +449,7 @@ impl Engine {
             launch.cwd = Some(term.cwd.clone());
         }
         let (command, args, cwd) =
-            crate::spawn_resolve::resolve_interactive_shell(&launch, self.config.shell)
-                .ok()?;
+            crate::spawn_resolve::resolve_interactive_shell(&launch, self.config.shell).ok()?;
         let workdir = crate::engine::terminal_lifecycle::expand_spawn_cwd(cwd);
         Some((command, args, workdir))
     }

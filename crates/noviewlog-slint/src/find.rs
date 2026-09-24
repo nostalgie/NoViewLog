@@ -1,4 +1,4 @@
-﻿//! Find bar wiring: debounced query, goto next/prev, commit, and close.
+//! Find bar wiring: debounced query, goto next/prev, commit, and close.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -36,12 +36,7 @@ fn install_query_changed(
 ) {
     let ctx = ctx.clone();
     ui.on_find_query_changed(move |query, regex, case_sensitive, whole_word| {
-        *find_pending.borrow_mut() = Some((
-            query.to_string(),
-            regex,
-            case_sensitive,
-            whole_word,
-        ));
+        *find_pending.borrow_mut() = Some((query.to_string(), regex, case_sensitive, whole_word));
         let ctx = ctx.clone();
         let find_pending = find_pending.clone();
         find_debounce.start(TimerMode::SingleShot, FIND_DEBOUNCE, move || {
@@ -59,12 +54,7 @@ fn install_query_changed(
     });
 }
 
-fn install_goto(
-    ui: &AppWindow,
-    ctx: &Ctx,
-    find_debounce: Rc<Timer>,
-    find_pending: FindPending,
-) {
+fn install_goto(ui: &AppWindow, ctx: &Ctx, find_debounce: Rc<Timer>, find_pending: FindPending) {
     let ctx = ctx.clone();
     ui.on_find_goto(move |delta| {
         // Flush pending search_set before navigating.
@@ -81,12 +71,7 @@ fn install_goto(
     });
 }
 
-fn install_commit(
-    ui: &AppWindow,
-    ctx: &Ctx,
-    find_debounce: Rc<Timer>,
-    find_pending: FindPending,
-) {
+fn install_commit(ui: &AppWindow, ctx: &Ctx, find_debounce: Rc<Timer>, find_pending: FindPending) {
     let ctx = ctx.clone();
     ui.on_find_commit(move || {
         find_debounce.stop();
@@ -103,12 +88,7 @@ fn install_commit(
     });
 }
 
-fn install_closed(
-    ui: &AppWindow,
-    ctx: &Ctx,
-    find_debounce: Rc<Timer>,
-    find_pending: FindPending,
-) {
+fn install_closed(ui: &AppWindow, ctx: &Ctx, find_debounce: Rc<Timer>, find_pending: FindPending) {
     let ctx = ctx.clone();
     let ui_closed = ui.as_weak();
     ui.on_find_closed(move || {

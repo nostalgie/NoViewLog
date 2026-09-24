@@ -160,21 +160,23 @@ fn install_sidebar(ui: &AppWindow, ctx: &Ctx) {
 
 fn install_set_launch(ui: &AppWindow, ctx: &Ctx) {
     let ctx = ctx.clone();
-    ui.on_program_set_launch(move |terminal_id, command, args_text, cwd, wsl, wsl_distro| {
-        let args = parse_launch_args(args_text.as_str());
-        let cmd = command.as_str().trim();
-        let cwd_s = cwd.as_str().trim();
-        let distro = wsl_distro.as_str().trim();
-        let _ = ctx.send(Command::ProgramSetLaunch {
-            terminal_id: Some(terminal_id.as_str().to_string()),
-            command: non_empty(cmd),
-            args,
-            cwd: non_empty(cwd_s),
-            wsl,
-            wsl_distro: non_empty(distro),
-        });
-        ctx.refresh();
-    });
+    ui.on_program_set_launch(
+        move |terminal_id, command, args_text, cwd, wsl, wsl_distro| {
+            let args = parse_launch_args(args_text.as_str());
+            let cmd = command.as_str().trim();
+            let cwd_s = cwd.as_str().trim();
+            let distro = wsl_distro.as_str().trim();
+            let _ = ctx.send(Command::ProgramSetLaunch {
+                terminal_id: Some(terminal_id.as_str().to_string()),
+                command: non_empty(cmd),
+                args,
+                cwd: non_empty(cwd_s),
+                wsl,
+                wsl_distro: non_empty(distro),
+            });
+            ctx.refresh();
+        },
+    );
 }
 
 #[cfg(test)]

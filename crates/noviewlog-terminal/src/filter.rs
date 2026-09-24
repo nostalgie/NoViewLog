@@ -1,15 +1,8 @@
-use crate::core::types::{FilterRule, FilterType, LogRecord};
+use crate::types::{FilterRule, FilterType, LogRecord};
 
+#[derive(Default)]
 pub struct FilterEngine {
     filters: Vec<FilterRule>,
-}
-
-impl Default for FilterEngine {
-    fn default() -> Self {
-        Self {
-            filters: Vec::new(),
-        }
-    }
 }
 
 impl FilterEngine {
@@ -43,11 +36,7 @@ impl FilterEngine {
         let mut has_include = false;
         for filter in filters.iter().filter(|f| f.enabled) {
             if filter.filter_type == FilterType::Exclude {
-                if filter
-                    .regex
-                    .as_ref()
-                    .is_some_and(|re| re.is_match(text))
-                {
+                if filter.regex.as_ref().is_some_and(|re| re.is_match(text)) {
                     return false;
                 }
             } else {
@@ -62,16 +51,11 @@ impl FilterEngine {
         filters.iter().any(|f| {
             f.enabled
                 && f.filter_type == FilterType::Include
-                && f.regex
-                    .as_ref()
-                    .is_some_and(|re| re.is_match(text))
+                && f.regex.as_ref().is_some_and(|re| re.is_match(text))
         })
     }
 
     pub fn filter_records<'a>(&self, records: &'a [LogRecord]) -> Vec<&'a LogRecord> {
-        records
-            .iter()
-            .filter(|r| self.is_visible(r))
-            .collect()
+        records.iter().filter(|r| self.is_visible(r)).collect()
     }
 }

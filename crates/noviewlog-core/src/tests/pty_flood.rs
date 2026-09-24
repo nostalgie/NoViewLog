@@ -1,6 +1,5 @@
 use crate::engine::{Command, Engine, PTY_INGEST_BYTES_PER_TICK};
 use crate::pty::PtyEvent;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -63,6 +62,49 @@ fn poll_pty_sets_drain_pending_without_requiring_mid_tick_wake() {
         "reader wake must be deferred until the paint interval so the host does not busy-drain"
     );
     assert!(engine.take_pty_drain_pending());
+}
+
+#[test]
+fn poll_pty_widens_budget_in_drain_mode() {
+    // Issue #126: a tick that starts with held-back work (reader queue backing
+    // up) must ingest more than the base budget, else sustained throughput is
+    // pinned at base_budget x tick rate (~8 MB/s).
+    use crate::engine::PTY_INGEST_BYTES_PER_TICK;
+    let mut engine = Engine::new();
+    let id = engine.active_terminal().id.clone();
+    {
+        let term = engine.active_terminal_mut();
+        term.ingest.ensure_live_screen(&mut term.buffer);
+    }
+    // 64 KB chunks, each ending in a newline so every chunk commits one record.
+    let chunk: Vec<u8> = {
+        let mut c = vec![b'x'; 64 * 1024 - 1];
+        c.push(b'\n');
+        c
+    };
+    // 380 x 64 KB = 24 MB queued, far beyond the 2 MB drain cap.
+    for _ in 0..380 {
+        engine
+            .pty_tx
+            .try_send(PtyEvent::Bytes {
+                id: id.clone(),
+                data: chunk.clone(),
+                generation: 0,
+            })
+            .expect("queue has room");
+    }
+    // Poll 1: base budget (256 KB) consumes 4 chunks and holds the 5th.
+    engine.poll_pty();
+    assert!(engine.pty_hold.is_some(), "base budget must hold remainder");
+    // Poll 2 starts in drain mode: held chunk + ~30 more, i.e. ~2 MB.
+    let before = engine.terminals[0].buffer.records_len();
+    engine.poll_pty();
+    let after = engine.terminals[0].buffer.records_len();
+    let ingested = after - before;
+    assert!(
+        ingested >= PTY_INGEST_BYTES_PER_TICK / (64 * 1024) * 3,
+        "drain-mode poll must exceed the base budget ({ingested} records)"
+    );
 }
 
 #[test]

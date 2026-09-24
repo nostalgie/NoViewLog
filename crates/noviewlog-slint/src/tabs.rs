@@ -31,7 +31,13 @@ pub(crate) fn install(
     logical_size: Rc<RefCell<(f32, f32)>>,
     viewport_focused: Rc<Cell<bool>>,
 ) {
-    install_switch(ui, ctx, terminal_tab_active.clone(), logical_size, viewport_focused);
+    install_switch(
+        ui,
+        ctx,
+        terminal_tab_active.clone(),
+        logical_size,
+        viewport_focused,
+    );
     install_move(ui, ctx);
     install_add(ui, ctx, tabs_model.clone(), terminal_tab_active.clone());
     install_close(ui, ctx, tabs_model.clone(), terminal_tab_active.clone());

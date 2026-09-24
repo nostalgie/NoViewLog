@@ -1,5 +1,45 @@
 use super::*;
 
+/// How often the tick sweeps open file sessions for external changes
+/// (issue #151). One cheap stat per loaded session per sweep.
+pub(crate) const FILE_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Progress / result of a background whole-file match scan (issue #55).
+pub(crate) enum MatchScanProgress {
+    Progressing { next: u64, match_count: usize },
+    Done { offsets: Vec<u64>, capped: bool },
+    Failed(String),
+}
+
+/// A completed background file I/O job, posted by a worker thread into the
+/// engine inbox and applied on the UI tick (issue #55: no synchronous file
+/// reads on the event-loop thread during load or scroll).
+pub(crate) enum FileIoDone {
+    /// Sliding-window read for a file session (scroll / prefetch).
+    Window {
+        term_id: String,
+        new_start: u64,
+        scroll_y: f32,
+        result: Result<Vec<String>, String>,
+    },
+    /// Whole-file match scan for a view (file filter tab).
+    MatchScan {
+        term_id: String,
+        view_idx: usize,
+        token: u64,
+        progress: MatchScanProgress,
+    },
+    /// Match-window read for a view's viewport (filter tab recenter).
+    MatchWindow {
+        term_id: String,
+        view_idx: usize,
+        req: u64,
+        start: usize,
+        new_local: f32,
+        result: Result<Vec<String>, String>,
+    },
+}
+
 impl Engine {
     pub(crate) fn open_log_file_command(&mut self, path: &str) {
         self.ensure_valid_state();
@@ -38,7 +78,11 @@ impl Engine {
             self.push_event(json!({"type":"status","message": self.status_message}));
             return;
         }
-        let Some(path) = self.active_terminal().file_session_path().map(str::to_string) else {
+        let Some(path) = self
+            .active_terminal()
+            .file_session_path()
+            .map(str::to_string)
+        else {
             self.status_message = "File session has no path".to_string();
             self.push_event(json!({"type":"status","message": self.status_message}));
             return;
@@ -89,26 +133,24 @@ impl Engine {
     }
 
     pub(crate) fn start_log_file_load(&mut self, path: &str) {
-        let load = match FileLoadState::open(path) {
-            Ok(state) => state,
-            Err(message) => {
-                self.status_message = message.clone();
-                self.push_event(json!({"type":"status","message": message}));
-                return;
-            }
-        };
+        // Open, sniff, transcode, read, and index all run on a worker thread
+        // (issue #55); the engine drains events in `advance_file_load`.
+        let load = crate::file_load::spawn_file_load(path);
         let display_path = load.path.clone();
         let term = self.viewport_pty_size();
 
         {
             let terminal = self.active_terminal_mut();
+            // Dropping the previous handle stops its worker.
             terminal.file_load = None;
             terminal.file_backed = None;
+            terminal.file_changed = false;
             terminal.pending_file_window = None;
             terminal.buffer_line_start = 0;
             terminal.buffer_line_end = 0;
             terminal.buffer.clear();
-            terminal.ingest
+            terminal
+                .ingest
                 .reset_with_size(term.cols as usize, term.rows as usize);
             for view in &mut terminal.views {
                 view.clear_flat_lines();
@@ -121,6 +163,7 @@ impl Engine {
         self.push_event(json!({"type":"status","message": self.status_message}));
     }
 
+    /// Apply load events drained from the background worker (issue #55).
     pub(crate) fn advance_file_load(&mut self) {
         if !self.has_active_terminal() {
             return;
@@ -128,90 +171,128 @@ impl Engine {
         let Some(mut load) = self.active_terminal_mut().file_load.take() else {
             return;
         };
-
-        let was_empty = self.active_terminal().buffer.raw_lines_len() == 0;
-        let (lines, content_done, index_done) = match load.tick() {
-            Ok(result) => result,
-            Err(message) => {
-                self.active_terminal_mut().file_load = None;
-                self.status_message = message.clone();
-                self.push_event(json!({"type":"status","message": message}));
-                return;
-            }
-        };
-
-        let first_batch = was_empty && !lines.is_empty();
-        let got_lines = !lines.is_empty();
-        if got_lines {
-            // Quiet ingest during load — paint only on first/last content batch.
-            self.push_lines(lines, false);
-            let terminal = self.active_terminal_mut();
-            if load.content_start_byte == 0 {
-                terminal.buffer_line_start = 0;
-            } else if load.index_finished {
-                terminal.buffer_line_start = load.index.line_at_offset(load.content_start_byte);
-            }
-            terminal.buffer_line_end = terminal.buffer_line_start + load.content_lines_read;
+        let events = load.drain(crate::file_load::LOAD_EVENTS_PER_TICK);
+        if events.is_empty() {
+            self.active_terminal_mut().file_load = Some(load);
+            return;
         }
 
-        if first_batch || (content_done && got_lines) {
-            self.mark_all_views_dirty();
-            self.mark_viewport_dirty();
-        }
-
-        if load.is_finished() {
-            {
-                let terminal = self.active_terminal_mut();
-                if let Some(last) = terminal.parser.flush_pending() {
-                    let shifted = terminal.buffer.add(last);
-                    terminal.buffer_line_start += shifted as u64;
-                }
-                if load.content_start_byte > 0 {
-                    terminal.buffer_line_start = load.index.line_at_offset(load.content_start_byte);
-                }
-                terminal.buffer_line_end = terminal.buffer_line_start + load.content_lines_read;
-                match load.into_backed() {
-                    Ok(backed) => terminal.file_backed = Some(backed),
-                    Err(message) => {
-                        self.status_message = message.clone();
-                        self.push_event(json!({"type":"status","message": message}));
-                        return;
+        let display_path = load.path.clone();
+        for event in events {
+            match event {
+                crate::file_load::LoadEvent::Progress {
+                    lines,
+                    content_done,
+                    index_done,
+                    content_lines_read,
+                    index_progress,
+                    tail_start_line,
+                } => {
+                    let was_empty = self.active_terminal().buffer.raw_lines_len() == 0;
+                    let got_lines = !lines.is_empty();
+                    if got_lines {
+                        // Quiet ingest during load — paint only on first/last content batch.
+                        self.push_lines(lines, false);
+                        if let Some(tail_start) = tail_start_line {
+                            let terminal = self.active_terminal_mut();
+                            terminal.buffer_line_start = tail_start;
+                            terminal.buffer_line_end = tail_start + content_lines_read;
+                        }
+                    }
+                    if was_empty && got_lines || (content_done && got_lines) {
+                        self.mark_all_views_dirty();
+                        self.mark_viewport_dirty();
+                    }
+                    if content_done && !index_done {
+                        let index_pct = (index_progress * 100.0) as u32;
+                        // Throttle status churn: update only every ~5% while indexing.
+                        if index_pct.is_multiple_of(5) || index_pct >= 99 {
+                            self.status_message = format!(
+                                "Indexing: {display_path}… ({index_pct}%, {content_lines_read} lines visible)"
+                            );
+                        }
+                    } else if !content_done {
+                        self.status_message =
+                            format!("Loading: {display_path}… ({content_lines_read} lines)");
                     }
                 }
-                terminal.file_load = None;
-            }
-            self.mark_all_views_dirty();
-            self.mark_viewport_dirty();
-            let path = self
-                .active_terminal()
-                .file_backed
-                .as_ref()
-                .map(|b| b.path.clone())
-                .unwrap_or_default();
-            let total = self
-                .active_terminal()
-                .file_backed
-                .as_ref()
-                .map(|b| b.index.total_lines())
-                .unwrap_or(0);
-            self.status_message = format!("Opened: {path} ({total} lines, scroll for full file)");
-            self.push_event(json!({"type":"status","message": self.status_message}));
-        } else {
-            let path = load.path.clone();
-            let lines_read = load.content_lines_read;
-            let index_pct = (load.index_progress() * 100.0) as u32;
-            self.active_terminal_mut().file_load = Some(load);
-            // Throttle status churn: update only every ~5% while indexing.
-            if content_done && !index_done {
-                if index_pct % 5 == 0 || index_pct >= 99 {
+                crate::file_load::LoadEvent::Done {
+                    backed,
+                    content_lines_read,
+                    tail_start_line,
+                } => {
+                    let total = backed.index.total_lines();
+                    {
+                        let terminal = self.active_terminal_mut();
+                        if let Some(last) = terminal.parser.flush_pending() {
+                            let shifted = terminal.buffer.add(last);
+                            terminal.buffer_line_start += shifted as u64;
+                        }
+                        terminal.buffer_line_start = tail_start_line;
+                        terminal.buffer_line_end = tail_start_line + content_lines_read;
+                        terminal.file_backed = Some(*backed);
+                        terminal.file_load = None;
+                    }
+                    self.mark_all_views_dirty();
+                    self.mark_viewport_dirty();
                     self.status_message =
-                        format!("Indexing: {path}… ({index_pct}%, {lines_read} lines visible)");
+                        format!("Opened: {display_path} ({total} lines, scroll for full file)");
+                    self.push_event(json!({"type":"status","message": self.status_message}));
+                    // The handle stays out; drop the borrowed one.
+                    return;
                 }
-            } else if !content_done {
-                self.status_message =
-                    format!("Loading: {path}… ({lines_read} lines)");
+                crate::file_load::LoadEvent::Failed(message) => {
+                    self.active_terminal_mut().file_load = None;
+                    self.status_message = message.clone();
+                    self.push_event(json!({"type":"status","message": message}));
+                    return;
+                }
             }
         }
+        // Still loading: put the handle back.
+        if self.active_terminal().file_load.is_none() {
+            self.active_terminal_mut().file_load = Some(load);
+        }
+    }
+
+    /// Detect external truncation / append / rewrite of open file sessions
+    /// (issue #151): a throttled size+mtime stat per loaded session on the
+    /// tick. A drifted session flips into the `file_changed` state until the
+    /// user reloads; no automatic reload (manual-reload spec decision).
+    pub(crate) fn poll_file_changes(&mut self) {
+        if !self
+            .last_file_watch_at
+            .is_none_or(|at| at.elapsed() >= FILE_WATCH_INTERVAL)
+        {
+            return;
+        }
+        self.last_file_watch_at = Some(Instant::now());
+        let mut changed: Vec<String> = Vec::new();
+        for terminal in &mut self.terminals {
+            // Still loading: the worker reads what is on disk; the open-time
+            // baseline catches any drift on the next sweep.
+            if terminal.file_load.is_some() || terminal.file_changed {
+                continue;
+            }
+            let drifted = terminal
+                .file_backed
+                .as_ref()
+                .is_some_and(|backed| backed.changed_on_disk());
+            if drifted {
+                terminal.file_changed = true;
+                changed.push(terminal.label());
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        self.status_message = format!(
+            "File changed on disk — Reload to refresh: {}",
+            changed.join(", ")
+        );
+        self.push_event(json!({"type":"status","message": self.status_message}));
+        // Flush stats promptly so the host sees the file_changed flag.
+        self.last_stats_at = None;
     }
 
     pub(crate) fn maybe_prefetch_file_window(&mut self) {
@@ -232,20 +313,15 @@ impl Engine {
         let window_lines = self.file_view_window_lines() as u64;
         // Never slide farther than half a window — PREFETCH_RAW_LINES can exceed
         // FILE_VIEW_WINDOW_LINES and would drop the visible region (black frames).
-        let step = (PREFETCH_RAW_LINES as u64)
-            .min(window_lines / 2)
-            .max(1);
+        let step = (PREFETCH_RAW_LINES as u64).min(window_lines / 2).max(1);
         let (need_up, need_down, scroll_y, content_h, window_start, _window_end, total_lines) = {
             let terminal = self.active_terminal();
             let Some(backed) = &terminal.file_backed else {
                 return;
             };
             let view = terminal.active_view();
-            let rows = view.cached_visual_rows(
-                self.viewport_width,
-                metrics.cell_width,
-                count_visual_rows,
-            );
+            let rows =
+                view.cached_visual_rows(self.viewport_width, metrics.cell_width, count_visual_rows);
             let content_h = rows as f32 * row_stride;
             let local_max = (content_h - self.viewport_height as f32).max(0.0);
             // Clamp: a stale global offset must not look like "near bottom".
@@ -325,11 +401,9 @@ impl Engine {
             let start = terminal.buffer_line_start;
             let loaded = terminal.buffer.records_len() as u64;
             let end = if loaded > 0 {
-                start.saturating_add(loaded).min(
-                    terminal
-                        .buffer_line_end
-                        .max(start.saturating_add(loaded)),
-                )
+                start
+                    .saturating_add(loaded)
+                    .min(terminal.buffer_line_end.max(start.saturating_add(loaded)))
             } else {
                 terminal.buffer_line_end
             };
@@ -391,11 +465,7 @@ impl Engine {
         // Keep showing the current window until the new chunk lands (no black flash).
         // Near EOF: ask for the bottom of the window; finish clamps to real local_max
         // (Wrap ON can make visual height > raw window * stride).
-        let pending_local = if near_eof {
-            f32::MAX
-        } else {
-            local
-        };
+        let pending_local = if near_eof { f32::MAX } else { local };
         self.request_file_window_at(new_start, pending_local);
         self.mark_viewport_dirty();
     }
@@ -439,74 +509,299 @@ impl Engine {
             lines: Vec::new(),
         });
         self.mark_viewport_dirty();
+
+        // Read the whole window on a worker thread (issue #55); the result is
+        // applied by [`Engine::apply_file_io_results`] when it lands.
+        let (shared, index, term_id) = {
+            let terminal = self.active_terminal();
+            let backed = terminal.file_backed.as_ref().expect("checked above");
+            (
+                backed.file.clone(),
+                backed.index.clone(),
+                terminal.id.clone(),
+            )
+        };
+        let count = (end_line - new_start) as usize;
+        let inbox = self.file_io_done.clone();
+        // Copy for the spawn-failure branch: the closure owns the original.
+        let spawn_failed_term = term_id.clone();
+        let worker = std::thread::Builder::new()
+            .name("noviewlog-file-window".into())
+            .spawn(move || {
+                let result =
+                    crate::file_index::read_lines_shared(&shared, &index, new_start, count);
+                let mut inbox = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                inbox.push(FileIoDone::Window {
+                    term_id,
+                    new_start,
+                    scroll_y,
+                    result,
+                });
+            });
+        if let Err(err) = worker {
+            self.file_window_spawn_failed(&spawn_failed_term, new_start, scroll_y, err);
+        }
     }
 
-    pub(crate) fn advance_pending_file_window(&mut self) {
-        if !self.has_active_terminal() {
-            return;
-        }
+    /// A failed file-window worker spawn (issue #148): the read never
+    /// happens, so degrade through the same path as a failed read — drop the
+    /// pending window and surface a status error.
+    fn file_window_spawn_failed(
+        &mut self,
+        term_id: &str,
+        new_start: u64,
+        scroll_y: f32,
+        err: std::io::Error,
+    ) {
+        let message = format!("File window read failed to start: {err}");
+        self.apply_window_result(term_id, new_start, scroll_y, Err(message));
+    }
 
-        let read_chunk = {
-            let terminal = self.active_terminal_mut();
-            let Some(pending) = terminal.pending_file_window.as_mut() else {
+    /// Apply background file I/O results posted by worker threads (issue #55).
+    /// Runs at the head of [`Engine::tick`] so landed windows/scans render in
+    /// the same tick. Called again in tests to pump completion.
+    pub(crate) fn apply_file_io_results(&mut self) {
+        // Finish a window that landed while its terminal was inactive.
+        if self.has_active_terminal() && self.pending_window_ready() {
+            self.finish_active_pending_window();
+        }
+        let done: Vec<FileIoDone> =
+            std::mem::take(&mut *self.file_io_done.lock().unwrap_or_else(|e| e.into_inner()));
+        for item in done {
+            match item {
+                FileIoDone::Window {
+                    term_id,
+                    new_start,
+                    scroll_y,
+                    result,
+                } => self.apply_window_result(&term_id, new_start, scroll_y, result),
+                FileIoDone::MatchScan {
+                    term_id,
+                    view_idx,
+                    token,
+                    progress,
+                } => self.apply_match_scan_result(&term_id, view_idx, token, progress),
+                FileIoDone::MatchWindow {
+                    term_id,
+                    view_idx,
+                    req,
+                    start,
+                    new_local,
+                    result,
+                } => self
+                    .apply_match_window_result(&term_id, view_idx, req, start, new_local, result),
+            }
+        }
+    }
+
+    fn pending_window_ready(&self) -> bool {
+        self.active_terminal()
+            .pending_file_window
+            .as_ref()
+            .is_some_and(|p| p.next_line >= p.end_line)
+    }
+
+    /// Monotonic request id for background match-window reads; results with a
+    /// stale id are dropped.
+    fn next_match_window_req(&mut self) -> u64 {
+        self.match_window_req = self.match_window_req.wrapping_add(1);
+        self.match_window_req
+    }
+
+    /// Apply a finished match-window read (issue #55).
+    fn apply_match_window_result(
+        &mut self,
+        term_id: &str,
+        view_idx: usize,
+        req: u64,
+        start: usize,
+        new_local: f32,
+        result: Result<Vec<String>, String>,
+    ) {
+        let Some(idx) = self.terminals.iter().position(|t| t.id == term_id) else {
+            return;
+        };
+        // The view may have been closed while the read was in flight; a newer
+        // request or an index invalidation owns the view now.
+        let Some(view) = self.terminals[idx]
+            .views
+            .get_mut(view_idx)
+            .filter(|v| v.match_window_inflight == Some(req))
+        else {
+            return;
+        };
+        view.match_window_inflight = None;
+        let lines = match result {
+            Ok(lines) => lines,
+            Err(message) => {
+                if idx == self.active_terminal && self.terminals[idx].active_view == view_idx {
+                    self.status_message = message;
+                }
                 return;
-            };
-            let Some(backed) = terminal.file_backed.as_mut() else {
-                terminal.pending_file_window = None;
-                return;
-            };
-            let remaining = pending.end_line.saturating_sub(pending.next_line) as usize;
-            if remaining == 0 {
-                Ok(None)
-            } else {
-                let count = remaining.min(FILE_WINDOW_LINES_PER_TICK);
-                let next_line = pending.next_line;
-                backed
-                    .read_lines(next_line, count)
-                    .map(Some)
-                    .map_err(|message| message)
             }
         };
+        {
+            let flat = crate::core::visible::flat_lines_from_raw_lines(&lines, start as u64);
+            view.set_match_flat_lines(flat);
+            view.match_window_start = start;
+        }
+        // scroll_offset_y is shared between a terminal's views — only the
+        // active view may move it.
+        if idx == self.active_terminal && self.terminals[idx].active_view == view_idx {
+            let local_max = self.local_window_max_scroll();
+            let terminal = &mut self.terminals[idx];
+            terminal.scroll_offset_y = new_local.clamp(0.0, local_max);
+            // Match window lines are a different index space than the prior view.
+            terminal.selection = None;
+            self.mark_viewport_dirty();
+        }
+    }
 
-        match read_chunk {
-            Err(message) => {
-                self.active_terminal_mut().pending_file_window = None;
-                self.status_message = message.clone();
-                self.push_event(json!({"type":"status","message": message}));
+    fn finish_active_pending_window(&mut self) {
+        let pending = self
+            .active_terminal_mut()
+            .pending_file_window
+            .take()
+            .expect("checked by pending_window_ready");
+        self.finish_file_window(self.active_terminal, pending);
+    }
+
+    fn apply_window_result(
+        &mut self,
+        term_id: &str,
+        new_start: u64,
+        _scroll_y: f32,
+        result: Result<Vec<String>, String>,
+    ) {
+        let Some(idx) = self.terminals.iter().position(|t| t.id == term_id) else {
+            return;
+        };
+        // Superseded (a newer window was requested, or the pending was
+        // cleared by reload/stop): drop the stale read.
+        let stale = !self.terminals[idx]
+            .pending_file_window
+            .as_ref()
+            .is_some_and(|p| p.new_start == new_start);
+        match result {
+            Ok(lines) if !stale => {
+                let terminal = &mut self.terminals[idx];
+                if let Some(pending) = terminal.pending_file_window.as_mut() {
+                    pending.lines = lines;
+                    pending.next_line = pending.end_line;
+                    // Keep `pending.scroll_y`: a later request may have
+                    // updated the desired scroll while this read was in flight.
+                }
+                // Inactive terminals finish when they next become active.
+                if idx == self.active_terminal {
+                    self.finish_active_pending_window();
+                }
             }
-            Ok(None) => {
-                let pending = self.active_terminal_mut().pending_file_window.take().unwrap();
-                self.finish_file_window(pending);
+            Err(message) if !stale => {
+                self.terminals[idx].pending_file_window = None;
+                if idx == self.active_terminal {
+                    self.status_message = message.clone();
+                    self.push_event(json!({"type":"status","message": message}));
+                }
             }
-            Ok(Some(lines)) if lines.is_empty() => {
-                let pending = self.active_terminal_mut().pending_file_window.take().unwrap();
-                self.finish_file_window(pending);
+            _ => {}
+        }
+    }
+
+    fn apply_match_scan_result(
+        &mut self,
+        term_id: &str,
+        view_idx: usize,
+        token: u64,
+        progress: MatchScanProgress,
+    ) {
+        let Some(idx) = self.terminals.iter().position(|t| t.id == term_id) else {
+            return;
+        };
+        {
+            let view = self.terminals[idx].views.get_mut(view_idx);
+            let Some(view) = view else { return };
+            if view.match_scan_token != token {
+                return; // filters changed mid-scan; a fresh scan owns the view
             }
-            Ok(Some(lines)) => {
-                let finished = {
-                    let terminal = self.active_terminal_mut();
-                    let pending = terminal.pending_file_window.as_mut().unwrap();
-                    let read = lines.len() as u64;
-                    pending.lines.extend(lines);
-                    pending.next_line += read;
-                    pending.next_line >= pending.end_line
-                };
-                if finished {
-                    let pending = self.active_terminal_mut().pending_file_window.take().unwrap();
-                    self.finish_file_window(pending);
+        }
+        let is_active = idx == self.active_terminal && self.terminals[idx].active_view == view_idx;
+        let file_size = self.terminals[idx]
+            .file_backed
+            .as_ref()
+            .map(|b| b.index.file_size())
+            .unwrap_or(0);
+        match progress {
+            MatchScanProgress::Progressing { next, match_count } => {
+                let view = &mut self.terminals[idx].views[view_idx];
+                view.match_scan_pos = Some(next);
+                if !is_active {
+                    return;
+                }
+                let pct = if file_size == 0 {
+                    100
                 } else {
+                    ((next as f32 / file_size as f32) * 100.0) as u32
+                };
+                // Throttle status churn: update every ~5% (same idea as file indexing).
+                let prev_pct = self
+                    .status_message
+                    .strip_prefix("Scanning filters… ")
+                    .and_then(|rest| rest.split('%').next())
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                if pct >= 99 || pct / 5 > prev_pct / 5 {
+                    self.status_message =
+                        format!("Scanning filters… {pct}% ({match_count} matches)");
+                    self.push_event(json!({"type":"status","message": self.status_message}));
+                    // Repaint centered progress (empty viewport during scan).
                     self.mark_viewport_dirty();
                 }
             }
+            MatchScanProgress::Done { offsets, capped } => {
+                let match_count = offsets.len();
+                let view = &mut self.terminals[idx].views[view_idx];
+                view.match_offsets = Arc::new(offsets);
+                view.match_scan_pos = None;
+                view.match_scan_inflight = false;
+                // Persistent truncation hint (issue #150): stats carries this
+                // to the UI until the next invalidate/restart.
+                view.match_capped = capped;
+                view.request_match_rebuild();
+                if !is_active {
+                    return;
+                }
+                self.status_message = if capped {
+                    format!("Filter scan capped (first {match_count} matches)")
+                } else {
+                    format!("Filter scan complete ({match_count} matches)")
+                };
+                self.push_event(json!({"type":"status","message": self.status_message}));
+                self.apply_match_window();
+                self.mark_viewport_dirty();
+                self.last_stats_at = None;
+            }
+            MatchScanProgress::Failed(message) => {
+                let view = &mut self.terminals[idx].views[view_idx];
+                view.match_offsets = Arc::new(Vec::new());
+                view.match_scan_pos = None;
+                view.match_scan_inflight = false;
+                if !is_active {
+                    return;
+                }
+                self.status_message = message.clone();
+                self.push_event(json!({"type":"status","message": message}));
+                self.mark_viewport_dirty();
+                self.last_stats_at = None;
+            }
         }
     }
 
-    pub(crate) fn finish_file_window(&mut self, pending: PendingFileWindow) {
+    pub(crate) fn finish_file_window(&mut self, term_idx: usize, pending: PendingFileWindow) {
         let format = self.current_format();
         let raw_count = pending.lines.len() as u64;
         let desired_scroll = pending.scroll_y;
         {
-            let terminal = self.active_terminal_mut();
+            let terminal = &mut self.terminals[term_idx];
             terminal.parser = RecordParser::new(format);
             let mut records = Vec::new();
             for line in pending.lines {
@@ -524,9 +819,11 @@ impl Engine {
         }
         self.mark_all_views_dirty();
         let _ = self.rebuild_if_needed();
+        // Window finishes only run for the active terminal (inactive results
+        // are stashed until activation), so the active-based clamp is safe.
         let local_max = self.local_window_max_scroll();
         {
-            let terminal = self.active_terminal_mut();
+            let terminal = &mut self.terminals[term_idx];
             terminal.scroll_offset_y = terminal.scroll_offset_y.clamp(0.0, local_max);
         }
         self.mark_viewport_dirty();
@@ -579,9 +876,8 @@ impl Engine {
         let window = crate::file_match::MATCH_WINDOW_LINES;
         let max_start = total.saturating_sub(window);
         let target = ((global_offset / stride).floor() as usize).min(total.saturating_sub(1));
-        let near_end = max_scroll <= 0.5
-            || global_offset + viewport_h >= max_scroll
-            || target >= max_start;
+        let near_end =
+            max_scroll <= 0.5 || global_offset + viewport_h >= max_scroll || target >= max_start;
 
         let (new_start, local_raw) = if near_end {
             let local = (global_offset - max_start as f32 * stride).max(0.0);
@@ -654,6 +950,10 @@ impl Engine {
         let Some(from) = self.active_view().match_scan_pos else {
             return;
         };
+        if self.active_view().match_scan_inflight {
+            // A worker owns this scan; progress lands via apply_file_io_results.
+            return;
+        }
 
         let file_size = self
             .active_terminal()
@@ -666,80 +966,95 @@ impl Engine {
             let view = self.active_view();
             (view.filters().to_vec(), view.severity_filter)
         };
-        let filter_engine = crate::core::filter::FilterEngine::new(filters);
-
-        let result = {
-            let mut offsets = std::mem::take(&mut self.active_view_mut().match_offsets);
-            let terminal = self.active_terminal_mut();
-            let backed = terminal.file_backed.as_mut().unwrap();
-            let scan = crate::file_match::scan_match_chunk(
-                &mut backed.file,
-                file_size,
-                from,
-                crate::file_match::MATCH_SCAN_BYTES_PER_TICK,
-                &filter_engine,
-                severity,
-                &mut offsets,
-            );
-            (scan, offsets)
+        let (shared, term_id, view_idx, token) = {
+            let terminal = self.active_terminal();
+            let backed = terminal.file_backed.as_ref().unwrap();
+            (
+                backed.file.clone(),
+                terminal.id.clone(),
+                terminal.active_view,
+                terminal.active_view().match_scan_token,
+            )
         };
+        self.active_view_mut().match_scan_inflight = true;
 
-        match result {
-            (Ok((next, done)), offsets) => {
-                let match_count = offsets.len();
-                let view = self.active_view_mut();
-                view.match_offsets = offsets;
-                if done {
-                    view.match_scan_pos = None;
-                    view.request_match_rebuild();
-                    // Offsets hitting the cap means the scan stopped early.
-                    if match_count > crate::file_match::MAX_MATCH_OFFSETS
-                        || (match_count == crate::file_match::MAX_MATCH_OFFSETS
-                            && next < file_size)
-                    {
-                        self.status_message =
-                            format!("Filter scan capped (first {match_count} matches)");
-                    } else {
-                        self.status_message =
-                            format!("Filter scan complete ({match_count} matches)");
+        // Scan the whole file on a worker thread (issue #55), reporting
+        // progress per chunk; the UI thread never touches the file.
+        let cap = self.match_scan_cap();
+        let inbox = self.file_io_done.clone();
+        // Copy for the spawn-failure branch: the closure owns the original.
+        let spawn_failed_term = term_id.clone();
+        let worker = std::thread::Builder::new()
+            .name("noviewlog-match-scan".into())
+            .spawn(move || {
+                let filter_engine = crate::core::filter::FilterEngine::new(filters);
+                let mut offsets: Vec<u64> = Vec::new();
+                let mut pos = from;
+                let outcome = loop {
+                    let mut file = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    match crate::file_match::scan_match_chunk_with_cap(
+                        &mut file,
+                        file_size,
+                        pos,
+                        crate::file_match::MATCH_SCAN_BYTES_PER_TICK,
+                        &filter_engine,
+                        severity,
+                        &mut offsets,
+                        cap,
+                    ) {
+                        Ok((next, done, capped)) => {
+                            drop(file);
+                            pos = next;
+                            let count = offsets.len();
+                            if done {
+                                break Ok((offsets, capped));
+                            }
+                            let progress = MatchScanProgress::Progressing {
+                                next,
+                                match_count: count,
+                            };
+                            post_scan_event(&inbox, &term_id, view_idx, token, progress);
+                        }
+                        Err(message) => break Err(message),
                     }
-                    self.push_event(json!({"type":"status","message": self.status_message}));
-                    self.apply_match_window();
-                    self.mark_viewport_dirty();
-                    self.last_stats_at = None;
-                } else {
-                    view.match_scan_pos = Some(next);
-                    let pct = if file_size == 0 {
-                        100
-                    } else {
-                        ((next as f32 / file_size as f32) * 100.0) as u32
-                    };
-                    // Throttle status churn: update every ~5% (same idea as file indexing).
-                    let prev_pct = self
-                        .status_message
-                        .strip_prefix("Scanning filters… ")
-                        .and_then(|rest| rest.split('%').next())
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(0);
-                    if pct >= 99 || pct / 5 > prev_pct / 5 {
-                        self.status_message =
-                            format!("Scanning filters… {pct}% ({match_count} matches)");
-                        self.push_event(json!({"type":"status","message": self.status_message}));
-                        // Repaint centered progress (empty viewport during scan).
-                        self.mark_viewport_dirty();
-                    }
-                    // Host keeps TICK_FAST via host_work_pending() while match_scan_pos is set.
-                }
-            }
-            (Err(message), offsets) => {
-                self.active_view_mut().match_offsets = offsets;
-                self.active_view_mut().match_scan_pos = None;
-                self.status_message = message.clone();
-                self.push_event(json!({"type":"status","message": message}));
-                self.mark_viewport_dirty();
-                self.last_stats_at = None;
+                };
+                let progress = match outcome {
+                    // `capped` comes straight from the scanner (issue #150):
+                    // the offset cap stopped the scan before file end.
+                    Ok((offsets, capped)) => MatchScanProgress::Done { offsets, capped },
+                    Err(message) => MatchScanProgress::Failed(message),
+                };
+                post_scan_event(&inbox, &term_id, view_idx, token, progress);
+            });
+        if let Err(err) = worker {
+            self.match_scan_spawn_failed(&spawn_failed_term, view_idx, token, err);
+        }
+    }
+
+    /// A failed match-scan worker spawn (issue #148): no worker owns the
+    /// scan, so reset the view exactly like a failed scan (it must not stay
+    /// in-flight forever) and surface a status error.
+    fn match_scan_spawn_failed(
+        &mut self,
+        term_id: &str,
+        view_idx: usize,
+        token: u64,
+        err: std::io::Error,
+    ) {
+        let message = format!("Filter scan failed to start: {err}");
+        self.apply_match_scan_result(term_id, view_idx, token, MatchScanProgress::Failed(message));
+    }
+
+    /// Match-offset cap for the running/next scan. Tests may shrink it to
+    /// exercise truncation without generating 2M+ matching lines.
+    fn match_scan_cap(&self) -> usize {
+        #[cfg(test)]
+        {
+            if let Some(cap) = self.match_scan_cap_override {
+                return cap;
             }
         }
+        crate::file_match::MAX_MATCH_OFFSETS
     }
 
     /// Materialize a window of match lines into the active view's flat_lines.
@@ -797,34 +1112,74 @@ impl Engine {
         start = target.saturating_sub(window / 4).min(max_start);
         let start = start.min(total);
 
-        let offsets = std::mem::take(&mut self.active_view_mut().match_offsets);
-        let lines = {
-            let terminal = self.active_terminal_mut();
-            let backed = terminal.file_backed.as_mut().unwrap();
-            crate::file_match::read_match_window(&mut backed.file, &offsets, start, window)
-        };
-        let lines = match lines {
-            Ok(lines) => lines,
-            Err(err) => {
-                self.active_view_mut().match_offsets = offsets;
-                self.status_message = err;
-                return;
-            }
+        // The recenter read runs on a worker thread (issue #55): one in
+        // flight per view, the latest request wins; the old window stays
+        // visible until the new one lands.
+        if self.active_view().match_window_inflight.is_some() {
+            return;
+        }
+        let req = self.next_match_window_req();
+        {
+            let view = self.active_view_mut();
+            view.match_window_inflight = Some(req);
+        }
+        let (shared, offsets, term_id, view_idx) = {
+            let terminal = self.active_terminal();
+            let backed = terminal.file_backed.as_ref().expect("checked above");
+            (
+                backed.file.clone(),
+                terminal.active_view().match_offsets.clone(),
+                terminal.id.clone(),
+                terminal.active_view,
+            )
         };
         let new_local = (global_y - start as f32 * stride).max(0.0);
-        self.active_view_mut().match_offsets = offsets;
-        self.active_view_mut().match_window_start = start;
-
-        let flat = crate::core::visible::flat_lines_from_raw_lines(&lines, start as u64);
-        self.active_view_mut().set_match_flat_lines(flat);
-        {
-            let local_max = self.local_window_max_scroll();
-            let terminal = self.active_terminal_mut();
-            terminal.scroll_offset_y = new_local.clamp(0.0, local_max);
-            // Match window lines are a different index space than the prior view.
-            terminal.selection = None;
+        let inbox = self.file_io_done.clone();
+        // Copy for the spawn-failure branch: the closure owns the original.
+        let spawn_failed_term = term_id.clone();
+        let worker = std::thread::Builder::new()
+            .name("noviewlog-match-window".into())
+            .spawn(move || {
+                let result = {
+                    let mut file = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    crate::file_match::read_match_window(&mut file, &offsets, start, window)
+                };
+                let mut inbox = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                inbox.push(FileIoDone::MatchWindow {
+                    term_id,
+                    view_idx,
+                    req,
+                    start,
+                    new_local,
+                    result,
+                });
+            });
+        if let Err(err) = worker {
+            self.match_window_spawn_failed(
+                &spawn_failed_term,
+                view_idx,
+                req,
+                start,
+                new_local,
+                err,
+            );
         }
-        self.mark_viewport_dirty();
+    }
+
+    /// A failed match-window worker spawn (issue #148): the request would
+    /// stay in-flight forever, so clear it through the same path as a failed
+    /// read and surface a status error.
+    fn match_window_spawn_failed(
+        &mut self,
+        term_id: &str,
+        view_idx: usize,
+        req: u64,
+        start: usize,
+        new_local: f32,
+        err: std::io::Error,
+    ) {
+        let message = format!("Filter window read failed to start: {err}");
+        self.apply_match_window_result(term_id, view_idx, req, start, new_local, Err(message));
     }
 
     /// After filter/severity invalidate on a file session: empty viewport + scroll 0.
@@ -847,5 +1202,127 @@ impl Engine {
         self.push_event(json!({"type":"status","message": self.status_message}));
         self.mark_viewport_dirty();
         self.last_stats_at = None;
+    }
+}
+
+/// Post a match-scan progress/result event into the engine inbox.
+fn post_scan_event(
+    inbox: &Arc<std::sync::Mutex<Vec<FileIoDone>>>,
+    term_id: &str,
+    view_idx: usize,
+    token: u64,
+    progress: MatchScanProgress,
+) {
+    let mut inbox = inbox.lock().unwrap_or_else(|e| e.into_inner());
+    inbox.push(FileIoDone::MatchScan {
+        term_id: term_id.to_string(),
+        view_idx,
+        token,
+        progress,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain_tab(name: &str) -> crate::core::types::TabConfig {
+        crate::core::types::TabConfig {
+            name: name.to_string(),
+            filters: Vec::new(),
+            search_query: String::new(),
+            search_regex: false,
+            search_case_sensitive: false,
+            search_whole_word: false,
+            auto_follow: false,
+            wrap_lines: false,
+            severity: Default::default(),
+        }
+    }
+
+    #[test]
+    fn match_window_result_for_closed_view_is_dropped() {
+        let mut engine = Engine::new();
+        let term_id = engine.terminals[0].id.clone();
+        engine.terminals[0]
+            .views
+            .push(LogView::from_tab_config(plain_tab("Filter")));
+        engine.terminals[0].views[1].match_window_inflight = Some(7);
+
+        // Simulate the tab being closed while the background read is in
+        // flight; applying the result must not panic (issue #158).
+        engine.terminals[0].views.remove(1);
+        engine.apply_match_window_result(&term_id, 1, 7, 0, 0.0, Ok(Vec::new()));
+        engine.apply_match_window_result(&term_id, 1, 7, 0, 0.0, Err("boom".to_string()));
+
+        // A stale request for an existing view is still dropped silently.
+        engine.terminals[0].views[0].match_window_inflight = None;
+        engine.apply_match_window_result(&term_id, 0, 7, 0, 0.0, Ok(Vec::new()));
+    }
+
+    #[test]
+    fn file_window_spawn_failure_drops_pending_and_reports() {
+        let mut engine = Engine::new();
+        let term_id = engine.terminals[0].id.clone();
+        engine.terminals[0].pending_file_window = Some(PendingFileWindow {
+            new_start: 10,
+            scroll_y: 2.0,
+            next_line: 10,
+            end_line: 20,
+            lines: Vec::new(),
+        });
+
+        // A failed worker spawn must degrade like a failed read, not panic.
+        engine.file_window_spawn_failed(&term_id, 10, 2.0, std::io::Error::other("boom"));
+
+        assert!(engine.terminals[0].pending_file_window.is_none());
+        assert_eq!(
+            engine.status_message,
+            "File window read failed to start: boom"
+        );
+        let event = engine.events.back().expect("status event");
+        assert!(event.contains("File window read failed to start"));
+    }
+
+    #[test]
+    fn match_scan_spawn_failure_resets_inflight_view() {
+        let mut engine = Engine::new();
+        let term_id = engine.terminals[0].id.clone();
+        engine.terminals[0]
+            .views
+            .push(LogView::from_tab_config(plain_tab("Filter")));
+        engine.terminals[0].active_view = 1;
+        engine.terminals[0].views[1].match_scan_pos = Some(0);
+        engine.terminals[0].views[1].match_scan_inflight = true;
+        let token = engine.terminals[0].views[1].match_scan_token;
+
+        engine.match_scan_spawn_failed(&term_id, 1, token, std::io::Error::other("boom"));
+
+        // The view must not stay in-flight forever: the reset matches the
+        // failed-scan path, so a later filter change can restart the scan.
+        let view = &engine.terminals[0].views[1];
+        assert!(view.match_offsets.is_empty());
+        assert_eq!(view.match_scan_pos, None);
+        assert!(!view.match_scan_inflight);
+        assert_eq!(engine.status_message, "Filter scan failed to start: boom");
+    }
+
+    #[test]
+    fn match_window_spawn_failure_clears_inflight_request() {
+        let mut engine = Engine::new();
+        let term_id = engine.terminals[0].id.clone();
+        engine.terminals[0]
+            .views
+            .push(LogView::from_tab_config(plain_tab("Filter")));
+        engine.terminals[0].active_view = 1;
+        engine.terminals[0].views[1].match_window_inflight = Some(7);
+
+        engine.match_window_spawn_failed(&term_id, 1, 7, 0, 0.0, std::io::Error::other("boom"));
+
+        assert!(engine.terminals[0].views[1].match_window_inflight.is_none());
+        assert_eq!(
+            engine.status_message,
+            "Filter window read failed to start: boom"
+        );
     }
 }

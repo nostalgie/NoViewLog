@@ -1,5 +1,5 @@
-use super::*;
 use super::events::{StatsProject, StatsSnapshot, StatsTab, StatsTerminal};
+use super::*;
 
 impl Engine {
     pub(crate) fn emit_stats(&mut self) {
@@ -89,6 +89,7 @@ impl Engine {
             file_window_start,
             file_lines_before,
             file_loading,
+            file_changed,
         ) = if let Some(terminal) = self.terminals.get(active_terminal_idx) {
             let view = terminal.active_view();
             let tabs: Vec<StatsTab> = terminal
@@ -151,7 +152,7 @@ impl Engine {
                 terminal
                     .file_load
                     .as_ref()
-                    .map(|l| l.index_progress())
+                    .map(|l| l.index_progress)
                     .unwrap_or(if terminal.file_backed.is_some() {
                         1.0
                     } else {
@@ -160,6 +161,7 @@ impl Engine {
                 terminal.buffer_line_start,
                 terminal.buffer_line_start,
                 terminal.file_load.is_some(),
+                terminal.file_changed,
             )
         } else {
             (
@@ -193,6 +195,7 @@ impl Engine {
                 0u64,
                 0u64,
                 false,
+                false,
             )
         };
         // FILES scrollbar uses whole-file coordinates.
@@ -212,6 +215,11 @@ impl Engine {
             terminal.active_view().severity_filter.as_str().to_string()
         } else {
             "all".to_string()
+        };
+        let match_capped = if let Some(terminal) = self.terminals.get(active_terminal_idx) {
+            terminal.active_view().match_capped
+        } else {
+            false
         };
 
         let snapshot = StatsSnapshot {
@@ -264,6 +272,8 @@ impl Engine {
             file_window_start,
             file_lines_before,
             file_loading,
+            match_capped,
+            file_changed,
             viewport_line,
             viewport_line_total,
             max_scrollback_lines: self.config.max_scrollback_lines,

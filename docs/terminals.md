@@ -51,6 +51,11 @@ Multiple sessions can run **at the same time**. Switching the active session onl
 - Filter tabs and search apply over the file (match-index path for whole-file filters)
 - Re-opening the same path switches to the existing file session and reloads
 - Closing a file is always allowed; the last **live** terminal cannot be closed; FILES may be empty
+- **External changes are detected**: the engine polls each loaded file session
+  (size + mtime, throttled sweep on the tick, no watcher thread). Truncation,
+  append, rewrite, or deletion after open raises a "File changed on disk" status
+  and `file_changed` in stats; the session keeps its loaded snapshot until the
+  user reloads (detection never reloads automatically).
 
 CLI launch with a log file still configures the initial session as a file session.
 
@@ -151,7 +156,8 @@ Same on Linux and Windows:
   process exit (no auto shell respawn). The launch preview strip returns while
   stopped (including leftover output).
 - **Refresh** on a FILES row (or File → Reload log) re-reads that path from disk;
-  it is not Follow/tail
+  it is not Follow/tail. It also clears the `file_changed` state raised by
+  external truncation / append / rewrite.
 
 While a Project is active, opening, renaming, or closing a file session updates that Project’s store. With no Project active, FILES stay session-only.
 
@@ -178,4 +184,5 @@ Slint sidebar: collapsible **TERMINALS** and **FILES** (each with `+`).
 
 See [`docs/architecture.md`](architecture.md),
 [`openspec/specs/terminals/projects/spec.md`](../openspec/specs/terminals/projects/spec.md),
-and [`.cursor/rules/`](../.cursor/rules/).
+and [`docs-private/rules/`](../docs-private/rules/).
+

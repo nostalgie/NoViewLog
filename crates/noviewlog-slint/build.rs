@@ -29,7 +29,8 @@ fn embed_windows_resource() {
     }
     let mut res = winresource::WindowsResource::new();
     res.set_icon("ui/assets/app.ico");
-    res.compile().expect("Windows resource (app.ico) embed failed");
+    res.compile()
+        .expect("Windows resource (app.ico) embed failed");
 }
 
 #[cfg(not(windows))]

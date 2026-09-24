@@ -133,7 +133,14 @@ impl Engine {
     pub(crate) fn scroll_to_row_index(&mut self, row: usize) {
         self.active_view_mut().auto_follow = false;
         let metrics = self.renderer.metrics();
-        let row_top = row as f32 * metrics.row_stride;
+        // `row` is a flat line index; scroll math is in visual rows. With wrap
+        // on, one flat line may span several visual rows (issue #159).
+        let visual_row = {
+            let view = self.active_view();
+            let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
+            index.visual_end_of_flat(row.saturating_sub(1))
+        };
+        let row_top = visual_row as f32 * metrics.row_stride;
         let row_bottom = row_top + metrics.row_height;
         let viewport_height = self.viewport_height as f32;
         let terminal = self.active_terminal_mut();
@@ -257,12 +264,7 @@ impl Engine {
             let committed = self.active_terminal().buffer.records_len();
             let grid_visual = if wrap {
                 let lines = self.active_terminal().ingest.grid_flat_lines();
-                count_visual_rows(
-                    &lines,
-                    true,
-                    self.viewport_width,
-                    metrics.cell_width,
-                )
+                count_visual_rows(&lines, true, self.viewport_width, metrics.cell_width)
             } else {
                 self.active_terminal().ingest.size().1
             };
@@ -271,11 +273,8 @@ impl Engine {
         }
 
         let view = self.active_view();
-        let rows = view.cached_visual_rows(
-            self.viewport_width,
-            metrics.cell_width,
-            count_visual_rows,
-        );
+        let rows =
+            view.cached_visual_rows(self.viewport_width, metrics.cell_width, count_visual_rows);
         let content_h = rows as f32 * stride;
         (content_h - self.viewport_height as f32).max(0.0)
     }
@@ -284,11 +283,8 @@ impl Engine {
     pub(crate) fn local_window_max_scroll(&self) -> f32 {
         let metrics = self.renderer.metrics();
         let view = self.active_view();
-        let rows = view.cached_visual_rows(
-            self.viewport_width,
-            metrics.cell_width,
-            count_visual_rows,
-        );
+        let rows =
+            view.cached_visual_rows(self.viewport_width, metrics.cell_width, count_visual_rows);
         (rows as f32 * metrics.row_stride - self.viewport_height as f32).max(0.0)
     }
 
@@ -353,9 +349,8 @@ impl Engine {
                     let local_y = terminal.scroll_offset_y;
                     let index =
                         view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
-                    let bottom_visual = ((local_y + viewport_h - 0.01) / stride)
-                        .floor()
-                        .max(0.0) as usize;
+                    let bottom_visual =
+                        ((local_y + viewport_h - 0.01) / stride).floor().max(0.0) as usize;
                     let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
                     let flat = index
                         .flat_at_visual_row(bottom_visual)
@@ -384,9 +379,8 @@ impl Engine {
                     return (total, total);
                 }
                 let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
-                let bottom_visual = ((local_y + viewport_h - 0.01) / stride)
-                    .floor()
-                    .max(0.0) as usize;
+                let bottom_visual =
+                    ((local_y + viewport_h - 0.01) / stride).floor().max(0.0) as usize;
                 let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
                 let flat = index
                     .flat_at_visual_row(bottom_visual)
@@ -420,9 +414,7 @@ impl Engine {
         }
         let local_y = terminal.scroll_offset_y;
         let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
-        let bottom_visual = ((local_y + viewport_h - 0.01) / stride)
-            .floor()
-            .max(0.0) as usize;
+        let bottom_visual = ((local_y + viewport_h - 0.01) / stride).floor().max(0.0) as usize;
         let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
         let flat = index
             .flat_at_visual_row(bottom_visual)
@@ -440,11 +432,7 @@ impl Engine {
             return 0.0;
         }
         let metrics = self.renderer.metrics();
-        max_scroll_x(
-            &view.flat_lines,
-            self.viewport_width,
-            metrics.cell_width,
-        )
+        max_scroll_x(&view.flat_lines, self.viewport_width, metrics.cell_width)
     }
 
     pub(crate) fn set_wrap_lines(&mut self, wrap: bool) {
@@ -627,5 +615,46 @@ fn open_url(uri: &str) {
     };
     if let Err(e) = result {
         let _ = e; // opener missing / spawn failed — non-fatal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::visible::flat_lines_from_raw_lines;
+
+    #[test]
+    fn scroll_to_row_uses_visual_rows_when_wrap_is_on() {
+        let mut engine = Engine::new();
+        let long_line = "x".repeat(500);
+        let (width, cell) = (engine.viewport_width, engine.renderer.metrics().cell_width);
+        let expected_visual = {
+            let view = engine.active_view_mut();
+            view.wrap_lines = true;
+            view.flat_lines = Arc::new(flat_lines_from_raw_lines(
+                &[long_line, "second".to_string()],
+                0,
+            ));
+            // The long line wraps to several visual rows; flat line 1 starts
+            // after all of them (issue #159).
+            let visual = view
+                .ensure_visual_row_index(width, cell)
+                .visual_end_of_flat(0);
+            assert!(visual > 1, "line should wrap to multiple rows");
+            visual
+        };
+
+        // Zero-height viewport: any target row is below the fold, so the
+        // engine must scroll to the row bottom.
+        engine.viewport_height = 0;
+        engine.scroll_to_row_index(1);
+
+        let metrics = engine.renderer.metrics();
+        let expected = expected_visual as f32 * metrics.row_stride + metrics.row_height;
+        let scrolled = engine.active_terminal().scroll_offset_y;
+        assert!(
+            (scrolled - expected).abs() < 0.01,
+            "scroll {scrolled} should land at visual row top {expected}"
+        );
     }
 }

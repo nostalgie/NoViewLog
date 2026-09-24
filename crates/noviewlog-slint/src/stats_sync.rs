@@ -97,7 +97,7 @@ fn apply_stats_to_tabs(
         })
         .collect();
 
-    if tabs_model_differs(tabs, &next) {
+    if model_differs(tabs, &next) {
         tabs.set_vec(next);
         changed = true;
     }
@@ -160,10 +160,7 @@ fn apply_stats_to_terminals(
         changed = true;
     }
 
-    let active_project_id = stats
-        .active_project_id
-        .as_deref()
-        .unwrap_or("");
+    let active_project_id = stats.active_project_id.as_deref().unwrap_or("");
     if ui.get_active_project_id().as_str() != active_project_id {
         ui.set_active_project_id(SharedString::from(active_project_id));
         changed = true;
@@ -179,22 +176,15 @@ fn apply_stats_to_terminals(
         changed = true;
     }
 
-    let next_terms: Vec<TerminalInfo> = stats
-        .terminals
-        .iter()
-        .map(|term| stats_terminal_to_info(term))
-        .collect();
-    if terminals_model_differs(terminals, &next_terms) {
+    let next_terms: Vec<TerminalInfo> =
+        stats.terminals.iter().map(stats_terminal_to_info).collect();
+    if model_differs(terminals, &next_terms) {
         terminals.set_vec(next_terms);
         changed = true;
     }
 
-    let next_files: Vec<TerminalInfo> = stats
-        .files
-        .iter()
-        .map(|term| stats_terminal_to_info(term))
-        .collect();
-    if terminals_model_differs(files, &next_files) {
+    let next_files: Vec<TerminalInfo> = stats.files.iter().map(stats_terminal_to_info).collect();
+    if model_differs(files, &next_files) {
         files.set_vec(next_files);
         changed = true;
     }
@@ -213,7 +203,7 @@ fn apply_stats_to_terminals(
                 .is_some_and(|id| id == &p.id),
         })
         .collect();
-    if projects_model_differs(projects, &next_projects) {
+    if model_differs(projects, &next_projects) {
         projects.set_vec(next_projects);
         changed = true;
     }
@@ -242,61 +232,18 @@ fn stats_terminal_to_info(term: &StatsTerminal) -> TerminalInfo {
     }
 }
 
-fn tabs_model_differs(model: &VecModel<TabInfo>, next: &[TabInfo]) -> bool {
+/// True when the model's rows differ from `next`, i.e. `set_vec(next)` would
+/// change content. Slint derives `PartialEq` over every generated field, so
+/// element equality is a full content diff.
+fn model_differs<T: PartialEq + Clone + 'static>(model: &VecModel<T>, next: &[T]) -> bool {
     if model.row_count() != next.len() {
         return true;
     }
-    for (i, tab) in next.iter().enumerate() {
+    for (i, item) in next.iter().enumerate() {
         let Some(cur) = model.row_data(i) else {
             return true;
         };
-        if cur.index != tab.index || cur.is_terminal_tab != tab.is_terminal_tab || cur.name != tab.name {
-            return true;
-        }
-    }
-    false
-}
-
-fn terminals_model_differs(model: &VecModel<TerminalInfo>, next: &[TerminalInfo]) -> bool {
-    if model.row_count() != next.len() {
-        return true;
-    }
-    for (i, term) in next.iter().enumerate() {
-        let Some(cur) = model.row_data(i) else {
-            return true;
-        };
-        if cur.index != term.index
-            || cur.running != term.running
-            || cur.id != term.id
-            || cur.label != term.label
-            || cur.cwd != term.cwd
-            || cur.has_launch != term.has_launch
-            || cur.launch_command != term.launch_command
-            || cur.launch_args != term.launch_args
-            || cur.launch_cwd != term.launch_cwd
-            || cur.launch_wsl != term.launch_wsl
-            || cur.launch_wsl_distro != term.launch_wsl_distro
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn projects_model_differs(model: &VecModel<ProjectInfo>, next: &[ProjectInfo]) -> bool {
-    if model.row_count() != next.len() {
-        return true;
-    }
-    for (i, proj) in next.iter().enumerate() {
-        let Some(cur) = model.row_data(i) else {
-            return true;
-        };
-        if cur.index != proj.index
-            || cur.id != proj.id
-            || cur.name != proj.name
-            || cur.program_count != proj.program_count
-            || cur.active != proj.active
-        {
+        if cur != *item {
             return true;
         }
     }
@@ -336,11 +283,7 @@ fn apply_stats_to_filters(
         .collect();
 
     if filters.row_count() == next.len()
-        && (0..next.len()).all(|i| {
-            filters
-                .row_data(i)
-                .is_some_and(|cur| cur.id == next[i].id)
-        })
+        && (0..next.len()).all(|i| filters.row_data(i).is_some_and(|cur| cur.id == next[i].id))
     {
         for (i, filt) in next.into_iter().enumerate() {
             let Some(cur) = filters.row_data(i) else {
@@ -358,32 +301,12 @@ fn apply_stats_to_filters(
         return changed;
     }
 
-    if filters_model_differs(filters, &next) {
+    if model_differs(filters, &next) {
         filters.set_vec(next);
         changed = true;
     }
 
     changed
-}
-
-fn filters_model_differs(model: &VecModel<FilterInfo>, next: &[FilterInfo]) -> bool {
-    if model.row_count() != next.len() {
-        return true;
-    }
-    for (i, filt) in next.iter().enumerate() {
-        let Some(cur) = model.row_data(i) else {
-            return true;
-        };
-        if cur.id != filt.id
-            || cur.filter_type != filt.filter_type
-            || cur.pattern != filt.pattern
-            || cur.enabled != filt.enabled
-            || cur.use_regex != filt.use_regex
-        {
-            return true;
-        }
-    }
-    false
 }
 
 fn apply_stats_to_find(
@@ -424,10 +347,10 @@ fn apply_stats_to_find(
     if resync {
         let ui_query = ui.get_find_query();
         // If the user already typed into an empty engine search, keep the UI text.
-        if tab_changed || query != ui_query.as_str() {
-            if !(query.is_empty() && !ui_query.is_empty() && !tab_changed) {
-                ui.set_find_query(SharedString::from(query));
-            }
+        if (tab_changed || query != ui_query.as_str())
+            && !(query.is_empty() && !ui_query.is_empty() && !tab_changed)
+        {
+            ui.set_find_query(SharedString::from(query));
         }
         ui.set_find_regex(regex);
         ui.set_find_case_sensitive(case_sensitive);
@@ -443,21 +366,18 @@ fn apply_stats_to_find(
     // Status counter is engine-truth; only show it when it matches the UI query
     // (avoids "No results" flash for text not yet flushed via debounce).
     let counter_applies = !has_pending && ui_query.as_str() == query;
-    let status = if !error.is_empty() && counter_applies {
-        SharedString::default()
-    } else if status_query.is_empty() {
-        SharedString::default()
-    } else if !counter_applies {
-        SharedString::default()
-    } else if counter == "0/0" {
-        SharedString::from("No results")
-    } else if counter.is_empty() {
-        SharedString::default()
-    } else if let Some((cur, total)) = counter.split_once('/') {
-        SharedString::from(format!("{cur} of {total}"))
-    } else {
-        SharedString::from(counter)
-    };
+    let status =
+        if (!error.is_empty() && counter_applies) || status_query.is_empty() || !counter_applies {
+            SharedString::default()
+        } else if counter == "0/0" {
+            SharedString::from("No results")
+        } else if counter.is_empty() {
+            SharedString::default()
+        } else if let Some((cur, total)) = counter.split_once('/') {
+            SharedString::from(format!("{cur} of {total}"))
+        } else {
+            SharedString::from(counter)
+        };
     ui.set_find_status(status);
     if counter_applies {
         ui.set_find_error(SharedString::from(error));
@@ -524,6 +444,12 @@ fn apply_stats_to_view_chrome(
     };
     if ui.get_line_position_text() != line_pos {
         ui.set_line_position_text(line_pos);
+    }
+
+    // Match-set truncation hint (issue #150): engine truth until the next
+    // scan/invalidate resets it.
+    if ui.get_matches_capped() != stats.match_capped {
+        ui.set_matches_capped(stats.match_capped);
     }
 
     let capped = clamp_max_scrollback_lines(stats.max_scrollback_lines) as i32;
@@ -862,6 +788,24 @@ mod tests {
         s.active_project_id = None;
         assert!(apply(&h, &s));
         assert!(!h.projects.row_data(0).unwrap().active);
+    }
+
+    // ---- Match-cap hint ----
+
+    #[test]
+    fn matches_capped_hint_follows_stats() {
+        let h = Harness::new();
+        let mut s = base_stats();
+        assert!(!h.ui.get_matches_capped(), "default must hide the hint");
+
+        s.match_capped = true;
+        apply(&h, &s);
+        assert!(h.ui.get_matches_capped());
+
+        // Engine reset (next scan / invalidate) clears it again.
+        s.match_capped = false;
+        apply(&h, &s);
+        assert!(!h.ui.get_matches_capped());
     }
 
     // ---- Find resync rules ----

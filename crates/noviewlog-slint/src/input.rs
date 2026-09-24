@@ -20,10 +20,7 @@ pub(crate) fn clipboard_has_text() -> bool {
     let Ok(mut clipboard) = arboard::Clipboard::new() else {
         return false;
     };
-    clipboard
-        .get_text()
-        .map(|t| !t.is_empty())
-        .unwrap_or(false)
+    clipboard.get_text().map(|t| !t.is_empty()).unwrap_or(false)
 }
 
 pub(crate) fn is_key_char(text: &str, want: char) -> bool {
@@ -99,9 +96,8 @@ pub(crate) fn handle_key_event(engine: &mut Engine, text: &str, ctrl_or_meta: bo
 }
 
 pub(crate) fn is_terminal_control_text(text: &str) -> bool {
-    text.chars().all(|ch| {
-        matches!(ch, '\r' | '\n' | '\t' | '\u{7f}' | '\u{8}') || ch < ' '
-    })
+    text.chars()
+        .all(|ch| matches!(ch, '\r' | '\n' | '\t' | '\u{7f}' | '\u{8}') || ch < ' ')
 }
 
 pub(crate) fn map_special_key(text: &str) -> Option<&'static [u8]> {
@@ -211,10 +207,9 @@ pub(crate) fn install_pointer(
                 selecting.set(false);
                 // Click (no drag) on an OSC 8 hyperlink opens it.
                 if engine.borrow().selection_text().is_none() {
-                    let _ = engine.borrow_mut().send_command(Command::OpenLinkAt {
-                        x: px,
-                        y: py,
-                    });
+                    let _ = engine
+                        .borrow_mut()
+                        .send_command(Command::OpenLinkAt { x: px, y: py });
                 }
             }
             _ => {}
@@ -238,7 +233,10 @@ pub(crate) fn install_context_menu(
         // Viewport context menu: Copy from selection,
         // Paste when Terminal tab + running + clipboard has text.
         let selected = has_selection.get()
-            || engine.borrow().selection_text().is_some_and(|t| !t.is_empty());
+            || engine
+                .borrow()
+                .selection_text()
+                .is_some_and(|t| !t.is_empty());
         has_selection.set(selected);
         ui.set_can_copy(selected);
         let can_paste = terminal_tab_active.get() && pty_running.get() && clipboard_has_text();
@@ -337,11 +335,13 @@ pub(crate) fn install_key_event(
             }
         }
         // Copy: Ctrl/Meta+C with an active selection (do not send SIGINT).
-        if ctrl && is_key_char(&text, 'c') && has_selection.get() {
-            if copy_selection_to_clipboard(&engine.borrow()) {
-                ctx.refresh();
-                return true;
-            }
+        if ctrl
+            && is_key_char(&text, 'c')
+            && has_selection.get()
+            && copy_selection_to_clipboard(&engine.borrow())
+        {
+            ctx.refresh();
+            return true;
         }
         // Paste: Ctrl/Meta+V or Shift+Insert (Terminal tab only).
         let insert = text == "\u{f727}";
@@ -364,9 +364,11 @@ pub(crate) fn install_key_event(
                 "\u{f700}" => Some(Command::ScrollLines { delta: -1 }),    // Up
                 "\u{f701}" => Some(Command::ScrollLines { delta: 1 }),     // Down
                 "\u{f702}" => Some(Command::ScrollHorizontal { delta: -40.0 }), // Left
-                "\u{f703}" => Some(Command::ScrollHorizontal { delta: 40.0 }),  // Right
-                "\u{f729}" => Some(Command::ScrollTo { pos: "start".into() }), // Home
-                "\u{f72b}" => Some(Command::ScrollTo { pos: "end".into() }),   // End
+                "\u{f703}" => Some(Command::ScrollHorizontal { delta: 40.0 }), // Right
+                "\u{f729}" => Some(Command::ScrollTo {
+                    pos: "start".into(),
+                }), // Home
+                "\u{f72b}" => Some(Command::ScrollTo { pos: "end".into() }), // End
                 _ => None,
             };
             if let Some(cmd) = nav {

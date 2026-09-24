@@ -28,6 +28,7 @@ fn terminal_caret_rect_none_when_unfocused() {
 }
 
 #[test]
+#[ignore = "slow tier: fixed 600 ms sleep; run with -- --ignored"]
 fn caret_blink_tick_does_not_dirty_viewport() {
     let mut engine = Engine::new();
     engine
@@ -72,11 +73,7 @@ fn follow_wrap_live_caret_stays_near_viewport_bottom() {
     }
     let width = 400u32;
     let height = 300u32;
-    let (row, _) = engine
-        .active_terminal()
-        .ingest
-        .grid_caret()
-        .expect("caret");
+    let (row, _) = engine.active_terminal().ingest.grid_caret().expect("caret");
     let stride = engine.viewport_row_stride_for_test();
     let naive_y = row as f32 * stride;
     let (x, y, w, h) = engine

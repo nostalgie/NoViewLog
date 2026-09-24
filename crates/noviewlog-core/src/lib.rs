@@ -24,19 +24,20 @@
 #![recursion_limit = "256"]
 
 pub mod color_emoji;
+pub mod colr_paint;
 pub mod core;
+pub mod engine;
 pub mod file_index;
 pub mod file_load;
 pub mod file_match;
-pub mod engine;
 pub mod log_view;
-pub mod terminal_state;
 pub mod pty;
+pub mod scrollbar_math;
 pub mod spawn_resolve;
 pub mod spawn_resolver;
+pub mod terminal_state;
 pub mod viewport;
 pub mod viewport_layout;
-pub mod scrollbar_math;
 
 pub use engine::{
     parse_engine_event, Command, Engine, EngineEvent, StatsProject, StatsSnapshot, StatsTab,

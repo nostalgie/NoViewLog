@@ -171,7 +171,7 @@ try {
     tar -xf "$Tar" -C "$Stage"
     Assert-LastExit 'tar -xf export.tar'
 
-    foreach ($forbidden in @('openspec', '.cursor', '.kilo', 'release-notes', 'AGENTS.md')) {
+    foreach ($forbidden in @('openspec', '.cursor', '.kilo', 'release-notes', 'docs-private', 'AGENTS.md')) {
         if (Test-Path -LiteralPath (Join-Path $Stage $forbidden)) {
             Write-Error "Export sanity check failed: '$forbidden' is in the archive. Add it to .gitattributes export-ignore."
         }

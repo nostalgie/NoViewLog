@@ -60,7 +60,9 @@ fn files_and_terminals_headers_dismiss_rename() {
 #[test]
 fn files_rows_cannot_rename() {
     let src = app_slint();
-    let files = src.find("for file in root.files-model: TerminalRow").expect("files TerminalRow");
+    let files = src
+        .find("for file in root.files-model: TerminalRow")
+        .expect("files TerminalRow");
     let chunk = &src[files..files.saturating_add(1200).min(src.len())];
     assert!(
         chunk.contains("can-rename: false"),
@@ -112,9 +114,7 @@ fn empty_files_list_height_stays_zero_in_slint() {
 #[test]
 fn status_bar_press_dismisses_rename() {
     let src = app_slint();
-    let idx = src
-        .rfind("root.status-text")
-        .expect("status-text");
+    let idx = src.rfind("root.status-text").expect("status-text");
     let window = &src[idx.saturating_sub(900)..idx];
     assert!(
         window.contains("dismiss-any-rename-if-any()"),
@@ -154,7 +154,10 @@ fn rename_fields_use_even_inner_padding() {
     let chunk = &src[idx..idx.saturating_add(1800).min(src.len())];
     assert!(
         chunk.matches("x: Theme.rename-pad").count() >= 2
-            && chunk.matches("width: parent.width - 2 * Theme.rename-pad").count() >= 2,
+            && chunk
+                .matches("width: parent.width - 2 * Theme.rename-pad")
+                .count()
+                >= 2,
         "TERMINALS rename and idle title must inset by Theme.rename-pad on left and right"
     );
 }
@@ -185,7 +188,9 @@ fn viewport_scrollbar_press_dismisses_rename() {
         .find("callback press();")
         .expect("EngineScrollBar press callback");
     let touch_idx = sidebar[bar_idx..]
-        .find("if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {")
+        .find(
+            "if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {",
+        )
         .expect("scrollbar pointer down handler")
         + bar_idx;
     let chunk = &sidebar[touch_idx..touch_idx.saturating_add(120).min(sidebar.len())];
@@ -195,7 +200,9 @@ fn viewport_scrollbar_press_dismisses_rename() {
     );
 
     let src = app_slint();
-    let wired = src.matches("press() => { root.dismiss-any-rename-if-any(); }").count();
+    let wired = src
+        .matches("press() => { root.dismiss-any-rename-if-any(); }")
+        .count();
     assert!(
         wired >= 2,
         "both viewport scrollbars must dismiss rename on press (found {wired})"

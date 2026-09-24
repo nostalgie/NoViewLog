@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use noviewlog_core::{parse_engine_event, Engine, EngineEvent};
-use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode, VecModel, Weak};
+use slint::{
+    ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
+    VecModel, Weak,
+};
 
 use crate::caret::sync_terminal_caret;
 use crate::engine_bridge::{
@@ -15,9 +18,7 @@ use crate::engine_bridge::{
 };
 use crate::find::FindPending;
 use noviewlog_slint::stats_sync::apply_stats;
-use noviewlog_slint::ui::{
-    AppWindow, FilterInfo, ProjectInfo, TabInfo, TerminalInfo,
-};
+use noviewlog_slint::ui::{AppWindow, FilterInfo, ProjectInfo, TabInfo, TerminalInfo};
 
 // UI-thread tick body; PTY wake uses `invoke_from_event_loop` → this TLS (Send-safe).
 thread_local! {
@@ -25,8 +26,7 @@ thread_local! {
 }
 
 /// Reused viewport RGBA buffer: (width, height, pixels), recreated on size change.
-pub(crate) type ViewportPixels =
-    Rc<RefCell<Option<(u32, u32, SharedPixelBuffer<Rgba8Pixel>)>>>;
+pub(crate) type ViewportPixels = Rc<RefCell<Option<(u32, u32, SharedPixelBuffer<Rgba8Pixel>)>>>;
 
 /// State captured by the host tick closure.
 pub(crate) struct TickDeps {
@@ -142,8 +142,11 @@ pub(crate) fn install_host_tick(deps: TickDeps) -> TickControls {
                 return;
             };
 
-            let occluded =
-                window_should_pause_paint(ui.window(), window_occluded_tick.get(), presented_tick.get());
+            let occluded = window_should_pause_paint(
+                ui.window(),
+                window_occluded_tick.get(),
+                presented_tick.get(),
+            );
 
             let became_occluded = occluded && !was_occluded_tick.get();
             if was_occluded_tick.get() && !occluded {
@@ -258,7 +261,11 @@ pub(crate) fn install_host_tick(deps: TickDeps) -> TickControls {
                 Some((w, h, _)) if *w == width && *h == height
             );
             if !reuse {
-                *pixels = Some((width, height, SharedPixelBuffer::<Rgba8Pixel>::new(width, height)));
+                *pixels = Some((
+                    width,
+                    height,
+                    SharedPixelBuffer::<Rgba8Pixel>::new(width, height),
+                ));
             }
             let buffer = &mut pixels.as_mut().expect("viewport buffer").2;
             if let Err(err) = eng.render(width, height, buffer.make_mut_bytes()) {

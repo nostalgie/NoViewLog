@@ -1,18 +1,22 @@
-//! Color emoji via system Noto Color Emoji (CBDT/CBLC PNG strikes).
+//! Color emoji via the system emoji font: CBDT/CBLC PNG strikes (Noto Color
+//! Emoji) or COLR/CPAL vector layers (Windows Segoe UI Emoji).
 //!
 //! Noto Color Emoji is bitmap-only; fontdue cannot rasterize it. We parse the
 //! font with `ttf-parser`, pull embedded PNG bitmaps from CBDT, decode them,
-//! and blit RGBA into the viewport.
+//! and blit RGBA into the viewport. Segoe UI Emoji (stock Windows) has no
+//! CBDT strikes — those glyphs are rendered from COLR layers by
+//! [`crate::colr_paint`] (issue #67) with the same blit path.
 //!
 //! Bundling is intentionally skipped: the font is ~10MB+. Prefer the system
-//! install (Linux packages / user fonts). Windows Segoe UI Emoji is typically
-//! COLR/CPAL, not CBDT — only Noto Color Emoji (or another CBDT font) works here.
+//! install (Linux packages / Windows Segoe / user fonts).
 
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Mutex;
 
 use ttf_parser::{Face, GlyphId, RasterImageFormat};
+
+use crate::colr_paint::render_colr_glyph;
 
 /// Decoded RGBA glyph ready to scale and blit.
 #[derive(Clone)]
@@ -29,22 +33,32 @@ pub struct ColorEmojiGlyph {
     pub rgba: Vec<u8>,
 }
 
-/// Lazy-loading CBDT color-emoji atlas keyed by Unicode scalar or ZWJ cluster.
+/// Lazy-loading color-emoji atlas (CBDT strikes or COLR layers) keyed by
+/// Unicode scalar or ZWJ cluster.
 pub struct ColorEmojiAtlas {
-    font_data: Vec<u8>,
-    cache: Mutex<HashMap<String, Option<ColorEmojiGlyph>>>,
+    /// Owned font bytes; declared before `face` so it drops after it.
+    _font_data: Box<[u8]>,
+    // SAFETY: borrows `_font_data`, which lives in the same struct and is
+    // never mutated or moved out; `face` is declared after the data, so it
+    // is dropped first and the borrow never outlives the bytes.
+    face: Box<Face<'static>>,
+    pub(crate) cache: Mutex<HashMap<String, Option<ColorEmojiGlyph>>>,
 }
 
+/// Max memoized emoji strikes (~65 KB RGBA each; cap ≈ 8 MB).
+pub(crate) const EMOJI_CACHE_CAP: usize = 128;
+
 impl ColorEmojiAtlas {
-    /// Load from the first readable candidate path. Returns `None` if missing.
+    /// Load from the first color-capable candidate font. Returns `None` when
+    /// no system emoji font with CBDT strikes or COLR layers is available.
     pub fn load() -> Option<Self> {
         let data = load_color_emoji_bytes()?;
-        // Validate face parses and exposes at least one CBDT strike path.
         let face = Face::parse(&data, 0).ok()?;
-        let probe = face.glyph_index('\u{1F680}').or_else(|| face.glyph_index('😀'))?;
-        let _ = face.glyph_raster_image(probe, u16::MAX)?;
+        // SAFETY: see field comment on the struct.
+        let face: Face<'static> = unsafe { std::mem::transmute(face) };
         Some(Self {
-            font_data: data,
+            _font_data: data.into(),
+            face: Box::new(face),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -74,26 +88,35 @@ impl ColorEmojiAtlas {
                 return entry.clone();
             }
         }
-        let decoded = decode_glyph_or_cluster(&self.font_data, key);
+        let decoded = decode_glyph_or_cluster(&self.face, key);
         if let Ok(mut cache) = self.cache.lock() {
+            // Bounded (issue #61): a decoded strike is ~65 KB RGBA; without a
+            // cap a long emoji-heavy session grew the map for hours. Drop
+            // ~1/8 arbitrary entries (HashMap order) when full.
+            if !cache.contains_key(key) && cache.len() >= EMOJI_CACHE_CAP {
+                let victims: Vec<String> =
+                    cache.keys().take(EMOJI_CACHE_CAP / 8).cloned().collect();
+                for victim in victims {
+                    cache.remove(&victim);
+                }
+            }
             cache.insert(key.to_string(), decoded.clone());
         }
         decoded
     }
 }
 
-fn decode_glyph_or_cluster(font_data: &[u8], key: &str) -> Option<ColorEmojiGlyph> {
-    let face = Face::parse(font_data, 0).ok()?;
+fn decode_glyph_or_cluster(face: &Face, key: &str) -> Option<ColorEmojiGlyph> {
     if key.chars().count() > 1 {
         let chars: Vec<char> = key.chars().collect();
         let gid_from = |seq: &[char]| -> Option<GlyphId> {
             let gids: Option<Vec<GlyphId>> = seq.iter().map(|c| face.glyph_index(*c)).collect();
-            resolve_ligature(&face, gids.as_ref()?)
+            resolve_ligature(face, gids.as_ref()?)
         };
         // Try the full sequence first, then without variation selectors —
         // some fonts key keycap ligatures without the VS component.
         if let Some(g) = gid_from(&chars) {
-            return decode_glyph_image(&face, g);
+            return decode_glyph_image(face, g);
         }
         let stripped: Vec<char> = chars
             .iter()
@@ -102,29 +125,42 @@ fn decode_glyph_or_cluster(font_data: &[u8], key: &str) -> Option<ColorEmojiGlyp
             .collect();
         if stripped.len() != chars.len() {
             if stripped.len() == 1 {
-                return decode_glyph(font_data, stripped[0]);
+                return decode_glyph(face, stripped[0]);
             }
             if let Some(g) = gid_from(&stripped) {
-                return decode_glyph_image(&face, g);
+                return decode_glyph_image(face, g);
             }
         }
         return None;
     }
     let ch = key.chars().next()?;
-    decode_glyph(font_data, ch)
+    decode_glyph(face, ch)
 }
 
+/// Decode a color glyph: CBDT PNG strike when present, else COLR layers
+/// (Segoe UI Emoji on Windows — issue #67).
 fn decode_glyph_image(face: &Face, gid: GlyphId) -> Option<ColorEmojiGlyph> {
-    let img = face.glyph_raster_image(gid, u16::MAX)?;
-    if img.format != RasterImageFormat::PNG {
-        return None;
+    if let Some(img) = face.glyph_raster_image(gid, u16::MAX) {
+        if img.format == RasterImageFormat::PNG {
+            if let Some(rgba) = decode_png_rgba(img.data) {
+                return Some(ColorEmojiGlyph {
+                    width: img.width as u32,
+                    height: img.height as u32,
+                    x_offset: img.x,
+                    y_offset: img.y,
+                    rgba,
+                });
+            }
+        }
     }
-    let rgba = decode_png_rgba(img.data)?;
+    // COLR render size: matches the ~136px CBDT strikes of Noto Color Emoji;
+    // the blit path scales to the cell anyway.
+    let (rgba, width, height) = render_colr_glyph(face, gid, 136.0)?;
     Some(ColorEmojiGlyph {
-        width: img.width as u32,
-        height: img.height as u32,
-        x_offset: img.x,
-        y_offset: img.y,
+        width,
+        height,
+        x_offset: 0,
+        y_offset: 0,
         rgba,
     })
 }
@@ -166,6 +202,8 @@ fn resolve_ligature(face: &Face, gids: &[GlyphId]) -> Option<GlyphId> {
     None
 }
 
+/// Candidate emoji fonts, best first: CBDT Noto Color Emoji (crisp PNG
+/// strikes), then COLR Segoe UI Emoji (stock Windows, issue #67).
 fn load_color_emoji_bytes() -> Option<Vec<u8>> {
     let mut candidates: Vec<String> = Vec::new();
     if let Some(home) = dirs::home_dir() {
@@ -190,32 +228,41 @@ fn load_color_emoji_bytes() -> Option<Vec<u8>> {
     ] {
         candidates.push(path.to_string());
     }
+    // Stock Windows: Segoe UI Emoji is COLR/CPAL (no CBDT strikes).
+    candidates.push("C:\\Windows\\Fonts\\seguiemj.ttf".to_string());
+    if let Some(home) = dirs::home_dir() {
+        let home = home.to_string_lossy();
+        candidates.push(format!(
+            "{home}/AppData/Local/Microsoft/Windows/Fonts/seguiemj.ttf"
+        ));
+    }
+
     for path in &candidates {
-        if let Ok(data) = std::fs::read(path) {
-            if Face::parse(&data, 0).is_ok() {
-                return Some(data);
-            }
+        let Ok(data) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(face) = Face::parse(&data, 0) else {
+            continue;
+        };
+        // Only accept fonts that can actually paint the probe emoji in
+        // color (CBDT strike or COLR layers) — a plain symbol font that
+        // merely parses must not win over a later color font.
+        let Some(probe) = face
+            .glyph_index('\u{1F680}')
+            .or_else(|| face.glyph_index('😀'))
+        else {
+            continue;
+        };
+        if face.glyph_raster_image(probe, u16::MAX).is_some() || face.is_color_glyph(probe) {
+            return Some(data);
         }
     }
     None
 }
 
-fn decode_glyph(font_data: &[u8], ch: char) -> Option<ColorEmojiGlyph> {
-    let face = Face::parse(font_data, 0).ok()?;
+fn decode_glyph(face: &Face, ch: char) -> Option<ColorEmojiGlyph> {
     let gid: GlyphId = face.glyph_index(ch)?;
-    let img = face.glyph_raster_image(gid, u16::MAX)?;
-    if img.format != RasterImageFormat::PNG {
-        // Noto Color Emoji uses PNG in CBDT; skip raw/bitpacked formats for v1.
-        return None;
-    }
-    let rgba = decode_png_rgba(img.data)?;
-    Some(ColorEmojiGlyph {
-        width: img.width as u32,
-        height: img.height as u32,
-        x_offset: img.x,
-        y_offset: img.y,
-        rgba,
-    })
+    decode_glyph_image(face, gid)
 }
 
 fn decode_png_rgba(png_bytes: &[u8]) -> Option<Vec<u8>> {
@@ -256,16 +303,7 @@ pub fn blit_color_emoji(
     clip: Option<(f32, f32)>,
 ) {
     blit_color_emoji_span(
-        out,
-        buf_width,
-        buf_height,
-        cell_x,
-        row_top,
-        row_height,
-        cell_width,
-        1,
-        glyph,
-        clip,
+        out, buf_width, buf_height, cell_x, row_top, row_height, cell_width, 1, glyph, clip,
     )
 }
 
@@ -452,7 +490,9 @@ pub fn char_kind(ch: char) -> CharKind {
 
 /// Display cell count: Unicode scalars minus zero-width marks.
 pub fn display_cell_count(text: &str) -> usize {
-    text.chars().filter(|ch| char_kind(*ch) == CharKind::Advance).count()
+    text.chars()
+        .filter(|ch| char_kind(*ch) == CharKind::Advance)
+        .count()
 }
 
 /// One display unit of a text run: a ZWJ emoji cluster, a plain scalar,
@@ -570,8 +610,7 @@ mod tests {
             let Some(ch) = char::from_u32(cp) else {
                 continue;
             };
-            let expected =
-                is_color_emoji_candidate(ch) || ('\u{2800}'..='\u{28FF}').contains(&ch);
+            let expected = is_color_emoji_candidate(ch) || ('\u{2800}'..='\u{28FF}').contains(&ch);
             assert_eq!(
                 is_symbol_font_candidate(ch),
                 expected,
@@ -612,9 +651,9 @@ mod tests {
     }
 
     #[test]
-    fn loads_system_noto_color_emoji_when_present() {
+    fn loads_system_color_emoji_font_when_present() {
         let Some(atlas) = ColorEmojiAtlas::load() else {
-            eprintln!("skip: Noto Color Emoji not installed");
+            eprintln!("skip: no color emoji font installed");
             return;
         };
         assert!(
@@ -623,10 +662,24 @@ mod tests {
         );
     }
 
+    /// Issue #67 regression: stock Windows ships Segoe UI Emoji as COLR, and
+    /// the atlas used to come back `None` there. Fail loudly on a Windows
+    /// host instead of silently skipping.
     #[test]
-    fn rocket_png_decodes_with_colored_ink() {
+    fn loads_on_stock_windows_via_colr_segoe() {
+        if !cfg!(windows) {
+            eprintln!("skip: Windows-only (stock Segoe UI Emoji)");
+            return;
+        }
+        let atlas = ColorEmojiAtlas::load()
+            .expect("stock Windows must provide Segoe UI Emoji (COLR) for the color atlas");
+        assert!(atlas.has_glyph('\u{1F680}'));
+    }
+
+    #[test]
+    fn rocket_decodes_with_colored_ink() {
         let Some(atlas) = ColorEmojiAtlas::load() else {
-            eprintln!("skip: Noto Color Emoji not installed");
+            eprintln!("skip: no color emoji font installed");
             return;
         };
         let glyph = atlas.glyph('\u{1F680}').expect("rocket glyph");
@@ -636,7 +689,10 @@ mod tests {
             .chunks_exact(4)
             .filter(|p| p[3] > 20 && (p[0] > 30 || p[1] > 30 || p[2] > 30))
             .count();
-        assert!(colored > 100, "expected colored ink in rocket PNG, got {colored}");
+        assert!(
+            colored > 100,
+            "expected colored ink in rocket glyph, got {colored}"
+        );
     }
 
     #[test]

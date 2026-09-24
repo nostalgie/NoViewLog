@@ -1,7 +1,7 @@
 use chrono::Utc;
 
-use crate::core::ansi::strip_ansi;
-use crate::core::types::{LogFormat, LogRecord};
+use crate::ansi::strip_ansi;
+use crate::types::{LogFormat, LogRecord};
 
 pub struct RecordParser {
     format: LogFormat,

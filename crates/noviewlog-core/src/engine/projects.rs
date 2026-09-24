@@ -128,27 +128,20 @@ impl Engine {
         } else {
             for (i, program) in live_programs.iter().enumerate() {
                 let id = format!("terminal-{}-{i}", crate::core::types::unique_time_suffix());
-                let mut term = TerminalState::new(
-                    id,
-                    program.launch.clone(),
-                    &runtime,
-                    &format,
-                    max_records,
-                );
+                let mut term =
+                    TerminalState::new(id, program.launch.clone(), &runtime, &format, max_records);
                 apply_program_to_terminal(&mut term, program);
                 new_sessions.push(term);
             }
         }
 
         for (i, program) in file_programs.iter().enumerate() {
-            let id = format!("terminal-file-{}-{i}", crate::core::types::unique_time_suffix());
-            let mut term = TerminalState::new(
-                id,
-                program.launch.clone(),
-                &runtime,
-                &format,
-                max_records,
+            let id = format!(
+                "terminal-file-{}-{i}",
+                crate::core::types::unique_time_suffix()
             );
+            let mut term =
+                TerminalState::new(id, program.launch.clone(), &runtime, &format, max_records);
             apply_program_to_terminal(&mut term, program);
             configure_restored_file_session(&mut term);
             new_sessions.push(term);
@@ -178,10 +171,7 @@ impl Engine {
         self.mark_all_views_dirty();
         self.mark_viewport_dirty();
         self.last_stats_at = None;
-        self.status_message = format!(
-            "Opened project: {}",
-            self.projects.projects[proj_idx].name
-        );
+        self.status_message = format!("Opened project: {}", self.projects.projects[proj_idx].name);
         self.push_event(json!({"type":"status","message": self.status_message}));
     }
 
@@ -242,7 +232,12 @@ impl Engine {
         if name.is_empty() {
             return;
         }
-        let Some(proj) = self.projects.projects.iter_mut().find(|p| p.id == project_id) else {
+        let Some(proj) = self
+            .projects
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+        else {
             return;
         };
         proj.name = name.to_string();

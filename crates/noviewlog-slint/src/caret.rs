@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use noviewlog_core::{CARET_BLINK_PERIOD, Command, Engine};
+use noviewlog_core::{Command, Engine, CARET_BLINK_PERIOD};
 use slint::{ComponentHandle, Timer, TimerMode};
 
 use crate::ctx::Ctx;
@@ -13,7 +13,13 @@ use noviewlog_slint::ui::AppWindow;
 
 /// Sync Slint caret overlay from engine geometry (device px → logical).
 /// Returns whether the overlay is shown.
-pub(crate) fn sync_terminal_caret(ui: &AppWindow, eng: &Engine, width: u32, height: u32, scale: f32) -> bool {
+pub(crate) fn sync_terminal_caret(
+    ui: &AppWindow,
+    eng: &Engine,
+    width: u32,
+    height: u32,
+    scale: f32,
+) -> bool {
     if !eng.terminal_caret_active() {
         ui.set_caret_visible(false);
         return false;

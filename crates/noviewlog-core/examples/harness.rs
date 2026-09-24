@@ -28,7 +28,10 @@ fn main() {
     let chunk_size: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4096);
     let bytes = std::fs::read(path).unwrap();
     let lines = emulate(&bytes, chunk_size);
-    println!("### {path}  chunk_size={chunk_size}  ({} lines)\n", lines.len());
+    println!(
+        "### {path}  chunk_size={chunk_size}  ({} lines)\n",
+        lines.len()
+    );
     for (i, l) in lines.iter().enumerate() {
         println!("{i:3} | {l}");
     }

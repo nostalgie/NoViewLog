@@ -6,7 +6,7 @@ use std::rc::Rc;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
-use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
+use slint::winit_030::{winit, EventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, SharedString, Timer};
 
 use crate::engine_bridge::{bump_fast_timer, set_occluded_timer};
@@ -154,7 +154,11 @@ pub(crate) fn install(
                                 return;
                             };
                             if let Some(ui) = ui_fallback.upgrade() {
-                                report_open_url(&ui, &pending.url, spawn_https_url(&pending.url, None));
+                                report_open_url(
+                                    &ui,
+                                    &pending.url,
+                                    spawn_https_url(&pending.url, None),
+                                );
                             } else {
                                 let _ = spawn_https_url(&pending.url, None);
                             }
@@ -234,9 +238,7 @@ pub(crate) fn install(
 
                 // Armed title-bar drag while Popup blocked the gap TouchArea.
                 if let Some((px, py)) = pending_title_drag_ev.get() {
-                    if (lx - px).abs() >= TITLE_DRAG_SLOP
-                        || (ly - py).abs() >= TITLE_DRAG_SLOP
-                    {
+                    if (lx - px).abs() >= TITLE_DRAG_SLOP || (ly - py).abs() >= TITLE_DRAG_SLOP {
                         pending_title_drag_ev.set(None);
                         begin_title_drag_ev();
                     }
@@ -259,9 +261,7 @@ pub(crate) fn install(
                         };
                         let (lx, ly) = last_cursor_ev.get();
                         // Popup blocks gap TouchArea — close menus + arm drag on same press.
-                        if ui.get_menu_bar_active()
-                            && ui.invoke_title_bar_chrome_press(lx, ly)
-                        {
+                        if ui.get_menu_bar_active() && ui.invoke_title_bar_chrome_press(lx, ly) {
                             pending_title_drag_ev.set(Some((lx, ly)));
                         }
                     }

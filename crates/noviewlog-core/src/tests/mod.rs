@@ -1,4 +1,4 @@
-use crate::core::types::{LogLevel, LogRecord, LaunchConfig};
+use crate::core::types::{LaunchConfig, LogLevel, LogRecord};
 use chrono::Utc;
 use std::sync::Mutex;
 
@@ -17,7 +17,9 @@ pub(crate) fn big_log_fixture() -> std::path::PathBuf {
     // PID-suffixed name: parallel test binaries never race on the same file
     // (issue #113). Old files are cleaned opportunistically when oversized.
     let path = std::env::temp_dir().join(format!("noviewlog-perf-big-{}.log", std::process::id()));
-    let ok = std::fs::metadata(&path).map(|m| m.len() >= TARGET_BYTES).unwrap_or(false);
+    let ok = std::fs::metadata(&path)
+        .map(|m| m.len() >= TARGET_BYTES)
+        .unwrap_or(false);
     if ok {
         return path;
     }
@@ -26,7 +28,11 @@ pub(crate) fn big_log_fixture() -> std::path::PathBuf {
         let mut i: u64 = 0;
         let mut bytes: u64 = 0;
         while bytes < TARGET_BYTES {
-            let time = if i % 20 == 0 { NEEDLE } else { "10:00:00" };
+            let time = if i.is_multiple_of(20) {
+                NEEDLE
+            } else {
+                "10:00:00"
+            };
             let line = format!("2026-09-23T{time}.000Z info: perf line {i:09} payload-abcdef\n");
             bytes += line.len() as u64;
             f.write_all(line.as_bytes()).expect("write fixture");
@@ -86,15 +92,15 @@ pub(crate) fn sample_records() -> Vec<LogRecord> {
     ]
 }
 
+#[cfg(windows)]
+mod conpty_windows;
 mod parser_filters;
 mod presets_defaults;
 mod projects;
+mod pty_flood;
+mod spawn_async;
 mod tabs_search;
+mod terminal_caret;
 mod terminals_files;
 mod viewport_wrap;
 mod volatile_patch;
-mod terminal_caret;
-mod pty_flood;
-mod spawn_async;
-#[cfg(windows)]
-mod conpty_windows;

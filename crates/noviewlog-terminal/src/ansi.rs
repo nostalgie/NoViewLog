@@ -1,11 +1,11 @@
 //! Line-oriented SGR parse / strip / overlay (**non-VT layer**).
 //!
 //! For live PTY screen emulation (cursor, erase, scrollback), see
-//! [`crate::core::terminal`]. That module re-emits ANSI rows; this module
+//! [`crate::terminal`]. That module re-emits ANSI rows; this module
 //! turns those (or file) lines into styled [`TextSegment`]s for filters and
 //! the viewport. Do not add VT cursor semantics here.
 
-use crate::core::types::{TextSegment, TextStyle};
+use crate::types::{TextSegment, TextStyle};
 
 use std::sync::Arc;
 
@@ -37,7 +37,7 @@ pub fn strip_ansi(input: &str) -> String {
                     chars.next();
                     // Consume params/intermediates, stop at the final byte or
                     // at any other char (consumed and dropped, as before).
-                    while let Some(c) = chars.next() {
+                    for c in chars.by_ref() {
                         if is_csi_final(c) {
                             break;
                         }
@@ -113,7 +113,7 @@ pub fn parse_ansi_line(input: &str) -> Vec<TextSegment> {
                     let mut params = String::new();
                     let mut intermediate = String::new();
                     let mut final_byte = None;
-                    while let Some(c) = chars.next() {
+                    for c in chars.by_ref() {
                         if is_csi_param(c) {
                             params.push(c);
                         } else if is_csi_intermediate(c) {
@@ -420,7 +420,10 @@ mod tests {
         let segs = parse_ansi_line("\u{1b}[32m✔ Building...\u{1b}[0m");
         let joined: String = segs.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "✔ Building...");
-        assert!(segs.iter().any(|s| s.style.as_ref().is_some_and(|st| st.fg == Some((63, 185, 80)))));
+        assert!(segs.iter().any(|s| s
+            .style
+            .as_ref()
+            .is_some_and(|st| st.fg == Some((63, 185, 80)))));
     }
 
     #[test]
@@ -431,7 +434,10 @@ mod tests {
     #[test]
     fn strips_cursor_but_keeps_color() {
         let segs = parse_ansi_line("\u{1b}[?25l\u{1b}[32mOK\u{1b}[0m\u{1b}[?25h");
-        assert_eq!(strip_ansi("\u{1b}[?25l\u{1b}[32mOK\u{1b}[0m\u{1b}[?25h"), "OK");
+        assert_eq!(
+            strip_ansi("\u{1b}[?25l\u{1b}[32mOK\u{1b}[0m\u{1b}[?25h"),
+            "OK"
+        );
         assert_eq!(segs[0].text, "OK");
         assert!(segs[0].style.clone().unwrap().fg.is_some());
     }
@@ -466,7 +472,8 @@ mod tests {
         );
         assert!(
             segs.iter()
-                .all(|s| s.style.as_ref().and_then(|st| st.link.as_deref()) != Some("https://example.com/docs")
+                .all(|s| s.style.as_ref().and_then(|st| st.link.as_deref())
+                    != Some("https://example.com/docs")
                     || s.text == "docs"),
             "link must close at the empty OSC 8"
         );

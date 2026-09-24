@@ -231,10 +231,7 @@ mod tests {
     fn wait_ready(resolver: &SpawnResolver, command: &str, args: &[String], cwd: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if resolver
-                .request(command, args.to_vec(), cwd)
-                .is_some()
-            {
+            if resolver.request(command, args.to_vec(), cwd).is_some() {
                 return;
             }
             assert!(Instant::now() < deadline, "resolution never completed");
@@ -246,7 +243,9 @@ mod tests {
     fn request_resolves_in_background_then_caches() {
         let (resolver, calls) = counting_resolver(Duration::from_millis(30), false);
         assert!(
-            resolver.request("node", vec!["a".into()], r"C:\proj").is_none(),
+            resolver
+                .request("node", vec!["a".into()], r"C:\proj")
+                .is_none(),
             "cold cache must defer to the worker thread"
         );
         wait_ready(&resolver, "node", &["a".into()], r"C:\proj");
@@ -276,8 +275,12 @@ mod tests {
     #[test]
     fn different_args_are_separate_cache_entries() {
         let (resolver, calls) = counting_resolver(Duration::from_millis(20), false);
-        assert!(resolver.request("node", vec!["a".into()], r"C:\p").is_none());
-        assert!(resolver.request("node", vec!["b".into()], r"C:\p").is_none());
+        assert!(resolver
+            .request("node", vec!["a".into()], r"C:\p")
+            .is_none());
+        assert!(resolver
+            .request("node", vec!["b".into()], r"C:\p")
+            .is_none());
         wait_ready(&resolver, "node", &["a".into()], r"C:\p");
         wait_ready(&resolver, "node", &["b".into()], r"C:\p");
         assert_eq!(calls.load(Ordering::SeqCst), 2);

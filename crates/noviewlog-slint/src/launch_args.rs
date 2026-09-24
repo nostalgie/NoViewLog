@@ -74,9 +74,7 @@ fn is_log_file_arg(arg: &str) -> bool {
     if ext.is_empty() {
         return false;
     }
-    LOG_EXTENSIONS
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case(ext))
+    LOG_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext))
 }
 
 #[cfg(test)]

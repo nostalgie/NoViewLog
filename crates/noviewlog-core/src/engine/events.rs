@@ -159,6 +159,14 @@ pub struct StatsSnapshot {
     pub file_lines_before: u64,
     #[serde(default)]
     pub file_loading: bool,
+    /// True when the active tab's whole-file match scan stopped at
+    /// `MAX_MATCH_OFFSETS` — the match set is truncated (issue #150).
+    #[serde(default)]
+    pub match_capped: bool,
+    /// True when the active file session changed on disk since open
+    /// (issue #151); cleared by reloading that session.
+    #[serde(default)]
+    pub file_changed: bool,
     /// 1-based line at the top of the viewport (file line or scrollback flat line).
     #[serde(default)]
     pub viewport_line: u64,
@@ -183,6 +191,9 @@ fn default_severity_all() -> String {
 }
 
 /// Engine → host event after parsing wire JSON.
+// StatsSnapshot dwarfs the other variants, but events are parsed/polled at low
+// frequency; boxing would churn the host API for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     Stats(StatsSnapshot),
@@ -286,6 +297,7 @@ mod tests {
         "file_window_start": 0,
         "file_lines_before": 0,
         "file_loading": false,
+        "match_capped": true,
         "max_scrollback_lines": 10000,
         "viewport_font_size": 13.0
     }"#;
@@ -304,6 +316,7 @@ mod tests {
         assert!((s.scroll_y - 120.5).abs() < f32::EPSILON);
         assert_eq!(s.search_counter, "1/3");
         assert_eq!(s.max_scrollback_lines, 10_000);
+        assert!(s.match_capped, "truncation hint must parse from stats wire");
         assert_eq!(s.tabs.len(), 2);
         assert_eq!(s.tabs[0].name, "Terminal");
         assert!(s.tabs[0].is_terminal_tab);

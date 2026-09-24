@@ -248,11 +248,7 @@ fn default_click_count() -> u32 {
 impl Engine {
     pub fn apply_command(&mut self, cmd: Command) -> Result<(), String> {
         match cmd {
-            Command::Start {
-                command,
-                args,
-                cwd,
-            } => {
+            Command::Start { command, args, cwd } => {
                 if self.active_terminal().is_file_session() {
                     self.status_message = "File terminal is view-only".to_string();
                     self.push_event(json!({"type":"status","message": self.status_message}));
@@ -303,10 +299,8 @@ impl Engine {
                 if self.active_terminal().active_view == 0 {
                     // The Terminal tab has no filters.
                 } else {
-                    let (compiled, notices): (Vec<_>, Vec<_>) = filters
-                        .into_iter()
-                        .map(compile_filter_checked)
-                        .fold(
+                    let (compiled, notices): (Vec<_>, Vec<_>) =
+                        filters.into_iter().map(compile_filter_checked).fold(
                             (Vec::new(), Vec::new()),
                             |(mut rules, mut warns), (r, w)| {
                                 rules.push(r);
@@ -395,10 +389,9 @@ impl Engine {
                 case_sensitive,
                 whole_word,
             } => self.search_set(&query, regex, case_sensitive, whole_word),
-            Command::FilterDraftSet {
-                pattern,
-                use_regex,
-            } => self.filter_draft_set(&pattern, use_regex),
+            Command::FilterDraftSet { pattern, use_regex } => {
+                self.filter_draft_set(&pattern, use_regex)
+            }
             Command::SearchGoto { delta } => self.search_goto(delta),
             Command::SetWrapLines { wrap } => self.set_wrap_lines(wrap),
             Command::ScrollHorizontal { delta } => self.scroll_horizontal(delta),
@@ -432,9 +425,7 @@ impl Engine {
             Command::TerminalStart { terminal_id } => self.terminal_start(terminal_id.as_deref()),
             Command::ProjectOpen { project_id } => self.project_open(&project_id),
             Command::ProjectCreate { name } => self.project_create(&name),
-            Command::ProjectRename { project_id, name } => {
-                self.project_rename(&project_id, &name)
-            }
+            Command::ProjectRename { project_id, name } => self.project_rename(&project_id, &name),
             Command::ProjectDelete { project_id } => self.project_delete(&project_id),
             Command::ProgramSetLaunch {
                 terminal_id,
@@ -443,14 +434,9 @@ impl Engine {
                 cwd,
                 wsl,
                 wsl_distro,
-            } => self.program_set_launch(
-                terminal_id.as_deref(),
-                command,
-                args,
-                cwd,
-                wsl,
-                wsl_distro,
-            ),
+            } => {
+                self.program_set_launch(terminal_id.as_deref(), command, args, cwd, wsl, wsl_distro)
+            }
             Command::SetSettings {
                 max_scrollback_lines,
             } => self.set_settings(max_scrollback_lines),

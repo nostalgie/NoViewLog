@@ -216,18 +216,10 @@ impl PtyManager {
         let running_writer = running.clone();
         thread::spawn(move || {
             let mut writer = writer;
-            loop {
-                match stdin_rx.recv() {
-                    Ok(data) => {
-                        if let Err(err) = writer.write_all(&data).and_then(|_| writer.flush()) {
-                            *stdin_error
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner()) =
-                                Some(err.to_string());
-                            break;
-                        }
-                    }
-                    Err(_) => break, // queue dropped (stop / manager drop)
+            while let Ok(data) = stdin_rx.recv() {
+                if let Err(err) = writer.write_all(&data).and_then(|_| writer.flush()) {
+                    *stdin_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+                    break;
                 }
                 if !running_writer.load(Ordering::SeqCst) {
                     break;
@@ -299,10 +291,7 @@ impl PtyManager {
             // A wait() failure is NOT a natural exit (issue #111): report the
             // sentinel 258 (0x102, still-active bit) so the UI does not show a
             // normal-looking "exited (1)".
-            let code = child
-                .wait()
-                .map(|s| s.exit_code() as i32)
-                .unwrap_or(258);
+            let code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(258);
             // Full child exit: dropping the master now calls ClosePseudoConsole,
             // conhost exits and releases the pipe write end, which unblocks the
             // reader. Dropping strictly after `wait` keeps the 0xC0000142
@@ -363,9 +352,7 @@ impl PtyManager {
             std::sync::mpsc::TrySendError::Full(_) => {
                 "stdin backlog full (child is not reading input)".to_string()
             }
-            std::sync::mpsc::TrySendError::Disconnected(_) => {
-                "process is not running".to_string()
-            }
+            std::sync::mpsc::TrySendError::Disconnected(_) => "process is not running".to_string(),
         })
     }
 

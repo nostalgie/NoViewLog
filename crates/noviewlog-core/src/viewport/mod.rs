@@ -1,41 +1,22 @@
-use std::collections::HashMap;
-
-use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, LayoutSettings, TextStyle};
-use fontdue::Font;
-
-use crate::color_emoji::{
-    blit_color_emoji, blit_color_emoji_span, char_kind, display_cell_count, display_items,
-    is_color_emoji_candidate, CharKind, ColorEmojiAtlas,
-};
-use crate::core::ansi::strip_ansi;
+use crate::color_emoji::ColorEmojiAtlas;
 use crate::core::types::{
-    clamp_viewport_font_size, detect_level, FlatLine, LogLevel, SearchMatch, TextSegment,
-    TextStyle as LineStyle, DEFAULT_VIEWPORT_FONT_SIZE,
+    clamp_viewport_font_size, detect_level, FlatLine, SearchMatch, TextSegment,
+    DEFAULT_VIEWPORT_FONT_SIZE,
 };
 use crate::core::visible::{highlight_search_in_segments, SearchPattern};
 use crate::viewport_layout::{
-    collect_visible_visual_lines_with_total, selection_slice_range, slice_segments, TextSelection,
-    LEFT_PAD,
+    collect_visible_visual_lines_with_total, slice_segments, TextSelection, LEFT_PAD,
 };
 
-const BG: [u8; 4] = [0, 0, 0, 255];
-const DEFAULT_FG: [u8; 4] = [230, 237, 243, 255];
-const DIM_FG: [u8; 4] = [139, 148, 158, 255];
-const HINT_FG: [u8; 4] = [139, 148, 158, 255];
-const SEARCH_BG: [u8; 4] = [58, 100, 150, 255];
-const SEARCH_CURRENT_BG: [u8; 4] = [184, 134, 11, 255];
-const SELECTION_BG: [u8; 4] = [45, 70, 110, 255];
-const CARET_FG: [u8; 4] = [230, 237, 243, 255];
-/// Muted severity gutter cues (not Theme.accent / bright fluent blue).
-const SEVERITY_ERROR: [u8; 4] = [180, 80, 80, 255];
-const SEVERITY_WARN: [u8; 4] = [180, 145, 70, 255];
-const SEVERITY_INFO: [u8; 4] = [100, 140, 165, 255];
-const SEVERITY_DEBUG: [u8; 4] = [130, 120, 150, 255];
-/// Disclosure cues (muted; not Theme.accent).
-const DISCLOSURE_COLLAPSED: [u8; 4] = [120, 130, 145, 255];
-const DISCLOSURE_EXPANDED: [u8; 4] = [90, 100, 115, 255];
-/// Probe size when checking whether a fallback font has ink for a glyph.
-const FONT_PROBE_SIZE: f32 = DEFAULT_VIEWPORT_FONT_SIZE;
+mod fonts;
+mod primitives;
+
+use fonts::{compute_metrics, load_emoji_fallback_font, load_mono_font, FontStack, GlyphCache};
+use primitives::{
+    draw_text, drawable_text, fill_rect, highlight_selection_in_segments, severity_cue_color,
+    style_to_draw, text_width, BG, CARET_FG, DEFAULT_FG, DISCLOSURE_COLLAPSED, DISCLOSURE_EXPANDED,
+    HINT_FG,
+};
 
 /// Block caret in the rendered viewport (flat-line index + cell column).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,61 +32,6 @@ pub struct ViewportMetrics {
     /// Fixed terminal cell width in whole pixels (every column advances by this amount).
     pub cell_width: u32,
 }
-
-struct FontStack {
-    primary: Font,
-    fallback: Option<Font>,
-}
-
-impl FontStack {
-    fn pick(&self, ch: char) -> &Font {
-        if let Some(fb) = &self.fallback {
-            if emoji_or_symbol(ch) && fb.has_glyph(ch) && glyph_has_ink(fb, ch) {
-                return fb;
-            }
-            if !self.primary.has_glyph(ch) && fb.has_glyph(ch) && glyph_has_ink(fb, ch) {
-                return fb;
-            }
-        }
-        &self.primary
-    }
-}
-
-struct CachedGlyph {
-    width: usize,
-    height: usize,
-    bitmap: Vec<u8>,
-}
-
-/// Fontdue raster cache for the current font size (cleared on size change).
-struct GlyphCache {
-    entries: HashMap<(usize, u16, u32), CachedGlyph>,
-}
-
-impl GlyphCache {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    fn rasterize(&mut self, font: &Font, key: GlyphRasterConfig) -> &CachedGlyph {
-        let cache_key = (key.font_hash, key.glyph_index, key.px.to_bits());
-        self.entries.entry(cache_key).or_insert_with(|| {
-            let (metrics, bitmap) = font.rasterize_config(key);
-            CachedGlyph {
-                width: metrics.width,
-                height: metrics.height,
-                bitmap,
-            }
-        })
-    }
-}
-
 pub struct ViewportRenderer {
     fonts: FontStack,
     /// System Noto Color Emoji (CBDT); optional — mono Symbols2 remains the fallback.
@@ -127,7 +53,7 @@ impl ViewportRenderer {
         let color_emoji = ColorEmojiAtlas::load();
         let metrics = compute_metrics(&primary, font_size);
         Self {
-            fonts: FontStack { primary, fallback },
+            fonts: FontStack::new(primary, fallback),
             color_emoji,
             metrics,
             font_size,
@@ -163,7 +89,10 @@ impl ViewportRenderer {
     ) -> Result<(), String> {
         let expected = (width as usize) * (height as usize) * 4;
         if out.len() < expected {
-            return Err(format!("buffer too small: need {expected}, got {}", out.len()));
+            return Err(format!(
+                "buffer too small: need {expected}, got {}",
+                out.len()
+            ));
         }
         for px in out[..expected].chunks_exact_mut(4) {
             px.copy_from_slice(&BG);
@@ -241,7 +170,10 @@ impl ViewportRenderer {
     ) -> Result<(), String> {
         let expected = (width as usize) * (height as usize) * 4;
         if out.len() < expected {
-            return Err(format!("buffer too small: need {expected}, got {}", out.len()));
+            return Err(format!(
+                "buffer too small: need {expected}, got {}",
+                out.len()
+            ));
         }
         for px in out[..expected].chunks_exact_mut(4) {
             px.copy_from_slice(&BG);
@@ -447,132 +379,6 @@ fn draw_caret_block(
         );
     }
 }
-
-fn compute_metrics(primary: &Font, font_size: f32) -> ViewportMetrics {
-    let line_metrics = primary.horizontal_line_metrics(font_size);
-    let ascent = line_metrics
-        .map(|m| m.ascent)
-        .filter(|a| *a > 0.0)
-        .unwrap_or(font_size);
-    let row_height = line_metrics
-        .map(|m| m.new_line_size)
-        .filter(|h| *h > 0.0)
-        .unwrap_or(font_size + 2.0);
-    let row_stride = row_height.max(1.0);
-    let cell_width = mono_cell_width(primary, font_size);
-    ViewportMetrics {
-        row_height: row_stride,
-        row_stride,
-        ascent,
-        cell_width,
-    }
-}
-
-fn mono_cell_width(font: &Font, font_size: f32) -> u32 {
-    // Monospace fonts should share one advance; sample ASCII + box-drawing for safety.
-    const SAMPLES: &[char] = &['M', ' ', '│', '┬', '─', '╭', '╮', '┐', '┘'];
-    SAMPLES
-        .iter()
-        .map(|&ch| font.metrics(ch, font_size).advance_width.ceil() as u32)
-        .max()
-        .unwrap_or(8)
-        .max(1)
-}
-
-fn try_load_font(path: &str) -> Option<Font> {
-    let data = std::fs::read(path).ok()?;
-    Font::from_bytes(data.as_slice(), fontdue::FontSettings::default()).ok()
-}
-
-fn load_mono_font() -> Font {
-    let mut candidates: Vec<String> = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        let home_str = home.to_string_lossy();
-        for name in [
-            "JetBrainsMono-Regular.ttf",
-            "FiraCode-Regular.ttf",
-            "CascadiaMono.ttf",
-            "CascadiaCode-Regular.ttf",
-        ] {
-            candidates.push(format!("{home_str}/.local/share/fonts/{name}"));
-            candidates.push(format!("{home_str}/.fonts/{name}"));
-            // Windows user fonts folder
-            candidates.push(format!("{home_str}/AppData/Local/Microsoft/Windows/Fonts/{name}"));
-        }
-    }
-    for path in [
-        // Linux
-        "/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/truetype/JetBrainsMono/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf",
-        "/usr/share/fonts/truetype/FiraCode/FiraCode-Regular.ttf",
-        "/usr/share/fonts/truetype/cascadia-code/CascadiaMono.ttf",
-        "/usr/share/fonts/truetype/cascadia/CascadiaMono.ttf",
-        "/usr/share/fonts/opentype/cascadia-code/CascadiaMono.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        // Windows system fonts
-        "C:\\Windows\\Fonts\\CascadiaMono.ttf",
-        "C:\\Windows\\Fonts\\cascadiamono.ttf",
-        "C:\\Windows\\Fonts\\CascadiaCode.ttf",
-        "C:\\Windows\\Fonts\\consola.ttf",
-        "C:\\Windows\\Fonts\\lucon.ttf",
-    ] {
-        candidates.push(path.to_string());
-    }
-    for path in &candidates {
-        if let Some(font) = try_load_font(path) {
-            return font;
-        }
-    }
-    let bundled = include_bytes!("../../../assets/NotoSansMono-Regular.ttf");
-    Font::from_bytes(&bundled[..], fontdue::FontSettings::default())
-        .expect("failed to load bundled NotoSansMono-Regular.ttf")
-}
-
-/// Monochrome emoji/symbol fallback (Noto Sans Symbols 2).
-/// Color pictographs use `ColorEmojiAtlas` (CBDT) when the system font is present;
-/// this path covers symbols fontdue can rasterize (⚡, ✔, braille spinners, etc.).
-fn load_emoji_fallback_font() -> Option<Font> {
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
-    ];
-    for path in CANDIDATES {
-        if let Some(font) = try_load_font(path) {
-            if glyph_has_ink(&font, '⚡') {
-                return Some(font);
-            }
-        }
-    }
-    let bundled = include_bytes!("../../../assets/NotoSansSymbols2-Regular.ttf");
-    Font::from_bytes(&bundled[..], fontdue::FontSettings::default()).ok()
-}
-
-fn emoji_or_symbol(ch: char) -> bool {
-    // Shared classifier (issue #85): color_emoji.rs owns the range tables so
-    // the color draw path and this font-fallback pick cannot drift apart.
-    crate::color_emoji::is_symbol_font_candidate(ch)
-}
-
-fn glyph_has_ink(font: &Font, ch: char) -> bool {
-    let (_, bitmap) = font.rasterize(ch, FONT_PROBE_SIZE);
-    bitmap.iter().any(|&a| a > 0)
-}
-
-fn drawable_text(text: &str) -> String {
-    strip_ansi(text)
-}
-
-fn severity_cue_color(level: LogLevel) -> [u8; 4] {
-    match level {
-        LogLevel::Error => SEVERITY_ERROR,
-        LogLevel::Warn => SEVERITY_WARN,
-        LogLevel::Info => SEVERITY_INFO,
-        LogLevel::Debug => SEVERITY_DEBUG,
-    }
-}
-
 fn draw_visual_line(
     fonts: &FontStack,
     color_emoji: Option<&ColorEmojiAtlas>,
@@ -622,7 +428,7 @@ fn draw_visual_line(
     if slice_start == 0 {
         if let Some(level) = paint_level {
             let color = severity_cue_color(level);
-            let gutter_w = ((cell_width / 3).max(2).min(4)) as usize;
+            let gutter_w = ((cell_width / 3).clamp(2, 4)) as usize;
             let y = row_top.floor() as i32;
             let h = row_height.ceil().max(1.0) as usize;
             let gutter_x = x_base - SEVERITY_TEXT_GAP - gutter_w as i32;
@@ -645,27 +451,17 @@ fn draw_visual_line(
             } else {
                 DISCLOSURE_EXPANDED
             };
-            let cue_w = ((cell_width / 2).max(3).min(5)) as usize;
+            let cue_w = ((cell_width / 2).clamp(3, 5)) as usize;
             let y = row_top.floor() as i32;
             let h = row_height.ceil().max(1.0) as usize;
             // Keep disclosure in the pad, left of text (and left of severity when both exist).
-            let gutter_w = ((cell_width / 3).max(2).min(4)) as i32;
+            let gutter_w = ((cell_width / 3).clamp(2, 4)) as i32;
             let cue_x = if paint_level.is_some() {
                 x_base - SEVERITY_TEXT_GAP - gutter_w - 1 - cue_w as i32
             } else {
                 x_base - SEVERITY_TEXT_GAP - cue_w as i32
             };
-            fill_rect(
-                out,
-                width,
-                height,
-                cue_x,
-                y,
-                cue_w,
-                h,
-                color,
-                Some(clip),
-            );
+            fill_rect(out, width, height, cue_x, y, cue_w, h, color, Some(clip));
             // Collapsed preview: muted "+N" suffix via small right-side hash marks.
             if line.collapsed && line.hidden_line_count > 0 {
                 let mark_x = x_base + (width as i32).saturating_sub(cell_width as i32 * 4);
@@ -725,60 +521,6 @@ fn draw_visual_line(
         }
     }
 }
-
-fn highlight_selection_in_segments(
-    segments: &[TextSegment],
-    sel: &TextSelection,
-    flat_index: usize,
-    slice_start: usize,
-    slice_end: usize,
-) -> Vec<TextSegment> {
-    let Some((rel_start, rel_end)) =
-        selection_slice_range(sel, flat_index, slice_start, slice_end)
-    else {
-        return segments.to_vec();
-    };
-
-    let abs_start = slice_start + rel_start;
-    let abs_end = slice_start + rel_end;
-    let mut out = Vec::new();
-    let mut cursor = slice_start;
-    for seg in segments {
-        let seg_start = cursor;
-        let seg_end = cursor + seg.text.len();
-        cursor = seg_end;
-
-        if seg_end <= abs_start || seg_start >= abs_end {
-            out.push(seg.clone());
-            continue;
-        }
-
-        if seg_start < abs_start {
-            out.push(TextSegment {
-                text: seg.text[..abs_start - seg_start].to_string(),
-                style: seg.style.clone(),
-            });
-        }
-
-        let local_start = abs_start.saturating_sub(seg_start);
-        let local_end = (abs_end - seg_start).min(seg.text.len());
-        let mut style = seg.style.clone().unwrap_or_default();
-        style.selected = true;
-        out.push(TextSegment {
-            text: seg.text[local_start..local_end].to_string(),
-            style: Some(style),
-        });
-
-        if seg_end > abs_end {
-            out.push(TextSegment {
-                text: seg.text[local_end..].to_string(),
-                style: seg.style.clone(),
-            });
-        }
-    }
-    out
-}
-
 fn draw_segments(
     fonts: &FontStack,
     color_emoji: Option<&ColorEmojiAtlas>,
@@ -797,12 +539,15 @@ fn draw_segments(
     let mut drew_any = false;
     let width_i = width as i32;
     for segment in segments {
-        let text = drawable_text(&segment.text);
+        // FlatLine segments are ANSI-stripped at build time
+        // (flat_lines_from_raw_lines / parse_ansi_line); re-parsing per frame
+        // was the hot path's biggest avoidable cost (issue #61).
+        let text = segment.text.as_str();
         if text.is_empty() {
             continue;
         }
         let (fg, bold, bg, underline) = style_to_draw(segment.style.as_ref());
-        let text_w = text_width(&text, cell_width) as i32;
+        let text_w = text_width(text, cell_width) as i32;
         if *cursor_x + text_w <= 0 {
             *cursor_x += text_w;
             continue;
@@ -847,7 +592,7 @@ fn draw_segments(
             row_top,
             row_height,
             Some(clip),
-            &text,
+            text,
             fg,
             bold,
             cell_width,
@@ -861,295 +606,96 @@ fn draw_segments(
     }
     drew_any
 }
-
-/// (fg, bold, bg, underline) for a segment style.
-fn style_to_draw(style: Option<&LineStyle>) -> ([u8; 4], bool, Option<[u8; 4]>, bool) {
-    let Some(style) = style else {
-        return (DEFAULT_FG, false, None, false);
-    };
-    if style.search_current {
-        return (DEFAULT_FG, false, Some(SEARCH_CURRENT_BG), style.underline);
-    }
-    if style.search {
-        return (DEFAULT_FG, false, Some(SEARCH_BG), style.underline);
-    }
-    if style.selected {
-        return (DEFAULT_FG, false, Some(SELECTION_BG), style.underline);
-    }
-    let mut fg = if style.dim { DIM_FG } else { DEFAULT_FG };
-    if let Some((r, g, b)) = style.fg {
-        fg = [r, g, b, 255];
-    }
-    let mut bg = style.bg.map(|(r, g, b)| [r, g, b, 255]);
-    if style.search {
-        bg = Some(SEARCH_BG);
-    }
-    // OSC 8 links are always underlined (click affordance).
-    (
-        fg,
-        style.bold,
-        bg,
-        style.underline || style.link.is_some(),
-    )
-}
-
-fn text_width(text: &str, cell_width: u32) -> u32 {
-    if text.is_empty() {
-        return 0;
-    }
-    display_cell_count(text) as u32 * cell_width
-}
-
-fn draw_text(
-    fonts: &FontStack,
-    color_emoji: Option<&ColorEmojiAtlas>,
-    glyph_cache: &mut GlyphCache,
-    out: &mut [u8],
-    width: u32,
-    height: u32,
-    x: i32,
-    row_top: f32,
-    row_height: f32,
-    clip: Option<(f32, f32)>,
-    text: &str,
-    color: [u8; 4],
-    bold: bool,
-    cell_width: u32,
-    font_size: f32,
-) {
-    if text.is_empty() {
-        return;
-    }
-    let width_i = width as i32;
-    let cell_w = cell_width as i32;
-    let mut col: i32 = 0;
-    for item in display_items(text) {
-        let item_x = x + col * cell_w;
-        let span = item.cells as i32;
-        col += span.max(0);
-        if span == 0 {
-            // Combining mark: overlay ink onto the previous cell, no advance.
-            let prev_x = item_x - cell_w;
-            if prev_x + cell_w <= 0 || prev_x >= width_i {
-                continue;
-            }
-            draw_char_at(
-                fonts, glyph_cache, out, width, height, prev_x, row_top, clip,
-                item.text, color, bold, font_size,
-            );
-            continue;
-        }
-        if item_x + span * cell_w <= 0 {
-            continue;
-        }
-        if item_x >= width_i {
-            break;
-        }
-        if item.text.chars().count() > 1 {
-            // Multi-scalar cluster (ZWJ sequence, flag pair, keycap): prefer
-            // the composite CBDT glyph spanning the item's cells.
-            if let Some(atlas) = color_emoji {
-                if let Some(glyph) = atlas.glyph_cluster(item.text) {
-                    blit_color_emoji_span(
-                        out,
-                        width,
-                        height,
-                        item_x,
-                        row_top,
-                        row_height,
-                        cell_width,
-                        item.cells.max(1) as u32,
-                        &glyph,
-                        clip,
-                    );
-                    continue;
-                }
-            }
-        }
-        // Per-scalar paint within the item (single chars or cluster fallback).
-        let mut sub_col = 0i32;
-        for mch in item.text.chars() {
-            match char_kind(mch) {
-                CharKind::SilentSkip => continue,
-                CharKind::Overlay => {
-                    if sub_col > 0 {
-                        draw_char_at(
-                            fonts, glyph_cache, out, width, height, item_x + (sub_col - 1) * cell_w,
-                            row_top, clip, &mch.to_string(), color, bold, font_size,
-                        );
-                    }
-                }
-                CharKind::Advance => {
-                    let cell_x = item_x + sub_col * cell_w;
-                    sub_col += 1;
-                    if cell_x + cell_w <= 0 || cell_x >= width_i {
-                        continue;
-                    }
-                    // Prefer CBDT color emoji for pictograph ranges when present.
-                    if is_color_emoji_candidate(mch) {
-                        if let Some(atlas) = color_emoji {
-                            if let Some(glyph) = atlas.glyph(mch) {
-                                blit_color_emoji(
-                                    out,
-                                    width,
-                                    height,
-                                    cell_x,
-                                    row_top,
-                                    row_height,
-                                    cell_width,
-                                    &glyph,
-                                    clip,
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                    draw_char_at(
-                        fonts, glyph_cache, out, width, height, cell_x, row_top,
-                        clip, &mch.to_string(), color, bold, font_size,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Rasterize one scalar at a fixed cell position via fontdue (no advance).
-#[allow(clippy::too_many_arguments)]
-fn draw_char_at(
-    fonts: &FontStack,
-    glyph_cache: &mut GlyphCache,
-    out: &mut [u8],
-    width: u32,
-    height: u32,
-    cell_x: i32,
-    row_top: f32,
-    clip: Option<(f32, f32)>,
-    ch_str: &str,
-    color: [u8; 4],
-    bold: bool,
-    font_size: f32,
-) {
-    let ch = match ch_str.chars().next() {
-        Some(c) => c,
-        None => return,
-    };
-    let font = fonts.pick(ch);
-    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-    layout.reset(&LayoutSettings {
-        x: 0.0,
-        y: row_top,
-        ..Default::default()
-    });
-    layout.append(&[font], &TextStyle::new(ch_str, font_size, 0));
-    for glyph in layout.glyphs() {
-        let metrics = font.metrics(glyph.parent, font_size);
-        let glyph_x = cell_x + metrics.xmin;
-        let cached = glyph_cache.rasterize(font, glyph.key);
-        blit_glyph(
-            out,
-            width,
-            height,
-            glyph_x,
-            glyph.y as i32,
-            &cached.bitmap,
-            cached.width,
-            cached.height,
-            color,
-            bold,
-            clip,
-        );
-    }
-}
-
-fn fill_rect(
-    out: &mut [u8],
-    width: u32,
-    height: u32,
-    x: i32,
-    y: i32,
-    w: usize,
-    h: usize,
-    color: [u8; 4],
-    clip: Option<(f32, f32)>,
-) {
-    let clip_top = clip.map(|c| c.0.floor() as i32).unwrap_or(0);
-    let clip_bottom = clip.map(|c| c.1.ceil() as i32).unwrap_or(height as i32);
-    for row in 0..h {
-        for col in 0..w {
-            let px = x + col as i32;
-            let py = y + row as i32;
-            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                continue;
-            }
-            if py < clip_top || py >= clip_bottom {
-                continue;
-            }
-            let idx = ((py as u32 * width + px as u32) * 4) as usize;
-            blend_pixel(&mut out[idx..idx + 4], color, 255);
-        }
-    }
-}
-
-fn blit_glyph(
-    out: &mut [u8],
-    width: u32,
-    height: u32,
-    x: i32,
-    y: i32,
-    bitmap: &[u8],
-    gw: usize,
-    gh: usize,
-    color: [u8; 4],
-    bold: bool,
-    clip: Option<(f32, f32)>,
-) {
-    let clip_top = clip.map(|c| c.0.floor() as i32).unwrap_or(0);
-    let clip_bottom = clip.map(|c| c.1.ceil() as i32).unwrap_or(height as i32);
-    for row in 0..gh {
-        for col in 0..gw {
-            let mut alpha = bitmap[row * gw + col];
-            if bold {
-                alpha = alpha.saturating_add(alpha / 2);
-            }
-            if alpha == 0 {
-                continue;
-            }
-            let px = x + col as i32;
-            let py = y + row as i32;
-            if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                continue;
-            }
-            if py < clip_top || py >= clip_bottom {
-                continue;
-            }
-            let idx = ((py as u32 * width + px as u32) * 4) as usize;
-            blend_pixel(&mut out[idx..idx + 4], color, alpha);
-            if bold && px + 1 < width as i32 {
-                let idx2 = ((py as u32 * width + (px + 1) as u32) * 4) as usize;
-                blend_pixel(&mut out[idx2..idx2 + 4], color, alpha / 2);
-            }
-        }
-    }
-}
-
-fn blend_pixel(dst: &mut [u8], src: [u8; 4], alpha: u8) {
-    let a = alpha as f32 / 255.0;
-    for i in 0..3 {
-        dst[i] = ((src[i] as f32 * a) + (dst[i] as f32 * (1.0 - a))) as u8;
-    }
-    dst[3] = 255;
-}
-
 #[cfg(test)]
 mod tests {
+    use super::fonts::{glyph_baseline_y, glyph_has_ink, GLYPH_CACHE_CAP};
     use super::*;
+    use crate::color_emoji::EMOJI_CACHE_CAP;
     use crate::core::types::TextSegment;
     use crate::core::visible::{compile_search_pattern, highlight_search_in_segments};
+    use fontdue::Font;
 
     #[test]
     fn drawable_text_strips_embedded_ansi() {
         assert_eq!(drawable_text("\u{1b}[32mhello\u{1b}[0m"), "hello");
+    }
+
+    /// The Layout-free draw path must place glyphs exactly where a one-line
+    /// fontdue `Layout` did (issue #61): same bitmap top and same coverage.
+    #[test]
+    fn glyph_placement_matches_fontdue_layout() {
+        use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
+        let font = load_mono_font();
+        for size in [12.0_f32, 14.0, 20.0] {
+            for ch in ['A', 'g', 'ж', '日', '⚡', '⠋'] {
+                let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+                layout.reset(&LayoutSettings {
+                    x: 0.0,
+                    y: 37.5,
+                    ..Default::default()
+                });
+                layout.append(&[&*font], &TextStyle::new(&ch.to_string(), size, 0));
+                let glyph = layout.glyphs().first().expect("layout glyph");
+                let laid_y = glyph.y as i32;
+                let metrics = font.metrics_indexed(font.lookup_glyph_index(ch), size);
+                let baseline = glyph_baseline_y(&font, size, 37.5);
+                let computed_y =
+                    (baseline + (-metrics.bounds.height - metrics.bounds.ymin).floor()) as i32;
+                assert_eq!(laid_y, computed_y, "y mismatch for {ch} @{size}");
+
+                // Coverage parity: same rasterizer config, same bitmap.
+                let (laid_metrics, laid_bitmap) =
+                    font.rasterize_indexed(font.lookup_glyph_index(ch), size);
+                let mine = font.rasterize_indexed(font.lookup_glyph_index(ch), size);
+                assert_eq!(&laid_bitmap, &mine.1, "bitmap mismatch for {ch} @{size}");
+                assert_eq!(laid_metrics.width, mine.0.width);
+                assert_eq!(laid_metrics.height, mine.0.height);
+            }
+        }
+    }
+
+    /// Ink-probe answers must be memoized (issue #61): repeated picks reuse
+    /// the cache instead of re-rasterizing per frame.
+    #[test]
+    fn font_stack_pick_memoizes_ink_probe() {
+        let fonts = FontStack::new(load_mono_font(), load_emoji_fallback_font());
+        let first = fonts.pick('⠋') as *const Font;
+        let second = fonts.pick('⠋') as *const Font;
+        assert_eq!(first, second, "pick must be stable");
+        {
+            let probe = fonts.ink_probe.borrow();
+            assert!(probe.contains_key(&'⠋'), "probe result must be cached");
+        }
+    }
+
+    /// GlyphCache must stay bounded (issue #61): inserting past the cap
+    /// evicts instead of growing without limit.
+    #[test]
+    fn glyph_cache_is_bounded() {
+        let font = load_mono_font();
+        let glyph = font.lookup_glyph_index('A');
+        let mut cache = GlyphCache::new();
+        for i in 0..(GLYPH_CACHE_CAP + 512) {
+            // Distinct px values give distinct cache keys without needing
+            // 16k distinct glyphs in the font.
+            cache.rasterize_indexed(&font, glyph, 1.0 + i as f32 * 0.001);
+            assert!(cache.entries.len() <= GLYPH_CACHE_CAP);
+        }
+    }
+
+    /// ColorEmojiAtlas memo must stay bounded (issue #61).
+    #[test]
+    fn color_emoji_cache_is_bounded() {
+        let Some(atlas) = ColorEmojiAtlas::load() else {
+            return; // no system emoji font in CI — nothing to bound
+        };
+        // ZWJ clusters get distinct keys; push well past the cap.
+        for i in 0..(EMOJI_CACHE_CAP + 32) {
+            let seq = format!("\u{1F600}\u{200D}{i}");
+            let _ = atlas.glyph_cluster(&seq);
+            let cache = atlas.cache.lock().unwrap();
+            assert!(cache.len() <= EMOJI_CACHE_CAP, "cache len {}", cache.len());
+        }
     }
 
     #[test]
@@ -1176,7 +722,10 @@ mod tests {
         let joined: String = highlighted.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "http://localhost:1337");
         assert_eq!(highlighted.len(), 2);
-        assert!(highlighted[0].style.as_ref().is_some_and(|s| s.search_current));
+        assert!(highlighted[0]
+            .style
+            .as_ref()
+            .is_some_and(|s| s.search_current));
         assert!(!highlighted[1].style.as_ref().is_some_and(|s| s.search));
     }
 
@@ -1191,8 +740,8 @@ mod tests {
                 style: None,
             }],
             raw: "http://localhost:1337".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1204,14 +753,30 @@ mod tests {
         };
         let mut buf = vec![0u8; 400 * 40 * 4];
         renderer
-            .render(&mut buf, 400, 40, &[line], 0.0, 0.0, false, None, Some(&re), None, Some(active), None)
+            .render(
+                &mut buf,
+                400,
+                40,
+                &[line],
+                0.0,
+                0.0,
+                false,
+                None,
+                Some(&re),
+                None,
+                Some(active),
+                None,
+            )
             .unwrap();
         // Active match uses orange highlight (R > G, B low).
         let orange_pixels = buf
             .chunks_exact(4)
             .filter(|px| px[0] > 150 && px[1] > 100 && px[1] < 160 && px[2] < 40)
             .count();
-        assert!(orange_pixels > 20, "expected orange search highlight pixels");
+        assert!(
+            orange_pixels > 20,
+            "expected orange search highlight pixels"
+        );
     }
 
     #[test]
@@ -1229,8 +794,8 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1287,15 +852,8 @@ mod tests {
         assert!(!tail_start, "expected line start hidden at max scroll_x");
     }
 
-    fn char_column_lit(
-        buf: &[u8],
-        width: u32,
-        col: usize,
-        cell_width: u32,
-        scroll_x: f32,
-    ) -> bool {
-        let x = crate::viewport_layout::LEFT_PAD as i32
-            + col as i32 * cell_width as i32
+    fn char_column_lit(buf: &[u8], width: u32, col: usize, cell_width: u32, scroll_x: f32) -> bool {
+        let x = crate::viewport_layout::LEFT_PAD as i32 + col as i32 * cell_width as i32
             - scroll_x as i32;
         if x + cell_width as i32 <= 0 || x >= width as i32 {
             return false;
@@ -1332,14 +890,27 @@ mod tests {
                     style: None,
                 }],
                 raw: text.to_string(),
-                        level: None,
-                    collapsible: false,
-            collapsed: false,
-            hidden_line_count: 0,
-        };
+                level: None,
+                collapsible: false,
+                collapsed: false,
+                hidden_line_count: 0,
+            };
             let mut buf = vec![0u8; 600 * 40 * 4];
             renderer
-                .render(&mut buf, 600, 40, &[line], 0.0, 0.0, false, None, None, None, None, None)
+                .render(
+                    &mut buf,
+                    600,
+                    40,
+                    &[line],
+                    0.0,
+                    0.0,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap();
             let lit = buf
                 .chunks_exact(4)
@@ -1369,8 +940,8 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1378,7 +949,20 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf,
+                width,
+                height,
+                &[line],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         // Color emoji should contribute chromatic (non-gray) pixels, not tofu/empty.
         let colorful = buf
@@ -1414,8 +998,8 @@ mod tests {
                 style: None,
             }],
             raw: text.to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1423,7 +1007,20 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf,
+                width,
+                height,
+                &[line],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let colorful = buf
             .chunks_exact(4)
@@ -1460,8 +1057,8 @@ mod tests {
                 style: None,
             }],
             raw: "\u{FE0F}".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1488,7 +1085,10 @@ mod tests {
             .chunks_exact(4)
             .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
             .count();
-        assert_eq!(lit, 0, "FE0F alone must not rasterize tofu, got {lit} lit pixels");
+        assert_eq!(
+            lit, 0,
+            "FE0F alone must not rasterize tofu, got {lit} lit pixels"
+        );
 
         // Marker after emoji+VS16 lands in the same cell as after bare emoji.
         let with_vs = FlatLine {
@@ -1499,8 +1099,8 @@ mod tests {
                 style: None,
             }],
             raw: "\u{23F1}\u{FE0F}#".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1512,8 +1112,8 @@ mod tests {
                 style: None,
             }],
             raw: "\u{23F1}#".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1598,10 +1198,36 @@ mod tests {
         let mut buf_combined = vec![0u8; (width * height * 4) as usize];
         let mut buf_bare = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf_combined, width, height, &[combined], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf_combined,
+                width,
+                height,
+                &[combined],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         renderer
-            .render(&mut buf_bare, width, height, &[bare], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf_bare,
+                width,
+                height,
+                &[bare],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             char_column_lit(&buf_combined, width, 0, cell, 0.0),
@@ -1631,7 +1257,20 @@ mod tests {
         };
         let mut buf_ar = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf_ar, width, height, &[arabic], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf_ar,
+                width,
+                height,
+                &[arabic],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             char_column_lit(&buf_ar, width, 0, cell, 0.0),
@@ -1665,7 +1304,20 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf,
+                width,
+                height,
+                &[line],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(
             char_column_lit(&buf, width, 0, cell, 0.0),
@@ -1683,10 +1335,7 @@ mod tests {
 
     #[test]
     fn emoji_fallback_font_loads() {
-        let fonts = FontStack {
-            primary: load_mono_font(),
-            fallback: load_emoji_fallback_font(),
-        };
+        let fonts = FontStack::new(load_mono_font(), load_emoji_fallback_font());
         assert!(
             fonts.fallback.is_some(),
             "expected emoji/symbol fallback font"
@@ -1716,18 +1365,20 @@ mod tests {
                         style: None,
                     }],
                     raw: format!("log line {i}: hello world"),
-                            level: None,
+                    level: None,
                     collapsible: false,
-            collapsed: false,
-            hidden_line_count: 0,
-        }
+                    collapsed: false,
+                    hidden_line_count: 0,
+                }
             })
             .collect();
         let width = 400u32;
         let height = 120u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &lines, 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf, width, height, &lines, 0.0, 0.0, false, None, None, None, None, None,
+            )
             .unwrap();
 
         let text_rows = rows_with_text_pixels(&buf, width, height);
@@ -1760,8 +1411,8 @@ mod tests {
                 style: None,
             }],
             raw: "http://localhost:1337".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1775,14 +1426,30 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, Some(&re), None, Some(active), None)
+            .render(
+                &mut buf,
+                width,
+                height,
+                &[line],
+                0.0,
+                0.0,
+                false,
+                None,
+                Some(&re),
+                None,
+                Some(active),
+                None,
+            )
             .unwrap();
 
         let orange_pixels = buf
             .chunks_exact(4)
             .filter(|px| px[0] > 150 && px[1] > 100 && px[1] < 160 && px[2] < 40)
             .count();
-        assert!(orange_pixels > 20, "expected orange search highlight pixels");
+        assert!(
+            orange_pixels > 20,
+            "expected orange search highlight pixels"
+        );
 
         let text_pixels = buf
             .chunks_exact(4)
@@ -1823,16 +1490,29 @@ mod tests {
                     style: None,
                 }],
                 raw: text.to_string(),
-                        level: None,
-                    collapsible: false,
-            collapsed: false,
-            hidden_line_count: 0,
-        })
+                level: None,
+                collapsible: false,
+                collapsed: false,
+                hidden_line_count: 0,
+            })
             .collect();
 
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &flat_lines, 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf,
+                width,
+                height,
+                &flat_lines,
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
 
         // Middle divider is at column 11 on every row (after 10-cell-wide left column).
@@ -1924,8 +1604,8 @@ mod tests {
             line_index: 0,
             segments,
             raw: plain.clone(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -1934,7 +1614,20 @@ mod tests {
         let height = 40u32;
         let mut buf = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf, width, height, &[line], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf,
+                width,
+                height,
+                &[line],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
 
         let lit = buf
@@ -1949,18 +1642,33 @@ mod tests {
             record_id: 2,
             line_index: 0,
             segments: vec![TextSegment {
-                text: "╭────────────────────┬──────────────────────────────────────────────────╮".to_string(),
+                text: "╭────────────────────┬──────────────────────────────────────────────────╮"
+                    .to_string(),
                 style: None,
             }],
-            raw: "╭────────────────────┬──────────────────────────────────────────────────╮".to_string(),
-                    level: None,
-                    collapsible: false,
+            raw: "╭────────────────────┬──────────────────────────────────────────────────╮"
+                .to_string(),
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
         let mut buf2 = vec![0u8; (width * height * 4) as usize];
         renderer
-            .render(&mut buf2, width, height, &[border_only], 0.0, 0.0, false, None, None, None, None, None)
+            .render(
+                &mut buf2,
+                width,
+                height,
+                &[border_only],
+                0.0,
+                0.0,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let lit_border = buf2
             .chunks_exact(4)
@@ -2024,8 +1732,8 @@ mod tests {
                 style: None,
             }],
             raw: "$ ".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         };
@@ -2087,8 +1795,14 @@ mod tests {
                 }
             }
         }
-        assert!(diff > 10, "caret should change pixels at col 5, diff={diff}");
-        assert!(caret_lit > 10, "caret cell should be visible, lit={caret_lit}");
+        assert!(
+            diff > 10,
+            "caret should change pixels at col 5, diff={diff}"
+        );
+        assert!(
+            caret_lit > 10,
+            "caret cell should be visible, lit={caret_lit}"
+        );
     }
 
     #[test]

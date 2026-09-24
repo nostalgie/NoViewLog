@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::core::types::LogRecord;
+use crate::types::LogRecord;
 
 pub struct RecordBuffer {
     records: VecDeque<LogRecord>,
@@ -40,6 +40,10 @@ impl RecordBuffer {
     /// Returns the number of raw lines dropped from the front when the cap is exceeded.
     pub fn add(&mut self, record: LogRecord) -> usize {
         self.records.push_back(record);
+        // Compact while the ring is already hot (issue #126): after this, the
+        // deque stays contiguous until the next push actually wraps, so the
+        // several `records()` callers per tick stop paying O(ring) churn each.
+        self.records.make_contiguous();
         self.trim_overflow()
     }
 
@@ -131,7 +135,7 @@ impl RecordBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::types::LogLevel;
+    use crate::types::LogLevel;
     use chrono::Utc;
 
     fn rec(id: u64, text: &str) -> LogRecord {
@@ -162,7 +166,10 @@ mod tests {
             buf.records().iter().map(|r| r.id).collect::<Vec<_>>(),
             vec![2, 3, 4]
         );
-        assert_eq!(buf.raw_lines(), vec!["b".to_string(), "c".to_string(), "d".to_string()]);
+        assert_eq!(
+            buf.raw_lines(),
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
     }
 
     #[test]

@@ -12,27 +12,27 @@ use crate::core::config::{
 };
 use crate::core::formats::{get_builtin_format, merge_formats};
 use crate::core::parser::{reparse_lines, RecordParser};
-use crate::core::types::{
-    clamp_max_scrollback_lines, clamp_viewport_font_size, compile_filter, compile_filter_checked,
-    next_filter_id, AppConfig, FilterRule, FilterType, LaunchConfig, LogFormat, PresetConfig,
-    ProjectsStore, DEFAULT_MAX_SCROLLBACK_LINES,
-};
 #[cfg(test)]
 use crate::core::types::TabConfig;
+use crate::core::types::{
+    clamp_max_scrollback_lines, clamp_viewport_font_size, compile_filter_checked, next_filter_id,
+    AppConfig, FilterRule, FilterType, LaunchConfig, LogFormat, PresetConfig, ProjectsStore,
+    DEFAULT_MAX_SCROLLBACK_LINES,
+};
+use crate::core::visible::SearchPattern;
 use crate::file_index::{PREFETCH_RAW_LINES, WINDOW_RAW_LINES};
-use crate::file_load::{FileLoadState, FILE_VIEW_WINDOW_LINES};
+use crate::file_load::FILE_VIEW_WINDOW_LINES;
 use crate::log_view::LogView;
-use crate::terminal_state::{next_terminal_id, PendingFileWindow, TerminalState, MAX_CLOSED_TABS};
 use crate::pty::{PtyActivityWake, PtyEvent, PtyManager};
 use crate::spawn_resolve::{resolve_interactive_shell, resolve_process_launch};
 use crate::spawn_resolver::SpawnResolver;
+use crate::terminal_state::{next_terminal_id, PendingFileWindow, TerminalState, MAX_CLOSED_TABS};
 use crate::viewport::ViewportRenderer;
 use crate::viewport_layout::{
     build_visual_lines, content_width, count_visual_rows, max_cols, max_scroll_x, pos_at_pixel,
-    selection_plain_text, record_selection_at, word_selection_at, TextSelection, VisualRowIndex,
+    record_selection_at, selection_plain_text, word_selection_at, TextSelection, VisualRowIndex,
     LEFT_PAD,
 };
-use crate::core::visible::SearchPattern;
 use portable_pty::PtySize;
 
 /// Default / legacy alias for the scrollback retention cap (records ≈ lines).
@@ -46,8 +46,7 @@ pub const EMPTY_TERMINAL_TAB_STOPPED: &str =
     "Type to open a shell — or use Start for the saved command";
 /// Empty filter-tab hint when the process session is stopped (ASCII only).
 /// Start is the TERMINALS row play control — not on the filter tab itself.
-pub const EMPTY_FILTER_TAB_STOPPED: &str =
-    "Session stopped — use Start on the TERMINALS row";
+pub const EMPTY_FILTER_TAB_STOPPED: &str = "Session stopped — use Start on the TERMINALS row";
 /// Minimum PTY/emulator column width.
 ///
 /// Soft-wrap is display-only and always uses the real viewport width. The PTY
@@ -57,14 +56,20 @@ pub const EMPTY_FILTER_TAB_STOPPED: &str =
 const MIN_PTY_COLS: u16 = 500;
 /// Prefetch an adjacent file chunk when scroll is within this many pixels of a window edge.
 pub(crate) const PREFETCH_SCROLL_PX: f32 = 120.0;
-/// Raw file lines read per tick while swapping the in-memory sliding window.
-pub(crate) const FILE_WINDOW_LINES_PER_TICK: usize = 2_000;
 /// Bound pending PTY `Bytes` events (~4 KB each) so the reader blocks under flood.
 /// 384 × 4 KB ≈ 1.5 MB of queued output before kernel backpressure stalls the writer.
 pub(crate) const PTY_QUEUE_CAPACITY: usize = 384;
 /// Max PTY bytes fed through VTE / scrollback on a single UI tick.
-/// Kept below ~512 KB so Follow paints stay smooth while still draining floods promptly.
+/// Kept below ~512 KB so Follow paints stay smooth while still draining floods promptly.
 pub(crate) const PTY_INGEST_BYTES_PER_TICK: usize = 256 * 1024;
+/// Expanded ingest budget for a tick that starts with held-back PTY work
+/// (issue #126): the previous tick hit the base budget, so the reader queue is
+/// backing up and drain mode must outpace the writer to avoid the ~8 MB/s
+/// ceiling imposed by the base budget at 30 Hz.
+pub(crate) const PTY_INGEST_DRAIN_BYTES_PER_TICK: usize = 2 * 1024 * 1024;
+/// Hard wall-clock guard for one poll_pty call (issue #126): even in drain
+/// mode the UI thread must never spend more than this inside ingest.
+pub(crate) const PTY_INGEST_TIME_BUDGET: Duration = Duration::from_millis(15);
 /// Minimum time between Viewport paint dirty marks under continuous PTY flood.
 /// Matches host `TICK_FAST` (~30 Hz) so Follow updates at display cadence, not per ingest chunk.
 pub(crate) const VIEWPORT_PAINT_MIN_INTERVAL: Duration = Duration::from_millis(33);
@@ -73,14 +78,24 @@ pub(crate) const VIEWPORT_PAINT_MIN_INTERVAL: Duration = Duration::from_millis(3
 /// tab switch / filter toggle / zoom notch.
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(750);
 
-
+mod caret;
 mod commands;
 mod events;
-mod stats;
 mod file_session;
+mod filters;
+mod ingest;
+mod launch;
+mod persist;
 mod projects;
+mod render;
 mod scroll_selection;
+mod stats;
+mod tabs;
 mod terminal_lifecycle;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use file_session::FileIoDone;
 #[cfg(test)]
 mod test_api;
 
@@ -156,6 +171,18 @@ pub struct Engine {
     /// Prewarm dedup: launch/shell keys already kicked for background
     /// resolution (hashed launch inputs + terminal id + shell pref).
     pub(crate) spawn_prewarm_seen: std::collections::HashSet<u64>,
+    /// Completed background file I/O (window reads, match scans) posted by
+    /// worker threads; drained at the head of [`Engine::tick`] (issue #55).
+    pub(crate) file_io_done: Arc<std::sync::Mutex<Vec<FileIoDone>>>,
+    /// Monotonic request id for background match-window reads (issue #55).
+    pub(crate) match_window_req: u64,
+    /// Test-only reduced match-offset cap: exercises the truncation path
+    /// (issue #150) without generating 2M+ matching lines.
+    #[cfg(test)]
+    pub(crate) match_scan_cap_override: Option<usize>,
+    /// Last external-change sweep over open file sessions (issue #151);
+    /// throttled to one stat per session per [`FILE_WATCH_INTERVAL`].
+    pub(crate) last_file_watch_at: Option<Instant>,
 }
 
 impl Engine {
@@ -243,6 +270,11 @@ impl Engine {
             config_persist_disabled: false,
             spawn_resolver: SpawnResolver::new(),
             spawn_prewarm_seen: std::collections::HashSet::new(),
+            file_io_done: Arc::new(std::sync::Mutex::new(Vec::new())),
+            match_window_req: 0,
+            #[cfg(test)]
+            match_scan_cap_override: None,
+            last_file_watch_at: None,
         };
         // Warm the pwsh probe (PATH + registry scan) off the UI thread so the
         // first `auto` shell spawn never scans synchronously (issue #59).
@@ -278,14 +310,18 @@ impl Engine {
     }
 
     pub(crate) fn active_terminal(&self) -> &TerminalState {
-        let idx = self.active_terminal.min(self.terminals.len().saturating_sub(1));
+        let idx = self
+            .active_terminal
+            .min(self.terminals.len().saturating_sub(1));
         self.terminals
             .get(idx)
             .expect("active_terminal called with no terminals")
     }
 
     pub(crate) fn active_terminal_mut(&mut self) -> &mut TerminalState {
-        let idx = self.active_terminal.min(self.terminals.len().saturating_sub(1));
+        let idx = self
+            .active_terminal
+            .min(self.terminals.len().saturating_sub(1));
         self.terminals
             .get_mut(idx)
             .expect("active_terminal_mut called with no terminals")
@@ -351,10 +387,11 @@ impl Engine {
         }
         self.poll_pty();
         self.prewarm_spawns();
+        self.apply_file_io_results();
         self.advance_file_load();
-        self.advance_pending_file_window();
         self.advance_file_match_scan();
         self.maybe_prefetch_file_window();
+        self.poll_file_changes();
         if self.rebuild_if_needed() {
             self.mark_viewport_dirty();
             if self.has_active_terminal() {
@@ -377,202 +414,6 @@ impl Engine {
             self.status_message = format!("stdin ({id}): {err}");
             self.push_event(json!({"type":"status","message": self.status_message}));
         }
-    }
-
-    /// Write dirty `projects.yaml` / `config.yaml` once the gesture burst has
-    /// gone quiet (issue #62). Called from [`Self::tick`].
-    pub(crate) fn flush_persist_if_due(&mut self) {
-        if self
-            .persist_changed_at
-            .is_some_and(|at| at.elapsed() >= PERSIST_DEBOUNCE)
-        {
-            self.flush_persist();
-        }
-    }
-
-    /// Flush debounced persistence now (debounce elapsed, or app exit via Drop).
-    pub fn flush_persist(&mut self) {
-        self.persist_changed_at = None;
-        #[cfg(test)]
-        if self.skip_projects_persist {
-            self.projects_dirty = false;
-            self.config_dirty = false;
-            return;
-        }
-        if self.projects_dirty {
-            self.projects_dirty = false;
-            if let Some(idx) = self.active_project {
-                self.projects.active_project = idx;
-            }
-            if let Err(err) = crate::core::config::save_projects_store(&self.projects) {
-                // Stay dirty: the next tick retries after the quiet period
-                // instead of silently losing the change (issue #109).
-                self.projects_dirty = true;
-                self.persist_changed_at = Some(Instant::now());
-                self.status_message = format!("Failed to save projects: {err}");
-                self.push_event(json!({"type":"status","message": self.status_message}));
-            }
-        }
-        if self.config_dirty {
-            self.config_dirty = false;
-            if let Err(err) = save_user_config(&self.config) {
-                self.config_dirty = true;
-                self.persist_changed_at = Some(Instant::now());
-                self.status_message = format!("Config save failed: {err}");
-                self.push_event(json!({"type":"status","message": self.status_message}));
-            }
-        }
-    }
-
-    /// Mark `config.yaml` changed; the write lands after [`PERSIST_DEBOUNCE`].
-    pub(crate) fn mark_config_dirty(&mut self) {
-        if self.config_persist_disabled {
-            return;
-        }
-        #[cfg(test)]
-        if self.skip_projects_persist {
-            return;
-        }
-        self.config_dirty = true;
-        self.persist_changed_at = Some(Instant::now());
-    }
-
-    pub fn terminal_caret_active(&self) -> bool {
-        self.viewport_focused
-            && self.has_active_terminal()
-            && self.active_terminal().running
-            && self.active_terminal().active_view == 0
-            && self.active_terminal().ingest.viewport_caret().is_some()
-    }
-
-    /// Device-pixel block caret rect `(x, y, w, h)` for the Slint overlay, or `None`
-    /// when the Terminal tab cannot accept input or the caret is off-screen.
-    pub fn terminal_caret_rect(&self, width: u32, height: u32) -> Option<(f32, f32, f32, f32)> {
-        if !self.terminal_caret_active() || width == 0 || height == 0 {
-            return None;
-        }
-        let metrics = self.renderer.metrics();
-        if self.paints_live_vt_grid() {
-            // Same wrap + caret-pinned scroll as live-grid paint. Bare `row * stride`
-            // ignored scroll_y after WRAP, so the overlay crawled above the prompt.
-            let wrap = self.active_view().wrap_lines;
-            let (row, col) = self.active_terminal().ingest.grid_caret()?;
-            let lines = self.active_terminal().ingest.grid_flat_lines();
-            let (scroll_y, visual_rows) =
-                self.live_vt_grid_follow_scroll(&lines, wrap, width, height, row);
-            let first_row = (scroll_y / metrics.row_stride).floor() as usize;
-            let y_offset = scroll_y - first_row as f32 * metrics.row_stride;
-            let max_rows = (height as f32 / metrics.row_stride).ceil() as usize + 1;
-            let visual = crate::viewport_layout::collect_visible_visual_lines_with_total(
-                &lines,
-                wrap,
-                width,
-                metrics.cell_width,
-                first_row,
-                max_rows,
-                Some(visual_rows),
-                None,
-            );
-            let caret = crate::viewport::ViewportCaret {
-                flat_index: row,
-                col,
-            };
-            let (cx, cy) = crate::viewport::caret_pixel_pos(
-                &lines,
-                &visual,
-                caret,
-                0,
-                y_offset,
-                LEFT_PAD as i32,
-                metrics.row_stride,
-                metrics.cell_width,
-                height,
-            )?;
-            let w = metrics.cell_width.max(1) as f32;
-            let h = metrics.row_height.max(1.0);
-            return Some((cx as f32, cy, w, h));
-        }
-        let terminal = self.active_terminal();
-        let view = terminal.active_view();
-        let flat_lines = view.flat_lines.as_ref();
-        let wrap_lines = view.wrap_lines;
-        let scroll_x = if wrap_lines {
-            0.0
-        } else {
-            terminal.scroll_x
-        };
-        let mut scroll_y = terminal.scroll_offset_y;
-        let metrics = self.renderer.metrics();
-        let rows = view.cached_visual_rows(width, metrics.cell_width, count_visual_rows);
-        if view.auto_follow && view.search_query.is_empty() && !terminal.is_file_session() {
-            let content_h = rows as f32 * metrics.row_stride;
-            scroll_y = (content_h - height as f32).max(0.0);
-        }
-        let screen = terminal.ingest.viewport_caret()?;
-        let base = flat_lines
-            .len()
-            .saturating_sub(terminal.ingest.volatile_count());
-        let caret = crate::viewport::ViewportCaret {
-            flat_index: base.saturating_add(screen.line),
-            col: screen.col,
-        };
-        let first_row = (scroll_y / metrics.row_stride).floor() as usize;
-        let y_offset = scroll_y - first_row as f32 * metrics.row_stride;
-        let x_base = if wrap_lines {
-            LEFT_PAD as i32
-        } else {
-            LEFT_PAD as i32 - scroll_x as i32
-        };
-        let max_rows = (height as f32 / metrics.row_stride).ceil() as usize + 1;
-        let index = view.ensure_visual_row_index(width, metrics.cell_width);
-        let visual = crate::viewport_layout::collect_visible_visual_lines_with_total(
-            flat_lines,
-            wrap_lines,
-            width,
-            metrics.cell_width,
-            first_row,
-            max_rows,
-            Some(index.total_rows()),
-            Some(index.as_ref()),
-        );
-        let (cx, cy) = crate::viewport::caret_pixel_pos(
-            flat_lines,
-            &visual,
-            caret,
-            0,
-            y_offset,
-            x_base,
-            metrics.row_stride,
-            metrics.cell_width,
-            height,
-        )?;
-        let w = metrics.cell_width.max(1) as f32;
-        let h = metrics.row_height.max(1.0);
-        Some((cx as f32, cy, w, h))
-    }
-
-    /// Scroll Y for Follow live-grid paint/caret: pin so the caret's flat line
-    /// stays in view (bottom-aligned). Avoids scrolling blank PTY rows below a
-    /// home cursor off the top of the viewport.
-    fn live_vt_grid_follow_scroll(
-        &self,
-        lines: &[crate::core::types::FlatLine],
-        wrap: bool,
-        width: u32,
-        height: u32,
-        caret_row: usize,
-    ) -> (f32, usize) {
-        let metrics = self.renderer.metrics();
-        let stride = metrics.row_stride;
-        let index = VisualRowIndex::rebuild(lines, wrap, width, metrics.cell_width);
-        let visual_rows = index.total_rows();
-        let max_scroll = (visual_rows as f32 * stride - height as f32).max(0.0);
-        let caret_line = caret_row.min(lines.len().saturating_sub(1));
-        let line_end = index.visual_end_of_flat(caret_line).max(1);
-        let scroll_y = (line_end as f32 * stride - height as f32)
-            .max(0.0)
-            .min(max_scroll);
-        (scroll_y, visual_rows)
     }
 
     /// Register a host wake when PTY bytes or exit are posted (from the reader thread).
@@ -683,101 +524,28 @@ impl Engine {
         last.elapsed() < VIEWPORT_PAINT_MIN_INTERVAL
     }
 
-    pub(crate) fn set_viewport_focus(&mut self, focused: bool) {
-        if self.viewport_focused == focused {
-            return;
-        }
-        self.viewport_focused = focused;
-        // Overlay caret is host-drawn; content paint is unchanged by focus alone.
-        // Unfocus: no need to dirty the bitmap (caret overlay hides independently).
-        let _ = focused;
-    }
-
-    /// Host owns blink phase; engine no longer dirties the viewport for caret blink.
-    pub(crate) fn tick_caret_blink(&mut self) {
-        // retained for tick() call site stability — blink is Slint-side now
-    }
-
     /// Reset blink phase (host shows overlay immediately while typing / on focus).
     pub fn reset_caret_blink(&mut self) {
         self.caret_blink_on = true;
         self.caret_blink_at = Instant::now();
     }
 
-    pub fn needs_render(&self) -> bool {
-        // Paint only when something actually dirtied the viewport.
-        // Live follow must not force perpetual redraw: PTY ingest, rebuild,
-        // caret blink, scroll, resize, and tab/terminal switches call
-        // mark_viewport_dirty() when content or chrome changes.
-        self.viewport_dirty
-    }
-
-    pub(crate) fn mark_viewport_dirty(&mut self) {
-        self.viewport_dirty = true;
-    }
-
-    /// Under continuous PTY flood, dirty at most once per [`VIEWPORT_PAINT_MIN_INTERVAL`]
-    /// since the last paint. When the flood queue is empty after ingest (echo / catch-up),
-    /// always dirty so the tail becomes visible promptly.
-    ///
-    /// Follow scroll MUST already have been snapped on this ingest — skipping paint must
-    /// not leave a stale `scroll_offset_y`.
-    pub(crate) fn mark_viewport_dirty_after_pty_ingest(&mut self, more_pending: bool) {
-        if !more_pending {
-            self.mark_viewport_dirty();
-            return;
-        }
-        if self.viewport_dirty {
-            return;
-        }
-        let due = match self.last_viewport_paint_at {
-            None => true,
-            Some(t) => t.elapsed() >= VIEWPORT_PAINT_MIN_INTERVAL,
-        };
-        if due {
-            self.mark_viewport_dirty();
-        }
-    }
-
-    /// Host calls after a successful Viewport Image upload (or after `render` in tests).
-    pub fn note_viewport_painted(&mut self) {
-        self.last_viewport_paint_at = Some(Instant::now());
-    }
-
-    /// Character grid size for the PTY / VT emulator.
-    ///
-    /// Rows track the viewport. Cols are `max(viewport_cols, MIN_PTY_COLS)` so a
-    /// wide window is not capped at the old fixed 120, while a narrow window
-    /// still gets a wide logical line buffer for soft-wrap / horizontal scroll.
-    pub(crate) fn viewport_pty_size(&self) -> PtySize {
-        let metrics = self.renderer.metrics();
-        let viewport_cols = max_cols(content_width(self.viewport_width), metrics.cell_width)
-            .clamp(1, u16::MAX as usize) as u16;
-        let cols = viewport_cols.max(MIN_PTY_COLS);
-        let rows = ((self.viewport_height as f32) / metrics.row_stride.max(1.0))
-            .floor()
-            .clamp(1.0, u16::MAX as f32) as u16;
-        let cell_w = metrics.cell_width.max(1);
-        let cell_h = metrics.row_stride.max(1.0).ceil() as u32;
-        PtySize {
-            cols,
+    /// TUI hosts: set PTY + ingest geometry directly in **cell units**.
+    /// [`Command::Resize`] is viewport-pixel based (bitmap hosts); a TUI
+    /// terminal emulator hands us columns/rows, not pixels, and has no font
+    /// metrics. Nothing else overrides this — bitmap hosts go through
+    /// `render()`, which a TUI host never calls.
+    pub fn set_terminal_grid(&mut self, cols: u16, rows: u16) {
+        let size = PtySize {
+            cols: cols.max(1),
             rows: rows.max(1),
-            pixel_width: (cell_w as u32)
-                .saturating_mul(cols as u32)
+            pixel_width: 8u32
+                .saturating_mul(u32::from(cols.max(1)))
                 .min(u16::MAX as u32) as u16,
-            pixel_height: cell_h
-                .saturating_mul(rows as u32)
+            pixel_height: 16u32
+                .saturating_mul(u32::from(rows.max(1)))
                 .min(u16::MAX as u32) as u16,
-        }
-    }
-
-    /// Keep PTY winsize + terminal emulator cols/rows in sync with the viewport.
-    /// Soft-wrap remains display-only (viewport pixels); PTY cols use a wide
-    /// floor so child hard-wrap does not steal the Wrap toggle's job.
-    pub(crate) fn sync_terminal_geometry(&mut self) {
-        let size = self.viewport_pty_size();
-        let cols = size.cols as usize;
-        let rows = size.rows as usize;
+        };
         for pty in self.ptys.values_mut() {
             let _ = pty.set_size(size);
         }
@@ -786,9 +554,13 @@ impl Engine {
         }
         let mut any = false;
         for term in &mut self.terminals {
-            if term.ingest.size() != (cols, rows) {
-                term.ingest
-                    .resize(cols, rows, &mut term.buffer, &mut term.parser);
+            if term.ingest.size() != (size.cols as usize, size.rows as usize) {
+                term.ingest.resize(
+                    size.cols as usize,
+                    size.rows as usize,
+                    &mut term.buffer,
+                    &mut term.parser,
+                );
                 any = true;
             }
         }
@@ -798,179 +570,25 @@ impl Engine {
         }
     }
 
-    pub fn render(&mut self, width: u32, height: u32, out: &mut [u8]) -> Result<(), String> {
-        let size_changed = width != self.viewport_width || height != self.viewport_height;
-        self.viewport_width = width;
-        self.viewport_height = height;
-        if size_changed {
-            self.sync_terminal_geometry();
-        }
-        self.ensure_valid_state();
+    /// TUI hosts: true when the active terminal sits at the bottom of its
+    /// scroll range (or has nothing to scroll). Wheel-down past this point
+    /// should re-enter Follow, matching conventional terminal emulators.
+    pub fn at_scroll_bottom(&self) -> bool {
         if !self.has_active_terminal() {
-            self.renderer.render_center_message(
-                out,
-                width,
-                height,
-                "No terminal",
-            )?;
-            self.viewport_dirty = false;
-            self.note_viewport_painted();
-            return Ok(());
+            return true;
         }
+        (self.max_scroll_offset() - self.active_terminal().scroll_offset_y).abs() < 1.0
+    }
 
-        let scroll_row = {
-            let terminal = self.active_terminal_mut();
-            terminal.scroll_to_row.take()
-        };
-        if let Some(row) = scroll_row {
-            self.scroll_to_row_index(row);
-        }
-
-        // FILES: never paint with local scroll past the loaded window (black frames).
-        if self.active_terminal().is_file_session() && self.active_terminal().file_backed.is_some()
-        {
-            let local_max = self.local_window_max_scroll();
-            let terminal = self.active_terminal_mut();
-            if terminal.scroll_offset_y > local_max {
-                terminal.scroll_offset_y = local_max;
-            }
-        }
-
-        if self.paints_live_vt_grid() {
-            // Native Follow: paint the live screen only. Scroll keeps the caret
-            // in view (WRAP may grow visual height); never the capped scrollback ring.
-            let wrap = self.active_view().wrap_lines;
-            let lines = self.active_terminal().ingest.grid_flat_lines();
-            let caret_row = self
-                .active_terminal()
-                .ingest
-                .grid_caret()
-                .map(|(r, _)| r)
-                .unwrap_or(0);
-            let (scroll_y, visual_rows) =
-                self.live_vt_grid_follow_scroll(&lines, wrap, width, height, caret_row);
-            self.renderer.render_with_total(
-                out,
-                width,
-                height,
-                &lines,
-                scroll_y,
-                0.0,
-                wrap,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(visual_rows),
-                None,
-            )?;
-            let max = self.max_scroll_offset();
-            self.active_terminal_mut().scroll_offset_y = max;
-            self.viewport_dirty = false;
-            self.note_viewport_painted();
-            return Ok(());
-        }
-
-        let (auto_follow, wrap_lines, flat_lines, search_pattern, active_match, running, scroll_offset_y, scroll_x, selection) = {
-            let terminal = self.active_terminal();
-            let view = terminal.active_view();
-            (
-                // Find chrome owns search: a live query pins the viewport on matches
-                // (no Follow). Closing Find must SearchSet empty or this stays frozen.
-                // File sessions never Follow.
-                !terminal.is_file_session()
-                    && view.auto_follow
-                    && view.search_query.is_empty(),
-                view.wrap_lines,
-                Arc::clone(&view.flat_lines),
-                view.search_pattern.clone(),
-                view.search_matches.get(view.search_match_index).copied(),
-                terminal.running,
-                terminal.scroll_offset_y,
-                terminal.scroll_x,
-                terminal.selection,
-            )
-        };
-        let filter_draft_pattern = self.filter_draft_pattern.clone();
-
-        let mut scroll_offset_y = scroll_offset_y;
-        if auto_follow {
-            let metrics = self.renderer.metrics();
-            let rows = self.active_view().cached_visual_rows(
-                width,
-                metrics.cell_width,
-                count_visual_rows,
-            );
-            let content_h = rows as f32 * metrics.row_stride;
-            let new_scroll = (content_h - height as f32).max(0.0);
-            if (new_scroll - scroll_offset_y).abs() > 0.01 {
-                self.mark_viewport_dirty();
-            }
-            scroll_offset_y = new_scroll;
-            self.active_terminal_mut().scroll_offset_y = scroll_offset_y;
-        } else if !self.active_terminal().is_file_session() {
-            // Live-grid Follow uses a taller (ring + screen) range. After
-            // leaving Follow, clamp so overlay paint cannot skip the top.
-            let local_max = self.local_window_max_scroll();
-            if scroll_offset_y > local_max {
-                scroll_offset_y = local_max;
-                self.active_terminal_mut().scroll_offset_y = scroll_offset_y;
-            }
-        }
-
-        if !running && flat_lines.is_empty() {
-            let terminal = self.active_terminal();
-            let view = terminal.active_view();
-            let msg = if terminal.is_file_session()
-                && view.uses_match_index()
-                && view.match_scan_pos.is_some()
-            {
-                // Same text as the status bar while the whole-file match index builds.
-                self.status_message.as_str()
-            } else if terminal.is_file_session()
-                && view.uses_match_index()
-                && view.match_scan_pos.is_none()
-            {
-                "No matching lines"
-            } else if terminal.active_view == 0 {
-                EMPTY_TERMINAL_TAB_STOPPED
-            } else {
-                EMPTY_FILTER_TAB_STOPPED
-            };
-            self.renderer.render_center_message(out, width, height, msg)?;
-            self.viewport_dirty = false;
-            self.note_viewport_painted();
-            return Ok(());
-        }
-        let effective_scroll_x = if wrap_lines { 0.0 } else { scroll_x };
-
+    /// TUI hosts: mouse selection in **cell units** — the TUI has no font
+    /// metrics, so map cells to viewport pixels here. `col`/`row` are visible
+    /// slice coordinates (0 = first visible row), matching
+    /// [`Engine::visible_flat_lines`].
+    pub fn select_at_cell(&mut self, col: u16, row: u16, extend: bool, click_count: u32) {
         let metrics = self.renderer.metrics();
-        let index = self
-            .active_view()
-            .ensure_visual_row_index(width, metrics.cell_width);
-        let total_rows = index.total_rows();
-
-        // Caret is drawn by the Slint host overlay — keep the bitmap content-only.
-        self.renderer.render_with_total(
-            out,
-            width,
-            height,
-            &flat_lines,
-            scroll_offset_y,
-            effective_scroll_x,
-            wrap_lines,
-            selection.as_ref(),
-            search_pattern.as_ref(),
-            filter_draft_pattern.as_ref(),
-            active_match,
-            None,
-            Some(total_rows),
-            Some(index.as_ref()),
-        )?;
-        self.viewport_dirty = false;
-        self.note_viewport_painted();
-        Ok(())
+        let x = f32::from(col) * metrics.cell_width as f32;
+        let y = f32::from(row) * metrics.row_stride;
+        self.selection_at(x, y, extend, click_count);
     }
 
     /// Cap for stdin buffered while a spawn is still resolving (issue #59
@@ -1069,82 +687,6 @@ impl Engine {
             }
             WriteOutcome::Failed(err) => {
                 self.push_event(json!({"type":"status","message": format!("stdin: {err}")}));
-            }
-        }
-    }
-
-    pub fn set_launch(&mut self, launch: LaunchConfig) {
-        if let Some(path) = &launch.config_path {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                self.config = load_config_from_yaml(&text);
-                self.formats = merge_formats(
-                    &crate::core::config::all_format_presets(&self.config),
-                    &HashMap::new(),
-                );
-                // The in-memory config now comes from the launch file, NOT the
-                // user's config.yaml (issue #110): disable persistence so a
-                // later debounced flush cannot overwrite the user's file.
-                self.config_persist_disabled = true;
-            }
-        }
-        if let Some(preset) = launch.preset.clone() {
-            self.preset_apply(&preset);
-        }
-
-        self.auto_start_launch = launch.has_process_launch();
-        self.ensure_valid_state();
-        let default_format = self.current_format();
-        let term_size = self.viewport_pty_size();
-        let id = self.active_terminal().id.clone();
-
-        // Update active terminal's launch and reset its session state.
-        {
-            let terminal = self.active_terminal_mut();
-            if let Some(cwd) = launch.cwd.clone().filter(|s| !s.is_empty()) {
-                terminal.cwd = cwd;
-            }
-            terminal.launch = launch;
-            terminal.process_started = false;
-            terminal.running = false;
-            terminal.exit_code = None;
-            terminal.pending_spawn = None;
-            terminal.pending_stdin.clear();
-            terminal.buffer.clear();
-            terminal.ingest
-                .reset_with_size(term_size.cols as usize, term_size.rows as usize);
-            terminal.reset_viewport();
-            for view in &mut terminal.views {
-                view.clear_flat_lines();
-            }
-            if terminal.views.is_empty() {
-                let name = terminal.primary_tab_name();
-                terminal.views = vec![LogView::from_runtime(&name, Vec::new())];
-                terminal.active_view = 0;
-            }
-            terminal.sync_primary_tab_identity();
-            if terminal.is_file_session() {
-                terminal.disable_follow_all_views();
-            }
-            terminal.parser = RecordParser::new(default_format);
-        }
-
-        if let Some(mut pty) = self.ptys.remove(&id) {
-            pty.stop();
-        }
-
-        let log_file = self.active_terminal().launch.log_file.clone();
-        let has_command = self.active_terminal().launch.command.is_some();
-        if let Some(path) = log_file {
-            self.configure_active_as_file_session(&path);
-            self.active_terminal_mut().process_started = true;
-            self.start_log_file_load(&path);
-        } else if has_command {
-            self.active_terminal_mut().process_started = true;
-            self.start_launch_process();
-        } else {
-            #[cfg(not(test))]
-            {
-                self.start_interactive_shell();
             }
         }
     }
@@ -1253,553 +795,6 @@ impl Engine {
         for view in &mut terminal.views {
             view.mark_flat_lines_dirty();
         }
-    }
-
-    pub(crate) fn add_tab(&mut self) {
-        let tab_count = self.active_terminal().views.len();
-        let name = format!("Tab {}", tab_count + 1);
-        let is_file = self.active_terminal().is_file_session();
-        let terminal = self.active_terminal_mut();
-        // Filter tabs start empty (full stream); user adds include/exclude rules.
-        let mut view = LogView::from_runtime(&name, Vec::new());
-        if is_file {
-            view.auto_follow = false;
-        }
-        terminal.views.push(view);
-        terminal.active_view = terminal.views.len() - 1;
-        terminal.scroll_offset_y = 0.0;
-        terminal.scroll_x = 0.0;
-        terminal.selection = None;
-        self.mark_viewport_dirty();
-        // Flush tab strip chrome on the next tick (do not wait for the 250ms stats throttle).
-        self.last_stats_at = None;
-        self.sync_active_project_from_terminals();
-        let _ = self.rebuild_if_needed();
-    }
-
-    pub(crate) fn close_tab(&mut self, index: usize) {
-        let terminal = self.active_terminal_mut();
-        // Tab 0 is the Terminal tab — never close it.
-        if index == 0 || terminal.views.len() <= 1 || index >= terminal.views.len() {
-            return;
-        }
-        let tab = terminal.views[index].to_tab_config();
-        terminal.views.remove(index);
-        terminal.closed_tabs.push_back(tab);
-        while terminal.closed_tabs.len() > MAX_CLOSED_TABS {
-            terminal.closed_tabs.pop_front();
-        }
-        if terminal.active_view >= terminal.views.len() {
-            terminal.active_view = terminal.views.len() - 1;
-        } else if index < terminal.active_view {
-            terminal.active_view -= 1;
-        }
-        terminal.scroll_offset_y = 0.0;
-        terminal.scroll_x = 0.0;
-        terminal.selection = None;
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
-        self.sync_active_project_from_terminals();
-        let _ = self.rebuild_if_needed();
-    }
-
-    pub(crate) fn restore_tab(&mut self) {
-        let terminal = self.active_terminal_mut();
-        let Some(tab) = terminal.closed_tabs.pop_back() else {
-            return;
-        };
-        terminal.views.push(LogView::from_tab_config(tab));
-        terminal.active_view = terminal.views.len() - 1;
-        terminal.scroll_offset_y = 0.0;
-        terminal.scroll_x = 0.0;
-        terminal.selection = None;
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
-        self.sync_active_project_from_terminals();
-        let _ = self.rebuild_if_needed();
-    }
-
-    pub(crate) fn switch_tab(&mut self, index: usize) {
-        let terminal = self.active_terminal_mut();
-        if index < terminal.views.len() && index != terminal.active_view {
-            let is_file = terminal.is_file_session();
-            terminal.active_view = index;
-            terminal.scroll_offset_y = 0.0;
-            terminal.scroll_x = 0.0;
-            terminal.selection = None;
-            // Live filter tabs scan the ≤30k Record ring on select (not a
-            // FILES match index). Overlay snapshot is applied in rebuild_if_needed.
-            if index != 0 && !is_file {
-                terminal.views[index].mark_flat_lines_dirty();
-            }
-            self.mark_viewport_dirty();
-            self.last_stats_at = None;
-            self.sync_active_project_from_terminals();
-            let _ = self.rebuild_if_needed();
-        }
-    }
-
-    pub(crate) fn rename_tab(&mut self, index: usize, name: &str) {
-        let name = name.trim();
-        let terminal = self.active_terminal_mut();
-        // Tab 0 is the Terminal tab — never rename it (UI also blocks; this is defense in depth).
-        if name.is_empty() || index >= terminal.views.len() || index == 0 {
-            return;
-        }
-        terminal.views[index].name = name.to_string();
-        self.sync_active_project_from_terminals();
-    }
-
-    /// Reorder filter tabs. The Terminal tab stays at index 0 (`from`/`to` of 0 are no-ops).
-    pub(crate) fn tab_move(&mut self, from_index: usize, to_index: usize) {
-        let terminal = self.active_terminal_mut();
-        let len = terminal.views.len();
-        if len < 2 || from_index == 0 || to_index == 0 {
-            return;
-        }
-        if from_index >= len || to_index >= len || from_index == to_index {
-            return;
-        }
-        let item = terminal.views.remove(from_index);
-        terminal.views.insert(to_index, item);
-        let active = terminal.active_view;
-        terminal.active_view = if active == from_index {
-            to_index
-        } else if from_index < active && to_index >= active {
-            active - 1
-        } else if from_index > active && to_index <= active {
-            active + 1
-        } else {
-            active
-        };
-        // Tab strip chrome; viewport content may change if active moved.
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn search_set(
-        &mut self,
-        query: &str,
-        regex: bool,
-        case_sensitive: bool,
-        whole_word: bool,
-    ) {
-        let view = self.active_view_mut();
-        // Identical query: do not mark search dirty. Hybrid UI flushes SearchSet
-        // before every next/prev; re-marking would set search_jump_to_last and
-        // reset the match index to the last hit on the next rebuild.
-        if view.search_query == query
-            && view.search_regex == regex
-            && view.search_case_sensitive == case_sensitive
-            && view.search_whole_word == whole_word
-        {
-            return;
-        }
-        view.search_query = query.to_string();
-        view.search_regex = regex;
-        view.search_case_sensitive = case_sensitive;
-        view.search_whole_word = whole_word;
-        view.mark_search_changed();
-        let need_scrollback = !query.is_empty();
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
-        if need_scrollback {
-            self.materialize_live_terminal_tab();
-        }
-        // Persist the search query with the workspace snapshot (#109); the
-        // debounce collapses repeated keystrokes into one write.
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn filter_draft_set(&mut self, pattern: &str, use_regex: bool) {
-        if self.filter_draft_query == pattern && self.filter_draft_regex == use_regex {
-            return;
-        }
-        self.filter_draft_query = pattern.to_string();
-        self.filter_draft_regex = use_regex;
-        self.filter_draft_pattern =
-            crate::core::visible::compile_filter_draft_pattern(pattern, use_regex);
-        self.mark_viewport_dirty();
-    }
-
-    pub(crate) fn search_goto(&mut self, delta: i32) {
-        let scroll_row = {
-            let terminal = self.active_terminal_mut();
-            let view = &mut terminal.views[terminal.active_view];
-            let n = view.search_matches.len();
-            if n == 0 {
-                return;
-            }
-            if delta < 0 {
-                view.search_match_index = (view.search_match_index + n - 1) % n;
-            } else {
-                view.search_match_index = (view.search_match_index + 1) % n;
-            }
-            view.search_matches
-                .get(view.search_match_index)
-                .map(|m| m.line_index)
-        };
-        if let Some(row) = scroll_row {
-            self.active_terminal_mut().scroll_to_row = Some(row);
-            // Must dirty: UI only re-renders when needs_render(), and
-            // scroll_to_row is applied inside render().
-            self.mark_viewport_dirty();
-            self.last_stats_at = None;
-        }
-    }
-
-    pub(crate) fn push_lines(
-        &mut self,
-        lines: impl IntoIterator<Item = String>,
-        mark_dirty: bool,
-    ) {
-        let tracking_window = self.has_active_terminal()
-            && (self.active_terminal().file_load.is_some()
-                || self.active_terminal().file_backed.is_some());
-        let mut shifted = false;
-        {
-            let terminal = self.active_terminal_mut();
-            if terminal.buffer.last_is_overwrite_single_line() {
-                terminal.buffer.set_last_overwrite(false);
-            }
-            for line in lines {
-                let records = terminal.parser.push_line(line);
-                for record in records {
-                    let shifted_lines = terminal.buffer.add(record);
-                    if tracking_window && shifted_lines > 0 {
-                        terminal.buffer_line_start += shifted_lines as u64;
-                        shifted = true;
-                    }
-                }
-            }
-            terminal.last_line_at = Some(Instant::now());
-        }
-        if mark_dirty || shifted {
-            self.mark_all_views_dirty();
-        }
-        // Only paint when callers ask (`mark_dirty`) or the window shifted.
-        // File load uses mark_dirty=false and paints explicitly at first/last batch.
-        if mark_dirty || shifted {
-            self.mark_viewport_dirty();
-        }
-    }
-
-    pub(crate) fn flush_idle_pending(&mut self) {
-        if !self.has_active_terminal() {
-            return;
-        }
-        let should_flush = self
-            .active_terminal()
-            .last_line_at
-            .is_some_and(|at| at.elapsed() >= PENDING_IDLE_FLUSH);
-        if !should_flush {
-            return;
-        }
-        let flushed = {
-            let terminal = self.active_terminal_mut();
-            terminal.ingest.idle_flush(&mut terminal.buffer, &mut terminal.parser)
-        };
-        if flushed {
-            self.mark_all_views_dirty();
-        }
-        self.active_terminal_mut().last_line_at = None;
-    }
-
-    pub(crate) fn add_filter(&mut self, filter_type: FilterType, pattern: &str, use_regex: bool) {
-        if pattern.is_empty() || self.active_terminal().active_view == 0 {
-            return;
-        }
-        let kind = match filter_type {
-            FilterType::Include => "include",
-            FilterType::Exclude => "exclude",
-        };
-        let next_id = next_filter_id(self.active_view().filters(), kind);
-        let (compiled, regex_notice) = compile_filter_checked(FilterRule {
-            id: next_id,
-            name: None,
-            filter_type,
-            pattern: pattern.to_string(),
-            enabled: true,
-            use_regex,
-            regex: None,
-        });
-        self.active_view_mut().filters_mut().push(compiled);
-        if let Some(notice) = regex_notice {
-            self.status_message = notice;
-            self.push_event(json!({"type":"status","message": self.status_message}));
-        }
-        self.reset_file_match_viewport();
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn filter_toggle(&mut self, id: &str, enabled: bool) {
-        if self.active_terminal().active_view == 0 {
-            return;
-        }
-        if let Some(filter) = self
-            .active_view_mut()
-            .filters_mut()
-            .iter_mut()
-            .find(|f| f.id == id)
-        {
-            filter.enabled = enabled;
-        }
-        self.reset_file_match_viewport();
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn filter_remove(&mut self, id: &str) {
-        if self.active_terminal().active_view == 0 {
-            return;
-        }
-        self.active_view_mut().filters_mut().retain(|f| f.id != id);
-        self.reset_file_match_viewport();
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn filter_update(&mut self, id: &str, pattern: &str) {
-        if pattern.is_empty() || self.active_terminal().active_view == 0 {
-            return;
-        }
-        let Some(existing) = self.active_view().filters().iter().find(|f| f.id == id) else {
-            return;
-        };
-        if existing.pattern == pattern {
-            return;
-        }
-        let mut rule = existing.clone();
-        rule.pattern = pattern.to_string();
-        rule.regex = None;
-        let (compiled, regex_notice) = compile_filter_checked(rule);
-        if let Some(slot) = self
-            .active_view_mut()
-            .filters_mut()
-            .iter_mut()
-            .find(|f| f.id == id)
-        {
-            *slot = compiled;
-        }
-        if let Some(notice) = regex_notice {
-            self.status_message = notice;
-            self.push_event(json!({"type":"status","message": self.status_message}));
-        }
-        self.reset_file_match_viewport();
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn restart(&mut self) {
-        let (has_command, log_file) = {
-            let launch = &self.active_terminal().launch;
-            (launch.command.is_some(), launch.log_file.clone())
-        };
-        let format = self.current_format();
-        let term = self.viewport_pty_size();
-        {
-            let terminal = self.active_terminal_mut();
-            terminal.buffer.clear();
-            terminal.file_backed = None;
-            terminal.pending_file_window = None;
-            terminal.buffer_line_start = 0;
-            terminal.buffer_line_end = 0;
-            terminal.parser = RecordParser::new(format);
-            terminal.ingest
-                .reset_with_size(term.cols as usize, term.rows as usize);
-            for view in &mut terminal.views {
-                view.clear_flat_lines();
-            }
-            terminal.scroll_offset_y = 0.0;
-        }
-        let id = self.active_terminal().id.clone();
-        if let Some(mut pty) = self.ptys.remove(&id) {
-            pty.stop();
-        }
-        if has_command {
-            self.start_launch_process();
-        } else if let Some(path) = log_file {
-            self.active_terminal_mut().running = false;
-            self.start_log_file_load(&path);
-        } else {
-            // Interactive shell: clear log and spawn a fresh shell.
-            self.start_interactive_shell();
-        }
-    }
-
-    pub(crate) fn set_format(&mut self, id: &str) {
-        if !self.formats.contains_key(id) || !self.has_active_terminal() {
-            return;
-        }
-        if self.format_id == id {
-            return;
-        }
-        self.format_id = id.to_string();
-        let format = self.current_format();
-        {
-            let terminal = self.active_terminal_mut();
-            if let Some(rec) = terminal.parser.flush_pending() {
-                terminal.buffer.add(rec);
-            }
-            let lines = terminal.buffer.raw_lines();
-            let records = reparse_lines(&lines, format.clone());
-            terminal.buffer.replace_all(records);
-            terminal.parser = RecordParser::new(format);
-            terminal.selection = None;
-        }
-        self.mark_all_views_dirty();
-        self.rebuild_if_needed();
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
-        self.status_message = format!("Format: {id}");
-        self.push_event(json!({"type":"status","message": self.status_message}));
-    }
-
-    pub(crate) fn preset_apply(&mut self, name: &str) {
-        if !self.config.presets.contains_key(name) {
-            self.status_message = format!("Preset not found: {name}");
-            self.push_event(json!({"type":"status","message": self.status_message}));
-            return;
-        }
-        let filters = load_preset(&self.config, name);
-        self.preset_name = name.to_string();
-        let on_terminal_tab = self.active_terminal().active_view == 0;
-        if on_terminal_tab {
-            // The Terminal tab keeps an unfiltered stream; presets do nothing there.
-            self.active_view_mut().clear_filters();
-        } else {
-            self.active_view_mut().set_filters(filters);
-        }
-        self.rebuild_if_needed();
-        self.status_message = format!("Applied preset: {name}");
-        self.push_event(json!({"type":"status","message": self.status_message}));
-        // Presets replace the whole filter set — snapshot it (#109).
-        self.sync_active_project_from_terminals();
-    }
-
-    pub(crate) fn preset_get(&mut self, name: &str) {
-        match self.config.presets.get(name) {
-            Some(preset) => {
-                let filters: Vec<serde_json::Value> = preset
-                    .filters
-                    .iter()
-                    .map(|f| {
-                        json!({
-                            "id": f.id,
-                            "type": f.filter_type,
-                            "pattern": f.pattern,
-                            "enabled": f.enabled,
-                            "use_regex": f.use_regex,
-                        })
-                    })
-                    .collect();
-                self.push_event(json!({
-                    "type": "preset",
-                    "name": name,
-                    "filters": filters,
-                }));
-            }
-            None => {
-                self.push_event(json!({
-                    "type": "preset",
-                    "name": name,
-                    "filters": [],
-                    "error": "not found",
-                }));
-            }
-        }
-    }
-
-    pub(crate) fn set_settings(&mut self, max_scrollback_lines: usize) {
-        let capped = clamp_max_scrollback_lines(max_scrollback_lines);
-        self.config.max_scrollback_lines = capped;
-        for terminal in &mut self.terminals {
-            let shifted = terminal.buffer.set_max_records(capped);
-            if shifted > 0 {
-                terminal.buffer_line_start += shifted as u64;
-            }
-            for view in &mut terminal.views {
-                view.mark_flat_lines_dirty();
-            }
-        }
-        self.mark_config_dirty();
-        self.status_message = format!("Settings saved (max scrollback: {capped})");
-        self.push_event(json!({"type":"status","message": self.status_message}));
-        self.mark_viewport_dirty();
-    }
-
-    pub(crate) fn set_sidebar_expanded(&mut self, terminals: bool, files: bool) {
-        self.config.terminals_section_expanded = terminals;
-        self.config.files_section_expanded = files;
-        self.mark_config_dirty();
-        self.last_stats_at = None;
-    }
-
-    pub(crate) fn set_viewport_font_size(&mut self, size: f32) {
-        let capped = clamp_viewport_font_size(size);
-        self.config.viewport_font_size = capped;
-        self.renderer.set_font_size(capped);
-        self.sync_terminal_geometry();
-        // Wrap/scroll layout depends on cell metrics.
-        if self.has_active_terminal() {
-            for view in &mut self.active_terminal_mut().views {
-                view.mark_flat_lines_dirty();
-            }
-        }
-        self.mark_config_dirty();
-        self.status_message = format!("Viewport font size: {capped:.0} pt");
-        self.push_event(json!({"type":"status","message": self.status_message}));
-        self.mark_viewport_dirty();
-        self.last_stats_at = None;
-    }
-
-    pub(crate) fn preset_save(&mut self, name: &str, filters: Vec<FilterRule>) {
-        let name = name.trim();
-        if name.is_empty() {
-            return;
-        }
-        let (filters, notices): (Vec<_>, Vec<_>) = filters
-            .into_iter()
-            .map(compile_filter_checked)
-            .fold(
-                (Vec::new(), Vec::new()),
-                |(mut rules, mut warns), (r, w)| {
-                    rules.push(r);
-                    warns.extend(w);
-                    (rules, warns)
-                },
-            );
-        for w in notices {
-            self.push_event(json!({"type":"status","message": w}));
-        }
-        self.config.presets.insert(
-            name.to_string(),
-            PresetConfig { filters },
-        );
-        self.mark_config_dirty();
-        self.status_message = format!("Preset saved: {name}");
-        self.push_event(json!({"type":"status","message": self.status_message}));
-    }
-
-    pub(crate) fn preset_delete(&mut self, name: &str) {
-        if !self.config.presets.contains_key(name) {
-            return;
-        }
-        self.config.presets.remove(name);
-        if self.preset_name == name {
-            self.preset_name = self.config.default_preset.clone();
-        }
-        self.mark_config_dirty();
-        self.status_message = format!("Preset deleted: {name}");
-        self.push_event(json!({"type":"status","message": self.status_message}));
-    }
-
-    pub(crate) fn preset_create_from_tab(&mut self, name: &str) {
-        let name = name.trim();
-        if name.is_empty() {
-            return;
-        }
-        let filters = self.active_view().filters().to_vec();
-        self.preset_save(name, filters);
-        self.preset_name = name.to_string();
     }
 }
 

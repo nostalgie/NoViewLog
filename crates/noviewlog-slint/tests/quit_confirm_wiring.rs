@@ -32,9 +32,7 @@ fn quit_overlay_uses_form_dialog_and_hide() {
         src.contains("ok-text: \"Close\""),
         "primary action is Close"
     );
-    let confirm = src
-        .find("function confirm-quit()")
-        .expect("confirm-quit");
+    let confirm = src.find("function confirm-quit()").expect("confirm-quit");
     let chunk = &src[confirm..confirm.saturating_add(160).min(src.len())];
     assert!(
         chunk.contains("root.hide()"),

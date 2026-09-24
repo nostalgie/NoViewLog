@@ -7,8 +7,7 @@ use std::path::PathBuf;
 #[test]
 fn project_delete_goes_through_confirm_step() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/projects-dialog.slint");
-    let src = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let icon_idx = src.find("kind: \"close\";").expect("delete icon");
     let chunk = &src[icon_idx..icon_idx.saturating_add(300).min(src.len())];
     assert!(

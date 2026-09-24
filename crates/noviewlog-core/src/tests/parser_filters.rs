@@ -1,13 +1,15 @@
+use super::sample_records;
 use crate::core::filter::FilterEngine;
 use crate::core::formats::get_builtin_format;
 use crate::core::parser::{reparse_lines, RecordParser};
 use crate::core::types::{compile_filter, FilterRule, FilterType, LogLevel, LogRecord};
-use super::sample_records;
 
 #[test]
 fn groups_stack_trace_into_single_record() {
     let mut parser = RecordParser::new(get_builtin_format("node-default"));
-    assert!(parser.push_line("Error: something failed".to_string()).is_empty());
+    assert!(parser
+        .push_line("Error: something failed".to_string())
+        .is_empty());
     assert!(parser
         .push_line("    at Object.<anonymous> (/app/index.js:10:5)".to_string())
         .is_empty());
@@ -36,7 +38,9 @@ fn starts_new_record_on_timestamp_line() {
 #[test]
 fn parses_pino_json_one_line_per_record() {
     let mut parser = RecordParser::new(get_builtin_format("pino"));
-    assert!(parser.push_line(r#"{"level":30,"msg":"hello"}"#.to_string()).is_empty());
+    assert!(parser
+        .push_line(r#"{"level":30,"msg":"hello"}"#.to_string())
+        .is_empty());
     let records = parser.push_line(r#"{"level":50,"msg":"error"}"#.to_string());
     assert_eq!(records.len(), 1);
     assert!(records[0].text.contains("hello"));
@@ -260,9 +264,7 @@ fn filter_update_terminal_tab_and_empty_are_noop() {
         .send_command_json(r#"{"cmd":"tab_add"}"#)
         .expect("tab_add");
     engine
-        .send_command_json(
-            r#"{"cmd":"filter_add","type":"exclude","pattern":"warn","regex":true}"#,
-        )
+        .send_command_json(r#"{"cmd":"filter_add","type":"exclude","pattern":"warn","regex":true}"#)
         .expect("filter_add");
 
     let before = engine.active_tab_config_for_test();
@@ -376,16 +378,15 @@ fn severity_applies_after_include_exclude() {
     let empty = std::collections::HashSet::new();
     let all_sev = rebuild_flat_lines_for_records(&records, &filter, SeverityFilter::All, &empty);
     assert_eq!(all_sev.len(), 2); // Error + info
-    let only_err =
-        rebuild_flat_lines_for_records(&records, &filter, SeverityFilter::Error, &empty);
+    let only_err = rebuild_flat_lines_for_records(&records, &filter, SeverityFilter::Error, &empty);
     assert_eq!(only_err.len(), 1);
     assert!(only_err[0].raw.contains("Error"));
 }
 
 #[test]
 fn severity_set_command_updates_view() {
-    use crate::Command;
     use crate::engine::Engine;
+    use crate::Command;
 
     let mut engine = Engine::new();
     engine
@@ -393,17 +394,11 @@ fn severity_set_command_updates_view() {
             mode: "error".into(),
         })
         .expect("severity set");
-    assert_eq!(
-        engine.active_view_severity_for_test(),
-        "error"
-    );
+    assert_eq!(engine.active_view_severity_for_test(), "error");
     engine
         .send_command_json(r#"{"cmd":"severity_set","mode":"unleveled"}"#)
         .expect("json severity");
-    assert_eq!(
-        engine.active_view_severity_for_test(),
-        "unleveled"
-    );
+    assert_eq!(engine.active_view_severity_for_test(), "unleveled");
 }
 
 #[test]
@@ -428,8 +423,7 @@ fn multiline_records_default_collapsed_and_toggle() {
     }];
     let engine = FilterEngine::default();
     let empty = HashSet::new();
-    let collapsed =
-        rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::All, &empty);
+    let collapsed = rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::All, &empty);
     assert_eq!(collapsed.len(), 1);
     assert!(collapsed[0].collapsed);
     assert_eq!(collapsed[0].hidden_line_count, 2);
@@ -437,8 +431,7 @@ fn multiline_records_default_collapsed_and_toggle() {
 
     let mut expanded = HashSet::new();
     expanded.insert(10);
-    let open =
-        rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::All, &expanded);
+    let open = rebuild_flat_lines_for_records(&records, &engine, SeverityFilter::All, &expanded);
     assert_eq!(open.len(), 3);
     assert!(!open[0].collapsed);
     assert!(open[0].collapsible);
@@ -476,8 +469,8 @@ fn collapse_respects_exclude_on_full_text() {
 
 #[test]
 fn expand_collapse_all_commands() {
-    use crate::Command;
     use crate::engine::Engine;
+    use crate::Command;
 
     let mut engine = Engine::new();
     engine.push_lines_for_test([
@@ -510,8 +503,6 @@ fn expand_collapse_all_commands() {
     assert_eq!(engine.active_flat_line_count_for_test(), collapsed_count);
 }
 
-
-
 #[test]
 fn invalid_regex_filter_surfaces_literal_fallback_notice() {
     // Issue #75: a typo like `[[error` must not silently become a
@@ -523,11 +514,17 @@ fn invalid_regex_filter_surfaces_literal_fallback_notice() {
         .send_command_json(r#"{"cmd":"tab_add"}"#)
         .expect("tab_add");
     engine
-        .send_command_json(r#"{"cmd":"filter_add","type":"include","pattern":"[[error","regex":true}"#)
+        .send_command_json(
+            r#"{"cmd":"filter_add","type":"include","pattern":"[[error","regex":true}"#,
+        )
         .expect("filter_add invalid regex");
 
     let cfg = engine.active_tab_config_for_test();
-    assert_eq!(cfg.filters.len(), 1, "rule is still added (literal fallback)");
+    assert_eq!(
+        cfg.filters.len(),
+        1,
+        "rule is still added (literal fallback)"
+    );
     assert!(
         engine.status_message_for_test().contains("Invalid regex"),
         "status: {}",

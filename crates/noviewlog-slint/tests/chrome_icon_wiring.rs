@@ -21,7 +21,8 @@ fn slint_sources() -> Vec<(PathBuf, String)> {
         if path.extension().and_then(|e| e.to_str()) != Some("slint") {
             continue;
         }
-        let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let src =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         out.push((path, src));
     }
     assert!(!out.is_empty(), "expected ui/*.slint files");
@@ -59,7 +60,13 @@ fn chrome_text_has_no_banned_icon_glyphs() {
         for lit in text_literals(&src) {
             for ch in lit.chars() {
                 if BANNED_ICON_CHARS.contains(&ch) {
-                    hits.push(format!("{}: text {:?} contains U+{:04X} '{}'", path.display(), lit, ch as u32, ch));
+                    hits.push(format!(
+                        "{}: text {:?} contains U+{:04X} '{}'",
+                        path.display(),
+                        lit,
+                        ch as u32,
+                        ch
+                    ));
                 }
             }
         }

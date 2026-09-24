@@ -14,7 +14,7 @@ use crate::core::parser::RecordParser;
 use crate::core::terminal::TerminalIngest;
 use crate::core::types::{LaunchConfig, LogFormat, TabConfig};
 use crate::file_index::FileBackedLog;
-use crate::file_load::FileLoadState;
+use crate::file_load::FileLoadHandle;
 use crate::log_view::{LogView, TERMINAL_TAB_NAME};
 use crate::viewport_layout::TextSelection;
 
@@ -73,9 +73,12 @@ pub struct TerminalState {
     pub scroll_x: f32,
     pub selection: Option<TextSelection>,
     pub scroll_to_row: Option<usize>,
-    pub file_load: Option<FileLoadState>,
+    pub file_load: Option<FileLoadHandle>,
     /// On-demand reads after a file load completes.
     pub file_backed: Option<FileBackedLog>,
+    /// True when the watched file changed on disk after open (issue #151):
+    /// truncated, appended, rewritten, or deleted. Cleared by a reload.
+    pub file_changed: bool,
     /// First raw file line number currently held in `buffer`.
     pub buffer_line_start: u64,
     /// One past the last raw file line in `buffer`.
@@ -122,6 +125,7 @@ impl TerminalState {
             scroll_to_row: None,
             file_load: None,
             file_backed: None,
+            file_changed: false,
             buffer_line_start: 0,
             buffer_line_end: 0,
             pending_file_window: None,
@@ -132,7 +136,12 @@ impl TerminalState {
 
     /// Sidebar / tab label: custom title when set; else file basename or cwd segment.
     pub fn label(&self) -> String {
-        if let Some(title) = self.custom_title.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(title) = self
+            .custom_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return title.to_string();
         }
         if let Some(path) = self.file_session_path() {
@@ -157,9 +166,7 @@ impl TerminalState {
 
     /// View-only log file terminal (no shell / no stdin).
     pub fn is_file_session(&self) -> bool {
-        self.file_load.is_some()
-            || self.file_backed.is_some()
-            || self.launch.log_file.is_some()
+        self.file_load.is_some() || self.file_backed.is_some() || self.launch.log_file.is_some()
     }
 
     /// Basename for the pinned primary tab when this is a file session.

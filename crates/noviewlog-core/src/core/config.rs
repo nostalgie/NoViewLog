@@ -224,10 +224,7 @@ pub fn project_config_to_store(projects: &[ProjectConfig], active_project: usize
     }
 }
 
-pub fn program_workspace_snapshot(
-    tabs: &[TabConfig],
-    active_tab: usize,
-) -> WorkspaceConfig {
+pub fn program_workspace_snapshot(tabs: &[TabConfig], active_tab: usize) -> WorkspaceConfig {
     views_to_workspace(tabs, active_tab)
 }
 
@@ -275,7 +272,7 @@ fn migrate_legacy_config_if_needed(new_path: &Path) {
 }
 
 fn parse_yaml_config(yaml_text: &str) -> AppConfig {
-    serde_yaml::from_str(yaml_text).unwrap_or_default()
+    serde_yaml::from_str(yaml_text).unwrap_or_else(|_| load_bundled_config())
 }
 
 pub fn merge_config_sources(sources: &[AppConfig]) -> AppConfig {
@@ -290,13 +287,16 @@ pub fn merge_config_sources(sources: &[AppConfig]) -> AppConfig {
         formats: HashMap::new(),
         presets: HashMap::new(),
         workspaces: HashMap::new(),
+        tui_ssh_profiles: Vec::new(),
     };
 
     for source in sources {
-        if source.default_format.is_empty() {
-            continue;
+        // An empty default_format means "no value for this field", not
+        // "skip the whole source" — dropping everything else would wipe the
+        // user's presets/formats/shell on the next config flush (issue #160).
+        if !source.default_format.is_empty() {
+            merged.default_format = source.default_format.clone();
         }
-        merged.default_format = source.default_format.clone();
         merged.default_preset = source.default_preset.clone();
         merged.max_scrollback_lines = clamp_max_scrollback_lines(source.max_scrollback_lines);
         merged.viewport_font_size = clamp_viewport_font_size(source.viewport_font_size);
@@ -308,6 +308,9 @@ pub fn merge_config_sources(sources: &[AppConfig]) -> AppConfig {
         merged.formats.extend(source.formats.clone());
         merged.presets.extend(source.presets.clone());
         merged.workspaces.extend(source.workspaces.clone());
+        if !source.tui_ssh_profiles.is_empty() {
+            merged.tui_ssh_profiles = source.tui_ssh_profiles.clone();
+        }
     }
 
     merged.max_scrollback_lines = clamp_max_scrollback_lines(merged.max_scrollback_lines);
@@ -409,12 +412,6 @@ pub fn all_format_presets(config: &AppConfig) -> HashMap<String, crate::core::ty
     let mut presets = builtin_format_presets();
     presets.extend(config.formats.clone());
     presets
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        load_bundled_config()
-    }
 }
 
 #[cfg(test)]
@@ -625,5 +622,24 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_default_format_does_not_drop_the_source() {
+        // A user config with an empty default_format but real settings must
+        // still contribute those settings (issue #160).
+        let user = parse_yaml_config(
+            "default_format: \"\"\nmax_scrollback_lines: 4242\npresets:\n  mine:\n    filters: []\n",
+        );
+        let merged = merge_config_sources(&[load_bundled_config(), user]);
+        assert_eq!(
+            merged.default_format, "node-default",
+            "empty user default_format falls back to the earlier source"
+        );
+        assert_eq!(merged.max_scrollback_lines, 4242);
+        assert!(
+            merged.presets.contains_key("mine"),
+            "user presets must survive an empty default_format"
+        );
     }
 }

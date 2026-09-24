@@ -140,7 +140,7 @@ echo "==> Exporting main (export-ignore strips internal materials)..."
 git archive --format=tar --output="$TAR" main
 tar -xf "$TAR" -C "$STAGE"
 
-for forbidden in openspec .cursor .kilo release-notes AGENTS.md; do
+for forbidden in openspec .cursor .kilo release-notes docs-private AGENTS.md; do
   if [[ -e "$STAGE/$forbidden" ]]; then
     echo "error: export sanity check failed: '$forbidden' is in the archive. Add it to .gitattributes export-ignore." >&2
     exit 1

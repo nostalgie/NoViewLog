@@ -2,11 +2,11 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::core::ansi::{overlay_styles, parse_ansi_line, strip_ansi};
-use crate::core::buffer::RecordBuffer;
-use crate::core::filter::FilterEngine;
-use crate::core::types::{
-    compile_filter, FlatLine, FilterRule, FilterType, SearchMatch, SeverityFilter, TextSegment,
+use crate::ansi::{overlay_styles, parse_ansi_line, strip_ansi};
+use crate::buffer::RecordBuffer;
+use crate::filter::FilterEngine;
+use crate::types::{
+    compile_filter, FilterRule, FilterType, FlatLine, SearchMatch, SeverityFilter, TextSegment,
     TextStyle,
 };
 
@@ -25,7 +25,7 @@ pub fn rebuild_flat_lines(
 }
 
 pub fn rebuild_flat_lines_for_records(
-    records: &[crate::core::types::LogRecord],
+    records: &[crate::types::LogRecord],
     filter_engine: &FilterEngine,
     severity: SeverityFilter,
     expanded_record_ids: &HashSet<u64>,
@@ -98,7 +98,7 @@ pub fn flat_lines_from_raw_lines(lines: &[String], id_base: u64) -> Vec<FlatLine
 
 /// Records that need expand so a search hit on a non-preview line becomes visible.
 pub fn record_ids_needing_expand_for_search(
-    records: &[crate::core::types::LogRecord],
+    records: &[crate::types::LogRecord],
     filter_engine: &FilterEngine,
     severity: SeverityFilter,
     expanded_record_ids: &HashSet<u64>,
@@ -262,7 +262,10 @@ pub fn compile_search_regex(query: &str, regex_mode: bool) -> Result<Arc<Regex>,
     }
 }
 
-pub fn collect_search_matches(flat_lines: &[FlatLine], pattern: &SearchPattern) -> Vec<SearchMatch> {
+pub fn collect_search_matches(
+    flat_lines: &[FlatLine],
+    pattern: &SearchPattern,
+) -> Vec<SearchMatch> {
     let mut out = Vec::new();
     append_search_matches(&mut out, flat_lines, 0, pattern);
     out

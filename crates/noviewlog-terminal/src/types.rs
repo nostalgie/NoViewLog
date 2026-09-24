@@ -284,6 +284,26 @@ pub struct AppConfig {
     pub presets: std::collections::HashMap<String, PresetConfig>,
     #[serde(default)]
     pub workspaces: std::collections::HashMap<String, WorkspaceConfig>,
+    /// SSH connection profiles for the TUI host (system `ssh` client in the
+    /// engine PTY). Targets only — no secrets; auth stays with ssh/agent.
+    /// Ignored by the GUI host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tui_ssh_profiles: Vec<SshProfile>,
+}
+
+/// One named SSH connection of the TUI host (`terminals/tui-ssh`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshProfile {
+    pub name: String,
+    /// Forwarded to `ssh` verbatim as a single argv element
+    /// (`user@host`, bare host, or an `ssh_config` alias).
+    pub target: String,
+    /// `0` = omit `-p` (ssh defaults / ssh_config decide).
+    #[serde(default)]
+    pub port: u16,
+    /// Extra ssh arguments, whitespace-split at use (e.g. `-J bastion`).
+    #[serde(default)]
+    pub extra_args: String,
 }
 
 pub const DEFAULT_MAX_SCROLLBACK_LINES: usize = 10_000;
@@ -375,7 +395,7 @@ impl LaunchConfig {
     }
 }
 
-pub(crate) fn default_true() -> bool {
+pub fn default_true() -> bool {
     true
 }
 
@@ -442,9 +462,7 @@ pub fn compile_filter(mut rule: FilterRule) -> FilterRule {
         compile_regex(&rule.pattern)
     } else {
         let escaped = regex::escape(&rule.pattern);
-        Arc::new(
-            Regex::new(&format!("(?i){escaped}")).expect("escaped literal pattern is valid"),
-        )
+        Arc::new(Regex::new(&format!("(?i){escaped}")).expect("escaped literal pattern is valid"))
     });
     rule
 }

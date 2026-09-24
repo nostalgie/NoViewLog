@@ -13,7 +13,11 @@ use crate::core::types::LaunchConfig;
 use crate::engine::Engine;
 use std::time::{Duration, Instant};
 
-fn pump_until(engine: &mut Engine, mut done: impl FnMut(&Engine, &str) -> bool, seconds: u64) -> bool {
+fn pump_until(
+    engine: &mut Engine,
+    mut done: impl FnMut(&Engine, &str) -> bool,
+    seconds: u64,
+) -> bool {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < deadline {
         engine.poll_pty_for_test();
@@ -56,7 +60,11 @@ fn conpty_typed_line_echoes_resizes_and_exits() {
 
     // Typed line (CRLF conventions) executes and its output is visible.
     engine.handle_key(b"echo NOVIEWLOG_MARKER\r");
-    let got_marker = pump_until(&mut engine, |_, screen| screen.contains("NOVIEWLOG_MARKER"), 15);
+    let got_marker = pump_until(
+        &mut engine,
+        |_, screen| screen.contains("NOVIEWLOG_MARKER"),
+        15,
+    );
     assert!(got_marker, "echo output must reach the live screen");
 
     // A column-count change reflows the live grid; text must survive it.
@@ -72,9 +80,11 @@ fn conpty_typed_line_echoes_resizes_and_exits() {
 
     // `exit` ends the session: no auto-respawn, running cleared.
     engine.handle_key(b"exit\r");
-    let exited = pump_until(&mut engine, |engine, _| {
-        !engine.active_terminal_running_for_test()
-    }, 15);
+    let exited = pump_until(
+        &mut engine,
+        |engine, _| !engine.active_terminal_running_for_test(),
+        15,
+    );
     assert!(exited, "typed exit must end the session");
     assert!(
         engine.exit_code_for_test().is_some(),
@@ -99,9 +109,11 @@ fn conpty_kill_during_output_stops_cleanly() {
         .send_command_json(&format!(r#"{{"cmd":"stop","terminal_id":"{id}"}}"#))
         .expect("stop");
 
-    let stopped = pump_until(&mut engine, |engine, _| {
-        !engine.active_terminal_running_for_test()
-    }, 6);
+    let stopped = pump_until(
+        &mut engine,
+        |engine, _| !engine.active_terminal_running_for_test(),
+        6,
+    );
     assert!(stopped, "kill during output did not stop the session");
     let status = engine.status_message_for_test();
     assert!(

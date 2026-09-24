@@ -196,6 +196,8 @@ export component FormDialogPanel inherits Rectangle {
     in property <string> ok-text: "OK";
     /// When false, hide Cancel (e.g. About with a single Close/OK).
     in property <bool> show-cancel: true;
+    /// Windows Terminal-style footer: accent button on the left, Cancel right.
+    in property <bool> footer-start: false;
     in property <length> panel-min-width: 420px;
     callback cancelled();
     callback confirmed();
@@ -253,10 +255,10 @@ export component FormDialogPanel inherits Rectangle {
 
             HorizontalLayout {
                 spacing: 8px;
-                alignment: end;
+                alignment: root.footer-start ? LayoutAlignment.start : LayoutAlignment.end;
                 padding-top: 4px;
 
-                if root.show-cancel: AppButton {
+                if !root.footer-start && root.show-cancel: AppButton {
                     text: root.cancel-text;
                     clicked => { root.cancelled(); }
                 }
@@ -264,6 +266,10 @@ export component FormDialogPanel inherits Rectangle {
                     text: root.ok-text;
                     primary: true;
                     clicked => { root.confirmed(); }
+                }
+                if root.footer-start && root.show-cancel: AppButton {
+                    text: root.cancel-text;
+                    clicked => { root.cancelled(); }
                 }
             }
         }

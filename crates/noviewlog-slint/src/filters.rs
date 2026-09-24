@@ -31,7 +31,12 @@ pub(crate) fn install(
 ) {
     install_severity(ui, ctx);
     install_records_expand_collapse(ui, ctx);
-    install_add(ui, ctx, filter_draft_debounce.clone(), filter_draft_pending.clone());
+    install_add(
+        ui,
+        ctx,
+        filter_draft_debounce.clone(),
+        filter_draft_pending.clone(),
+    );
     install_draft_changed(ui, ctx, filter_draft_debounce, filter_draft_pending);
     install_toggle_remove_update_clear(ui, ctx);
 }
@@ -106,17 +111,13 @@ fn install_draft_changed(
         *filter_draft_pending.borrow_mut() = Some((pattern.to_string(), use_regex));
         let ctx = ctx.clone();
         let filter_draft_pending = filter_draft_pending.clone();
-        filter_draft_debounce.start(
-            TimerMode::SingleShot,
-            FILTER_DRAFT_DEBOUNCE,
-            move || {
-                let Some((pattern, use_regex)) = filter_draft_pending.borrow_mut().take() else {
-                    return;
-                };
-                let _ = ctx.send(Command::FilterDraftSet { pattern, use_regex });
-                ctx.refresh();
-            },
-        );
+        filter_draft_debounce.start(TimerMode::SingleShot, FILTER_DRAFT_DEBOUNCE, move || {
+            let Some((pattern, use_regex)) = filter_draft_pending.borrow_mut().take() else {
+                return;
+            };
+            let _ = ctx.send(Command::FilterDraftSet { pattern, use_regex });
+            ctx.refresh();
+        });
     });
 }
 
@@ -141,9 +142,7 @@ fn install_toggle_remove_update_clear(ui: &AppWindow, ctx: &Ctx) {
             if id.is_empty() {
                 return;
             }
-            ctx.send_refresh(Command::FilterRemove {
-                id: id.to_string(),
-            });
+            ctx.send_refresh(Command::FilterRemove { id: id.to_string() });
         });
     }
     {
@@ -176,10 +175,7 @@ mod tests {
 
     #[test]
     fn dropdown_maps_to_filter_type() {
-        assert!(matches!(
-            parse_filter_type("exclude"),
-            FilterType::Exclude
-        ));
+        assert!(matches!(parse_filter_type("exclude"), FilterType::Exclude));
         assert!(matches!(parse_filter_type("include"), FilterType::Include));
         assert!(matches!(parse_filter_type(""), FilterType::Include));
     }

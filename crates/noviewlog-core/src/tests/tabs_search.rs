@@ -148,7 +148,10 @@ fn tab_close_restore_preserves_settings() {
     assert_eq!(restored.auto_follow, closed.auto_follow);
     assert_eq!(restored.filters.len(), closed.filters.len());
     assert_eq!(restored.filters[0].pattern, "Error");
-    assert_eq!(restored.filters[0].filter_type, closed.filters[0].filter_type);
+    assert_eq!(
+        restored.filters[0].filter_type,
+        closed.filters[0].filter_type
+    );
 }
 
 #[test]
@@ -172,11 +175,7 @@ fn inactive_tab_stays_stale_until_selected() {
         .send_command_json(r#"{"cmd":"set_format","format_id":"raw"}"#)
         .expect("set_format raw");
     // Raw format keeps the latest line pending until the next start line arrives.
-    engine.push_lines_for_test([
-        "line-a".into(),
-        "line-b".into(),
-        "line-c".into(),
-    ]);
+    engine.push_lines_for_test(["line-a".into(), "line-b".into(), "line-c".into()]);
     let initial = engine.buffer_record_count_for_test();
     assert!(initial >= 2, "expected committed records, got {initial}");
     assert_eq!(engine.view_record_cursor_for_test(0), Some(initial));
@@ -192,11 +191,7 @@ fn inactive_tab_stays_stale_until_selected() {
     engine
         .send_command_json(r#"{"cmd":"tab_switch","index":0}"#)
         .expect("tab_switch");
-    engine.push_streaming_lines_for_test([
-        "line-d".into(),
-        "line-e".into(),
-        "line-f".into(),
-    ]);
+    engine.push_streaming_lines_for_test(["line-d".into(), "line-e".into(), "line-f".into()]);
     engine.rebuild_if_needed_for_test();
 
     let after = engine.buffer_record_count_for_test();
@@ -204,10 +199,7 @@ fn inactive_tab_stays_stale_until_selected() {
     assert_eq!(engine.view_record_cursor_for_test(0), Some(after));
     // Inactive tab must not rebuild on the active tab's tick.
     assert_eq!(engine.view_record_cursor_for_test(1), Some(initial));
-    assert_eq!(
-        engine.view_flat_line_count_for_test(1),
-        Some(synced_lines)
-    );
+    assert_eq!(engine.view_flat_line_count_for_test(1), Some(synced_lines));
 
     engine
         .send_command_json(r#"{"cmd":"tab_switch","index":1}"#)
@@ -269,8 +261,8 @@ fn search_literal_is_case_insensitive() {
             line_index: 0,
             segments: vec![],
             raw: "Error: BOOM".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         },
@@ -279,8 +271,8 @@ fn search_literal_is_case_insensitive() {
             line_index: 0,
             segments: vec![],
             raw: "info: ok".to_string(),
-                    level: None,
-                    collapsible: false,
+            level: None,
+            collapsible: false,
             collapsed: false,
             hidden_line_count: 0,
         },
@@ -302,11 +294,11 @@ fn search_case_sensitive_excludes_mismatched_case() {
         line_index: 0,
         segments: vec![],
         raw: "Error: BOOM boom".to_string(),
-                level: None,
-                    collapsible: false,
-            collapsed: false,
-            hidden_line_count: 0,
-        }];
+        level: None,
+        collapsible: false,
+        collapsed: false,
+        hidden_line_count: 0,
+    }];
     let ci = compile_search_pattern("boom", false, false, false).unwrap();
     let cs = compile_search_pattern("boom", false, true, false).unwrap();
     assert_eq!(collect_search_matches(&lines, &ci).len(), 2);
@@ -325,11 +317,11 @@ fn search_whole_word_excludes_substrings() {
         line_index: 0,
         segments: vec![],
         raw: "err error err".to_string(),
-                level: None,
-                    collapsible: false,
-            collapsed: false,
-            hidden_line_count: 0,
-        }];
+        level: None,
+        collapsible: false,
+        collapsed: false,
+        hidden_line_count: 0,
+    }];
     let any = compile_search_pattern("err", false, false, false).unwrap();
     let whole = compile_search_pattern("err", false, false, true).unwrap();
     assert_eq!(collect_search_matches(&lines, &any).len(), 3); // err, err in error, err
@@ -366,11 +358,11 @@ fn search_regex_mode_matches_pattern() {
         line_index: 0,
         segments: vec![],
         raw: "GET /api/users 200".to_string(),
-                level: None,
-                    collapsible: false,
-            collapsed: false,
-            hidden_line_count: 0,
-        }];
+        level: None,
+        collapsible: false,
+        collapsed: false,
+        hidden_line_count: 0,
+    }];
     let pattern = compile_search_pattern(r"GET /api/\w+", true, false, false).unwrap();
     let matches = collect_search_matches(&lines, &pattern);
     assert_eq!(matches.len(), 1);
@@ -396,10 +388,7 @@ fn search_highlight_marks_active_match() {
     }];
     let pattern = compile_search_pattern("foo", false, false, false).unwrap();
     let highlighted = highlight_search_in_segments(&segments, &pattern, Some((8, 11)));
-    let styled: Vec<_> = highlighted
-        .iter()
-        .filter_map(|s| s.style.clone())
-        .collect();
+    let styled: Vec<_> = highlighted.iter().filter_map(|s| s.style.clone()).collect();
     assert_eq!(styled.len(), 2);
     assert!(styled[0].search);
     assert!(!styled[0].search_current);
@@ -619,4 +608,3 @@ fn search_set_empty_clears_matches_so_follow_can_stick() {
         "clearing search must not turn Follow off"
     );
 }
-

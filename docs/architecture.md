@@ -92,4 +92,4 @@ Programs persist in `projects.yaml`. **Open / cold start** always selects the
 ## Agent docs
 
 See [`AGENTS.md`](../AGENTS.md) (Host OS table first) and
-[`.cursor/rules/`](../.cursor/rules/).
+[`docs-private/rules/`](../docs-private/rules/).

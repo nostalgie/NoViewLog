@@ -5,7 +5,7 @@
 //! | Layer | Module | Owns |
 //! |-------|--------|------|
 //! | **Live VT** (this file) | `core::terminal` | `vte` grid + scrollback; cursor, erase, OSC 7 |
-//! | **Line SGR** | [`crate::core::ansi`] | Parse/strip/overlay SGR on stored record lines |
+//! | **Line SGR** | [`crate::ansi`] | Parse/strip/overlay SGR on stored record lines |
 //!
 //! This module owns the live cell grid. Committed (scrolled-off) rows are
 //! serialized to ANSI for the Record buffer. The live screen is exposed as
@@ -23,231 +23,17 @@
 //! on-screen region is rendered live and repaints in place, so spinners replace
 //! correctly while every finalized line (tables, ✔ steps, banners) survives.
 
+mod screen;
+mod width;
+
 use std::sync::Arc;
 
 use vte::{Params, Parser, Perform};
 
-use crate::core::ansi::{ansi_256_color, ansi_basic_color};
-use crate::core::buffer::RecordBuffer;
-use crate::core::parser::RecordParser;
-use crate::core::types::{FlatLine, TextSegment, TextStyle};
-
-const DEFAULT_COLS: usize = 120;
-const DEFAULT_ROWS: usize = 40;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Color {
-    /// Basic SGR code (30-37 / 90-97 for fg, 40-47 / 100-107 for bg).
-    Basic(u16),
-    /// 256-colour palette index.
-    Ext(u16),
-    Rgb(u8, u8, u8),
-}
-
-#[derive(Clone, PartialEq, Eq, Default)]
-struct Pen {
-    fg: Option<Color>,
-    bg: Option<Color>,
-    bold: bool,
-    dim: bool,
-    underline: bool,
-    /// Active OSC 8 hyperlink (not an SGR property; separate lifecycle).
-    link: Option<Arc<str>>,
-}
-
-impl Pen {
-    fn is_default(&self) -> bool {
-        *self == Pen::default()
-    }
-
-    /// Emit the SGR parameter body (without `ESC[` / `m`) for this pen.
-    /// Always leads with `0` so any previously-active style is reset first.
-    fn sgr_body(&self) -> String {
-        let mut parts: Vec<String> = vec!["0".to_string()];
-        if self.bold {
-            parts.push("1".to_string());
-        }
-        if self.dim {
-            parts.push("2".to_string());
-        }
-        if self.underline {
-            parts.push("4".to_string());
-        }
-        if let Some(c) = self.fg {
-            parts.push(color_sgr(c, true));
-        }
-        if let Some(c) = self.bg {
-            parts.push(color_sgr(c, false));
-        }
-        parts.join(";")
-    }
-}
-
-fn color_sgr(c: Color, _fg: bool) -> String {
-    match c {
-        // Basic codes already encode fg vs bg (30.. vs 40..).
-        Color::Basic(code) => code.to_string(),
-        Color::Ext(n) => {
-            if _fg {
-                format!("38;5;{n}")
-            } else {
-                format!("48;5;{n}")
-            }
-        }
-        Color::Rgb(r, g, b) => {
-            if _fg {
-                format!("38;2;{r};{g};{b}")
-            } else {
-                format!("48;2;{r};{g};{b}")
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct Cell {
-    ch: char,
-    pen: Pen,
-}
-
-impl Default for Cell {
-    fn default() -> Self {
-        Cell {
-            ch: ' ',
-            pen: Pen::default(),
-        }
-    }
-}
-
-impl Cell {
-    fn is_blank(&self) -> bool {
-        self.ch == ' ' && self.pen.is_default()
-    }
-}
-
-#[derive(Clone)]
-struct Row {
-    cells: Vec<Cell>,
-    /// True when the row overflowed into the next one via auto-wrap (no explicit
-    /// newline). Used to re-join wrapped rows into one logical log line.
-    wrapped: bool,
-}
-
-impl Row {
-    fn new(cols: usize) -> Self {
-        Row {
-            cells: vec![Cell::default(); cols],
-            wrapped: false,
-        }
-    }
-
-    fn clear(&mut self) {
-        for c in &mut self.cells {
-            *c = Cell::default();
-        }
-        self.wrapped = false;
-    }
-
-    /// Serialize to an ANSI string. Trailing blanks are trimmed only when the
-    /// row is a true line end; auto-wrapped rows keep their full width so a
-    /// space that landed on the wrap column is not lost when re-joining.
-    fn serialize(&self) -> String {
-        let last = if self.wrapped {
-            self.cells.len()
-        } else {
-            self.cells
-                .iter()
-                .rposition(|c| !c.is_blank())
-                .map(|i| i + 1)
-                .unwrap_or(0)
-        };
-        let mut out = String::new();
-        let mut cur = Pen::default();
-        let mut cur_link: Option<Arc<str>> = None;
-        for cell in &self.cells[..last] {
-            if cell.pen != cur {
-                out.push_str("\x1b[");
-                out.push_str(&cell.pen.sgr_body());
-                out.push('m');
-                cur = cell.pen.clone();
-            }
-            if cell.pen.link != cur_link {
-                if cur_link.is_some() {
-                    out.push_str("\x1b]8;;\x07");
-                }
-                if let Some(uri) = &cell.pen.link {
-                    out.push_str("\x1b]8;;");
-                    out.push_str(uri);
-                    out.push('\x07');
-                }
-                cur_link = cell.pen.link.clone();
-            }
-            out.push(cell.ch);
-        }
-        if !cur.is_default() {
-            out.push_str("\x1b[0m");
-        }
-        if cur_link.is_some() {
-            out.push_str("\x1b]8;;\x07");
-        }
-        out
-    }
-}
-
-fn color_rgb(c: &Color) -> (u8, u8, u8) {
-    match *c {
-        Color::Basic(n) => {
-            let n = n as u32;
-            if (30..=37).contains(&n) {
-                ansi_basic_color(n - 30, false)
-            } else if (90..=97).contains(&n) {
-                ansi_basic_color(n - 90, true)
-            } else if (40..=47).contains(&n) {
-                ansi_basic_color(n - 40, false)
-            } else if (100..=107).contains(&n) {
-                ansi_basic_color(n - 100, true)
-            } else {
-                (230, 237, 243)
-            }
-        }
-        Color::Ext(n) => ansi_256_color(n as u32),
-        Color::Rgb(r, g, b) => (r, g, b),
-    }
-}
-
-fn pen_to_style(pen: &Pen) -> Option<TextStyle> {
-    if pen.is_default() {
-        return None;
-    }
-    Some(TextStyle {
-        fg: pen.fg.as_ref().map(color_rgb),
-        bg: pen.bg.as_ref().map(color_rgb),
-        bold: pen.bold,
-        dim: pen.dim,
-        underline: pen.underline,
-        search: false,
-        search_current: false,
-        selected: false,
-        link: pen.link.clone(),
-    })
-}
-
-fn overlay_id(line: usize) -> u64 {
-    (u64::MAX / 2).wrapping_add(line as u64)
-}
-
-fn push_overlay_line(out: &mut Vec<FlatLine>, segments: Vec<TextSegment>, raw: String) {
-    out.push(FlatLine {
-        record_id: overlay_id(out.len()),
-        line_index: 0,
-        segments,
-        raw,
-        level: None,
-        collapsible: false,
-        collapsed: false,
-        hidden_line_count: 0,
-    });
-}
+use crate::buffer::RecordBuffer;
+use crate::parser::RecordParser;
+use crate::types::FlatLine;
+use screen::{Pen, DEFAULT_COLS, DEFAULT_ROWS};
 
 /// Caret position within [`TerminalEmulator::screen_lines`] (logical rows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,7 +48,7 @@ pub struct ScreenCursor {
 pub struct TerminalEmulator {
     cols: usize,
     rows: usize,
-    screen: Vec<Row>,
+    screen: Vec<screen::Row>,
     cursor_row: usize,
     cursor_col: usize,
     cursor_visible: bool,
@@ -290,7 +76,7 @@ impl TerminalEmulator {
         TerminalEmulator {
             cols,
             rows,
-            screen: vec![Row::new(cols); rows],
+            screen: vec![screen::Row::new(cols); rows],
             cursor_row: 0,
             cursor_col: 0,
             cursor_visible: true,
@@ -308,177 +94,6 @@ impl TerminalEmulator {
 
     pub fn rows(&self) -> usize {
         self.rows
-    }
-
-    /// Resize the live screen grid to match the viewport / PTY winsize.
-    ///
-    /// Column changes reflow auto-wrapped logical lines onto the new grid so
-    /// soft-wrap / horizontal scroll still see one long line instead of
-    /// fragmented hard-wrap slices. Already-committed scrollback is untouched.
-    /// Height shrink commits rows that scroll off the top; growth pads blanks.
-    pub fn resize(&mut self, cols: usize, rows: usize) {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
-        if cols == self.cols && rows == self.rows {
-            return;
-        }
-
-        if cols != self.cols {
-            // Serialize the live grid back to ANSI (SGR runs preserved) and
-            // replay through the normal VT path so colors survive the reflow
-            // (issue #79; the previous plain-text replay stripped SGR). OSC 8
-            // link state is not re-emitted — same as the segment serializer.
-            let replay = self.styled_screen_ansi();
-            let cursor = self.screen_cursor();
-            let cursor_visible = self.cursor_visible;
-            let pen = self.pen.clone();
-
-            self.cols = cols;
-            self.rows = rows;
-            self.screen = vec![Row::new(cols); rows];
-            self.cursor_row = 0;
-            self.cursor_col = 0;
-            self.wrap_pending = false;
-            self.wrap_accum = None;
-            self.pen = Pen::default();
-
-            let mut parser = Parser::new();
-            parser.advance(self, &replay);
-
-            // Best-effort caret restore within the reflowed logical lines.
-            self.cursor_row = 0;
-            self.cursor_col = 0;
-            self.wrap_pending = false;
-            for _ in 0..cursor.line {
-                if self.cursor_row + 1 < self.rows {
-                    self.cursor_row += 1;
-                }
-            }
-            // Walk to the target column, following auto-wrap like write_char.
-            let mut remaining = cursor.col;
-            while remaining > 0 {
-                if self.cursor_col + 1 >= self.cols {
-                    self.screen[self.cursor_row].wrapped = true;
-                    self.cursor_col = 0;
-                    self.line_feed();
-                } else {
-                    self.cursor_col += 1;
-                }
-                remaining -= 1;
-            }
-            self.cursor_visible = cursor_visible;
-            self.pen = pen;
-            return;
-        }
-
-        while self.screen.len() > rows {
-            if self.cursor_row + 1 > rows {
-                let row = self.screen.remove(0);
-                self.commit_row(&row);
-                self.cursor_row = self.cursor_row.saturating_sub(1);
-            } else {
-                self.screen.pop();
-            }
-        }
-        while self.screen.len() < rows {
-            self.screen.push(Row::new(self.cols));
-        }
-        self.rows = rows;
-        self.cursor_col = self.cursor_col.min(self.cols.saturating_sub(1));
-        self.cursor_row = self.cursor_row.min(self.rows.saturating_sub(1));
-        self.wrap_pending = false;
-    }
-
-    /// Serialize the live grid back to VT bytes: cell runs with SGR transitions
-    /// (`ESC[…m` only when the pen changes), `\r\n` between logical lines
-    /// (wrapped rows continue). Line selection/trailing-trim matches
-    /// [`Self::plain_screen_lines`] exactly, so the replay scrolls exactly as
-    /// much as the old plain-text one did (issue #79).
-    fn styled_screen_ansi(&self) -> Vec<u8> {
-        // Logical lines: wrapped rows joined; per-row trailing blanks trimmed
-        // the same way plain_screen_lines does.
-        let mut lines: Vec<String> = Vec::new();
-        let mut cur = String::new();
-        let mut cur_pen = Pen::default();
-        for row in &self.screen {
-            let last = if row.wrapped {
-                row.cells.len()
-            } else {
-                row.cells
-                    .iter()
-                    .rposition(|c| !c.is_blank())
-                    .map(|i| i + 1)
-                    .unwrap_or(0)
-            };
-            for cell in &row.cells[..last] {
-                if cell.pen != cur_pen {
-                    cur_pen = cell.pen.clone();
-                    if cur_pen.is_default() {
-                        cur.push_str("\x1b[0m");
-                    } else {
-                        cur.push_str("\x1b[");
-                        cur.push_str(&cur_pen.sgr_body());
-                        cur.push('m');
-                    }
-                }
-                cur.push(cell.ch);
-            }
-            if !row.wrapped {
-                lines.push(std::mem::take(&mut cur));
-            }
-        }
-        if !cur.is_empty() {
-            lines.push(cur);
-        }
-
-        // Same trailing-trim / cursor-line padding as plain_screen_lines.
-        let keep_through = self.screen_cursor().line;
-        while lines.len() <= keep_through {
-            lines.push(String::new());
-        }
-        while lines.len() > keep_through + 1
-            && lines.last().map(|s| s.is_empty()).unwrap_or(false)
-        {
-            lines.pop();
-        }
-        lines.join("\r\n").into_bytes()
-    }
-
-    /// Like [`Self::screen_lines`], but plain text from cells (no SGR) — used
-    /// when reflowing the live grid on a column resize.
-    fn plain_screen_lines(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        let mut acc = String::new();
-        for row in &self.screen {
-            let last = if row.wrapped {
-                row.cells.len()
-            } else {
-                row.cells
-                    .iter()
-                    .rposition(|c| !c.is_blank())
-                    .map(|i| i + 1)
-                    .unwrap_or(0)
-            };
-            for cell in &row.cells[..last] {
-                acc.push(cell.ch);
-            }
-            if !row.wrapped {
-                out.push(std::mem::take(&mut acc));
-            }
-        }
-        if !acc.is_empty() {
-            out.push(acc);
-        }
-        let keep_through = self.screen_cursor().line;
-        while out.len() <= keep_through {
-            out.push(String::new());
-        }
-        while out.len() > keep_through + 1
-            && out.last().map(|s| s.is_empty()).unwrap_or(false)
-        {
-            out.pop();
-        }
-        out
     }
 
     /// Drain lines that have scrolled off the screen (finalized).
@@ -512,401 +127,22 @@ impl TerminalEmulator {
             col: col_base + self.cursor_col.min(self.cols.saturating_sub(1)),
         }
     }
-
-    /// The current live on-screen rows (auto-wrapped rows re-joined).
-    /// Trailing blank lines are trimmed, except those needed so the caret
-    /// row remains present (empty prompt line, cursor below content, etc.).
-    pub fn screen_lines(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        let mut acc = String::new();
-        for row in &self.screen {
-            acc.push_str(&row.serialize());
-            if !row.wrapped {
-                out.push(std::mem::take(&mut acc));
-            }
-        }
-        if !acc.is_empty() {
-            out.push(acc);
-        }
-        let keep_through = self.screen_cursor().line;
-        while out.len() <= keep_through {
-            out.push(String::new());
-        }
-        while out.len() > keep_through + 1
-            && out.last().map(|s| s.is_empty()).unwrap_or(false)
-        {
-            out.pop();
-        }
-        out
-    }
-
-    fn row_to_segments(row: &Row) -> (Vec<TextSegment>, String) {
-        let last = if row.wrapped {
-            row.cells.len()
-        } else {
-            row.cells
-                .iter()
-                .rposition(|c| !c.is_blank())
-                .map(|i| i + 1)
-                .unwrap_or(0)
-        };
-        let mut segments: Vec<TextSegment> = Vec::new();
-        let mut raw = String::new();
-        let mut cur_pen = Pen::default();
-        let mut cur_text = String::new();
-        let flush_seg =
-            |segments: &mut Vec<TextSegment>, cur_pen: &Pen, cur_text: &mut String| {
-                if cur_text.is_empty() {
-                    return;
-                }
-                segments.push(TextSegment {
-                    text: std::mem::take(cur_text),
-                    style: pen_to_style(cur_pen),
-                });
-            };
-        for cell in &row.cells[..last] {
-            if cell.pen != cur_pen {
-                flush_seg(&mut segments, &cur_pen, &mut cur_text);
-                cur_pen = cell.pen.clone();
-            }
-            cur_text.push(cell.ch);
-            raw.push(cell.ch);
-        }
-        flush_seg(&mut segments, &cur_pen, &mut cur_text);
-        if segments.is_empty() {
-            segments.push(TextSegment {
-                text: String::new(),
-                style: None,
-            });
-        }
-        (segments, raw)
-    }
-
-    /// Physical screen rows as FlatLines (one per grid row, no wrap-join).
-    /// Used to paint Follow like a native terminal: the viewport *is* the grid.
-    pub fn grid_flat_lines(&self) -> Vec<FlatLine> {
-        let mut out: Vec<FlatLine> = Vec::with_capacity(self.rows);
-        for row in &self.screen {
-            let (segments, raw) = Self::row_to_segments(row);
-            push_overlay_line(&mut out, segments, raw);
-        }
-        out
-    }
-
-    pub fn grid_cursor(&self) -> (usize, usize) {
-        (
-            self.cursor_row,
-            self.cursor_col.min(self.cols.saturating_sub(1)),
-        )
-    }
-
-    /// Live screen as Terminal tab overlay lines (cells → segments, no Records).
-    pub fn overlay_flat_lines(&self) -> Vec<FlatLine> {
-        let mut out: Vec<FlatLine> = Vec::new();
-        let mut segments: Vec<TextSegment> = Vec::new();
-        let mut raw = String::new();
-        let mut cur_pen = Pen::default();
-        let mut cur_text = String::new();
-
-        let flush_seg =
-            |segments: &mut Vec<TextSegment>, cur_pen: &Pen, cur_text: &mut String| {
-                if cur_text.is_empty() {
-                    return;
-                }
-                segments.push(TextSegment {
-                    text: std::mem::take(cur_text),
-                    style: pen_to_style(cur_pen),
-                });
-            };
-
-        for row in &self.screen {
-            let last = if row.wrapped {
-                row.cells.len()
-            } else {
-                row.cells
-                    .iter()
-                    .rposition(|c| !c.is_blank())
-                    .map(|i| i + 1)
-                    .unwrap_or(0)
-            };
-            for cell in &row.cells[..last] {
-                if cell.pen != cur_pen {
-                    flush_seg(&mut segments, &cur_pen, &mut cur_text);
-                    cur_pen = cell.pen.clone();
-                }
-                cur_text.push(cell.ch);
-                raw.push(cell.ch);
-            }
-            if !row.wrapped {
-                flush_seg(&mut segments, &cur_pen, &mut cur_text);
-                if segments.is_empty() {
-                    segments.push(TextSegment {
-                        text: String::new(),
-                        style: None,
-                    });
-                }
-                push_overlay_line(
-                    &mut out,
-                    std::mem::take(&mut segments),
-                    std::mem::take(&mut raw),
-                );
-                cur_pen = Pen::default();
-            }
-        }
-        if !raw.is_empty() || !cur_text.is_empty() || !segments.is_empty() {
-            flush_seg(&mut segments, &cur_pen, &mut cur_text);
-            if segments.is_empty() {
-                segments.push(TextSegment {
-                    text: String::new(),
-                    style: None,
-                });
-            }
-            push_overlay_line(&mut out, segments, raw);
-        }
-        let keep_through = self.screen_cursor().line;
-        while out.len() <= keep_through {
-            push_overlay_line(
-                &mut out,
-                vec![TextSegment {
-                    text: String::new(),
-                    style: None,
-                }],
-                String::new(),
-            );
-        }
-        while out.len() > keep_through + 1
-            && out.last().map(|l| l.raw.is_empty()).unwrap_or(false)
-        {
-            out.pop();
-        }
-        out
-    }
-
-    /// Flush the screen into `committed` (called at process exit / EOF), dropping
-    /// the trailing unused blank rows of the grid.
-    pub fn flush_all(&mut self) {
-        let last = (0..self.rows).rev().find(|&i| !self.row_is_empty(i));
-        if let Some(last) = last {
-            for i in 0..=last {
-                let row = std::mem::replace(&mut self.screen[i], Row::new(self.cols));
-                self.commit_row(&row);
-            }
-        }
-        if let Some(rem) = self.wrap_accum.take() {
-            self.committed.push(rem);
-        }
-        self.cursor_row = 0;
-        self.cursor_col = 0;
-        self.cursor_visible = true;
-    }
-
-    fn row_is_empty(&self, i: usize) -> bool {
-        let row = &self.screen[i];
-        !row.wrapped && row.cells.iter().all(Cell::is_blank)
-    }
-
-    // ---- internal grid ops ----
-
-    fn commit_row(&mut self, row: &Row) {
-        let s = row.serialize();
-        let joined = match self.wrap_accum.take() {
-            Some(prev) => prev + &s,
-            None => s,
-        };
-        if row.wrapped {
-            self.wrap_accum = Some(joined);
-        } else {
-            self.committed.push(joined);
-        }
-    }
-
-    fn scroll_up(&mut self) {
-        let row = std::mem::replace(&mut self.screen[0], Row::new(self.cols));
-        self.commit_row(&row);
-        self.screen.remove(0);
-        self.screen.push(Row::new(self.cols));
-    }
-
-    fn line_feed(&mut self) {
-        if self.cursor_row + 1 < self.rows {
-            self.cursor_row += 1;
-        } else {
-            self.scroll_up();
-        }
-    }
-
-    fn write_char(&mut self, ch: char) {
-        if self.wrap_pending {
-            // Finish the auto-wrap deferred from the previous cell.
-            self.screen[self.cursor_row].wrapped = true;
-            self.wrap_pending = false;
-            self.cursor_col = 0;
-            self.line_feed();
-        }
-        let col = self.cursor_col.min(self.cols - 1);
-        let row = &mut self.screen[self.cursor_row];
-        row.cells[col] = Cell {
-            ch,
-            pen: self.pen.clone(),
-        };
-        if self.cursor_col + 1 >= self.cols {
-            // Stay on the last column; defer the wrap until the next glyph.
-            self.wrap_pending = true;
-        } else {
-            self.cursor_col += 1;
-        }
-    }
-
-    fn erase_line(&mut self, mode: u16) {
-        self.wrap_pending = false;
-        let col = self.cursor_col.min(self.cols - 1);
-        let row = &mut self.screen[self.cursor_row];
-        match mode {
-            1 => {
-                for c in &mut row.cells[..=col] {
-                    *c = Cell::default();
-                }
-            }
-            2 => {
-                row.clear();
-            }
-            _ => {
-                for c in &mut row.cells[col..] {
-                    *c = Cell::default();
-                }
-            }
-        }
-    }
-
-    /// CSI `P` — Delete Character (DCH): shift cells left from the cursor.
-    fn delete_chars(&mut self, count: usize) {
-        self.wrap_pending = false;
-        let col = self.cursor_col.min(self.cols - 1);
-        let n = count.min(self.cols - col);
-        if n == 0 {
-            return;
-        }
-        let row = &mut self.screen[self.cursor_row];
-        for i in col..(self.cols - n) {
-            row.cells[i] = row.cells[i + n].clone();
-        }
-        for c in &mut row.cells[(self.cols - n)..] {
-            *c = Cell::default();
-        }
-    }
-
-    /// CSI `@` — Insert Character (ICH): shift cells right from the cursor.
-    fn insert_chars(&mut self, count: usize) {
-        self.wrap_pending = false;
-        let col = self.cursor_col.min(self.cols - 1);
-        let n = count.min(self.cols - col);
-        if n == 0 {
-            return;
-        }
-        let row = &mut self.screen[self.cursor_row];
-        for i in ((col + n)..self.cols).rev() {
-            row.cells[i] = row.cells[i - n].clone();
-        }
-        for c in &mut row.cells[col..(col + n)] {
-            *c = Cell::default();
-        }
-    }
-
-    /// CSI `X` — Erase Character (ECH): blank cells without shifting.
-    fn erase_chars(&mut self, count: usize) {
-        self.wrap_pending = false;
-        let col = self.cursor_col.min(self.cols - 1);
-        let end = (col + count).min(self.cols);
-        let row = &mut self.screen[self.cursor_row];
-        for c in &mut row.cells[col..end] {
-            *c = Cell::default();
-        }
-    }
-
-    fn erase_display(&mut self, mode: u16) {
-        self.wrap_pending = false;
-        match mode {
-            1 => {
-                for r in 0..self.cursor_row {
-                    self.screen[r].clear();
-                }
-                self.erase_line(1);
-            }
-            2 | 3 => {
-                for r in 0..self.rows {
-                    self.screen[r].clear();
-                }
-                self.cursor_row = 0;
-                self.cursor_col = 0;
-            }
-            _ => {
-                self.erase_line(0);
-                for r in (self.cursor_row + 1)..self.rows {
-                    self.screen[r].clear();
-                }
-            }
-        }
-    }
-
-    fn apply_sgr(&mut self, codes: &[u16]) {
-        if codes.is_empty() {
-            self.pen = Pen::default();
-            return;
-        }
-        let mut i = 0;
-        while i < codes.len() {
-            match codes[i] {
-                0 => self.pen = Pen::default(),
-                1 => self.pen.bold = true,
-                2 => self.pen.dim = true,
-                4 => self.pen.underline = true,
-                22 => {
-                    self.pen.bold = false;
-                    self.pen.dim = false;
-                }
-                24 => self.pen.underline = false,
-                39 => self.pen.fg = None,
-                49 => self.pen.bg = None,
-                n @ (30..=37 | 90..=97) => self.pen.fg = Some(Color::Basic(n)),
-                n @ (40..=47 | 100..=107) => self.pen.bg = Some(Color::Basic(n)),
-                38 | 48 => {
-                    let is_fg = codes[i] == 38;
-                    let color = match codes.get(i + 1).copied() {
-                        Some(5) => {
-                            let n = codes.get(i + 2).copied().unwrap_or(0);
-                            i += 2;
-                            Some(Color::Ext(n))
-                        }
-                        Some(2) => {
-                            let r = codes.get(i + 2).copied().unwrap_or(0) as u8;
-                            let g = codes.get(i + 3).copied().unwrap_or(0) as u8;
-                            let b = codes.get(i + 4).copied().unwrap_or(0) as u8;
-                            i += 4;
-                            Some(Color::Rgb(r, g, b))
-                        }
-                        _ => None,
-                    };
-                    if let Some(c) = color {
-                        if is_fg {
-                            self.pen.fg = Some(c);
-                        } else {
-                            self.pen.bg = Some(c);
-                        }
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-    }
 }
 
 fn first_param(params: &Params) -> u16 {
-    params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0)
+    params
+        .iter()
+        .next()
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0)
 }
 
 fn nth_param(params: &Params, n: usize) -> u16 {
-    params.iter().nth(n).and_then(|p| p.first().copied()).unwrap_or(0)
+    params
+        .iter()
+        .nth(n)
+        .and_then(|p| p.first().copied())
+        .unwrap_or(0)
 }
 
 impl Perform for TerminalEmulator {
@@ -1075,23 +311,21 @@ impl Perform for TerminalEmulator {
         }
         // OSC 8 ; params ; uri — hyperlink start; empty uri closes it.
         // URIs may contain ';', so rejoin everything after the params field.
-        if params.first().is_some_and(|p| p == b"8") {
-            if params.len() >= 2 {
-                let mut uri = String::new();
-                for (i, part) in params.iter().enumerate().skip(2) {
-                    if i > 2 {
-                        uri.push(';');
-                    }
-                    if let Ok(s) = std::str::from_utf8(part) {
-                        uri.push_str(s);
-                    }
+        if params.first().is_some_and(|p| p == b"8") && params.len() >= 2 {
+            let mut uri = String::new();
+            for (i, part) in params.iter().enumerate().skip(2) {
+                if i > 2 {
+                    uri.push(';');
                 }
-                self.pen.link = if uri.is_empty() {
-                    None
-                } else {
-                    Some(Arc::from(uri))
-                };
+                if let Ok(s) = std::str::from_utf8(part) {
+                    uri.push_str(s);
+                }
             }
+            self.pen.link = if uri.is_empty() {
+                None
+            } else {
+                Some(Arc::from(uri))
+            };
         }
     }
 }
@@ -1310,9 +544,9 @@ impl TerminalIngest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::buffer::RecordBuffer;
-    use crate::core::formats::get_builtin_format;
-    use crate::core::parser::RecordParser;
+    use crate::buffer::RecordBuffer;
+    use crate::formats::get_builtin_format;
+    use crate::parser::RecordParser;
 
     fn feed(emu: &mut TerminalEmulator, bytes: &[u8]) {
         let mut parser = Parser::new();
@@ -1390,9 +624,12 @@ mod tests {
     #[test]
     fn osc8_grid_roundtrip_through_serialization() {
         let mut emu = TerminalEmulator::new(80, 24);
-        feed(&mut emu, b"\x1b]8;;https://example.com\x07visit\x1b]8;;\x07 ok");
+        feed(
+            &mut emu,
+            b"\x1b]8;;https://example.com\x07visit\x1b]8;;\x07 ok",
+        );
         // Serialize → line parser must restore the link style on "visit" only.
-        let segs = crate::core::ansi::parse_ansi_line(&emu.screen_lines()[0]);
+        let segs = crate::ansi::parse_ansi_line(&emu.screen_lines()[0]);
         assert_eq!(
             segs.iter().map(|s| s.text.as_str()).collect::<String>(),
             "visit ok"
@@ -1417,17 +654,11 @@ mod tests {
             &mut emu,
             b"\x1b]8;;https://a\x07A\x1b]8;;https://b\x07B\x1b]8;;\x07",
         );
-        let segs = crate::core::ansi::parse_ansi_line(&emu.screen_lines()[0]);
+        let segs = crate::ansi::parse_ansi_line(&emu.screen_lines()[0]);
         let a = segs.iter().find(|s| s.text == "A").unwrap();
         let b = segs.iter().find(|s| s.text == "B").unwrap();
-        assert_eq!(
-            a.style.as_ref().unwrap().link.as_deref(),
-            Some("https://a")
-        );
-        assert_eq!(
-            b.style.as_ref().unwrap().link.as_deref(),
-            Some("https://b")
-        );
+        assert_eq!(a.style.as_ref().unwrap().link.as_deref(), Some("https://a"));
+        assert_eq!(b.style.as_ref().unwrap().link.as_deref(), Some("https://b"));
     }
 
     #[test]
@@ -1458,7 +689,7 @@ mod tests {
         );
         // After widen, new prints should not wrap at the old 10-col boundary.
         feed(&mut emu, b"\r\n");
-        feed(&mut emu, &b"12345678901234567890".to_vec());
+        feed(&mut emu, b"12345678901234567890".as_ref());
         let lines = emu.screen_lines();
         assert!(
             lines.iter().any(|l| l.contains("12345678901234567890")),
@@ -1473,7 +704,11 @@ mod tests {
         assert_eq!(emu.screen_lines().len(), 1);
         emu.resize(10, 8);
         let lines = emu.screen_lines();
-        assert_eq!(lines.len(), 1, "still one logical line after narrow: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            1,
+            "still one logical line after narrow: {lines:?}"
+        );
         assert_eq!(lines[0], "abcdefghijklmnopqrstuvwxyz");
     }
 
@@ -1508,7 +743,7 @@ mod tests {
             .records()
             .iter()
             .flat_map(|r| r.lines.iter().cloned())
-            .map(|l| crate::core::ansi::strip_ansi(&l))
+            .map(|l| crate::ansi::strip_ansi(&l))
             .collect();
         assert!(
             committed.iter().any(|l| l.contains("[LOG] first")),
@@ -1567,10 +802,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("segment {needle} in {segments:?}"))
         };
         let idx = find("idx");
-        let rgb = find("Mrgb").style.as_ref().map(|s| s.fg).flatten();
+        let rgb = find("Mrgb").style.as_ref().and_then(|s| s.fg);
         let underline = find("u").style.as_ref().map(|s| s.underline);
         assert_eq!(
-            idx.style.as_ref().map(|s| s.fg).flatten(),
+            idx.style.as_ref().and_then(|s| s.fg),
             Some((255, 0, 0)),
             "256-color colon form (196 → basic red 9): {:?}",
             idx.style
@@ -1585,8 +820,28 @@ mod tests {
         let mut buffer = RecordBuffer::new(1000);
         let mut parser = RecordParser::new(get_builtin_format("node-default"));
         ingest.feed(b"$ hello", &mut buffer, &mut parser);
-        assert_eq!(buffer.records_len(), 0, "live prompt must stay out of RecordBuffer");
+        assert_eq!(
+            buffer.records_len(),
+            0,
+            "live prompt must stay out of RecordBuffer"
+        );
         assert!(ingest.volatile_count() >= 1);
         assert!(ingest.overlay_flat_lines()[0].raw.contains("hello"));
+    }
+
+    #[test]
+    fn cjk_readline_overwrite_does_not_drift() {
+        // End-to-end: bash-style CJK editing keeps the grid caret where the
+        // child's cursor is (2 columns per CJK char, DCH shifts cleanly).
+        let mut emu = TerminalEmulator::new(80, 24);
+        feed(&mut emu, "echo 中文".as_bytes());
+        assert_eq!(emu.screen_cursor(), ScreenCursor { line: 0, col: 9 });
+        // Backspace twice (over the 文 pair), then Delete (DCH).
+        feed(&mut emu, b"\x08\x08");
+        assert_eq!(emu.screen_cursor(), ScreenCursor { line: 0, col: 7 });
+        feed(&mut emu, "\x1b[1P".as_bytes()); // DCH removes half a pair...
+        let line = emu.screen_lines().remove(0);
+        // ...the leftover continuation must not render the leader's glyph.
+        assert_eq!(line, "echo 中");
     }
 }

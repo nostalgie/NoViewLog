@@ -1,5 +1,12 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+/// File handle shared between the engine (metadata owner) and the background
+/// I/O threads that perform the actual reads (issue #55: no synchronous file
+/// reads on the UI event-loop thread).
+pub type SharedFile = Arc<Mutex<File>>;
 
 /// Bytes scanned per engine tick while building a line index.
 pub const INDEX_BYTES_PER_TICK: u64 = 4 * 1024 * 1024;
@@ -20,6 +27,60 @@ pub(crate) fn decode_lossy_line(mut raw: &[u8]) -> String {
 /// Strip a UTF-8 BOM (U+FEFF) from the start of line text read at byte 0.
 pub(crate) fn strip_bom(line: &str) -> &str {
     line.strip_prefix('\u{FEFF}').unwrap_or(line)
+}
+
+/// Hard cap on bytes buffered for a single line (issue #162): a corrupt or
+/// minified single-line file must not balloon memory to multiples of its
+/// size. Longer lines are truncated (see [`read_line_bounded`]).
+pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Appended to truncated line text so the cut is visible to the user.
+pub const LINE_TRUNCATION_MARKER: &str = " …[line truncated]";
+
+/// Bounded `BufRead::read_until(b'\n')`. Appends at most [`MAX_LINE_BYTES`]
+/// bytes to `out`; when the line is longer, the rest is drained (discarded in
+/// bounded chunks) so the reader still lands on the next line start and line
+/// accounting stays aligned with the newline-scanning index. Returns
+/// `(bytes consumed from the reader including the trailing `\n` if any,
+/// line was truncated)`.
+pub(crate) fn read_line_bounded(
+    reader: &mut impl BufRead,
+    out: &mut Vec<u8>,
+) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    let mut truncated = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(buf) => buf,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if available.is_empty() {
+            return Ok((total, truncated));
+        }
+        let newline = available.iter().position(|&b| b == b'\n');
+        let consumed = match newline {
+            Some(pos) => {
+                // Include the trailing '\n' so callers can mirror read_until.
+                let upto = pos + 1;
+                let keep = upto.min(MAX_LINE_BYTES.saturating_sub(total));
+                out.extend_from_slice(&available[..keep]);
+                truncated |= keep < upto;
+                upto
+            }
+            None => {
+                let keep = available.len().min(MAX_LINE_BYTES.saturating_sub(total));
+                out.extend_from_slice(&available[..keep]);
+                truncated |= total + available.len() >= MAX_LINE_BYTES;
+                available.len()
+            }
+        };
+        reader.consume(consumed);
+        total += consumed;
+        if newline.is_some() {
+            return Ok((total, truncated));
+        }
+    }
 }
 
 /// Deletes the wrapped temp file when dropped (UTF-16 transcoded sessions).
@@ -100,7 +161,7 @@ impl LineIndex {
     }
 
     fn should_checkpoint(&self, line: u64) -> bool {
-        line == 0 || line % self.stride == 0
+        line == 0 || line.is_multiple_of(self.stride)
     }
 
     /// Approximate line whose start is `<= byte` (checkpoint interpolation).
@@ -143,11 +204,7 @@ impl LineIndex {
         if line >= self.line_count {
             return Ok(None);
         }
-        let Some(&(cp_line, cp_off)) = self
-            .checkpoints
-            .iter()
-            .rev()
-            .find(|(l, _)| *l <= line)
+        let Some(&(cp_line, cp_off)) = self.checkpoints.iter().rev().find(|(l, _)| *l <= line)
         else {
             return Ok(None);
         };
@@ -161,9 +218,9 @@ impl LineIndex {
         let mut pos = cp_off;
         while cur < line {
             let mut buf = Vec::new();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) => return Ok(None),
-                Ok(n) => {
+            match read_line_bounded(&mut reader, &mut buf) {
+                Ok((0, _)) => return Ok(None),
+                Ok((n, _)) => {
                     pos += n as u64;
                     cur += 1;
                 }
@@ -183,6 +240,41 @@ impl LineIndex {
             .rev()
             .find(|(l, _)| *l <= line)
             .and_then(|(l, o)| if *l == line { Some(*o) } else { None })
+    }
+
+    /// Exact line number of the line that starts at `byte` (`byte` must be a
+    /// line start). Walks newlines from the nearest checkpoint at or before
+    /// `byte` — unlike [`Self::line_at_offset`], which interpolates.
+    pub fn line_at_byte_exact(&self, file: &mut File, byte: u64) -> Result<u64, String> {
+        if self.checkpoints.is_empty() || byte == 0 {
+            return Ok(0);
+        }
+        let idx = self.checkpoints.partition_point(|&(_, off)| off <= byte);
+        let (line, off) = if idx == 0 {
+            (0, 0)
+        } else {
+            self.checkpoints[idx - 1]
+        };
+        if off == byte {
+            return Ok(line);
+        }
+        file.seek(SeekFrom::Start(off))
+            .map_err(|e| format!("Seek failed: {e}"))?;
+        let mut reader = BufReader::new(file);
+        let mut cur = off;
+        let mut cur_line = line;
+        while cur < byte {
+            let mut buf = Vec::new();
+            match read_line_bounded(&mut reader, &mut buf) {
+                Ok((0, _)) => return Ok(cur_line),
+                Ok((n, _)) => {
+                    cur += n as u64;
+                    cur_line += 1;
+                }
+                Err(err) => return Err(format!("Read error: {err}")),
+            }
+        }
+        Ok(cur_line)
     }
 
     pub fn scan_chunk(
@@ -254,9 +346,15 @@ impl LineIndex {
                 break;
             }
             let mut buf = Vec::new();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) => break,
-                Ok(_) => out.push(decode_lossy_line(&buf)),
+            match read_line_bounded(&mut reader, &mut buf) {
+                Ok((0, _)) => break,
+                Ok((_, truncated)) => {
+                    let mut text = decode_lossy_line(&buf);
+                    if truncated {
+                        text.push_str(LINE_TRUNCATION_MARKER);
+                    }
+                    out.push(text);
+                }
                 Err(err) => return Err(format!("Read error: {err}")),
             }
         }
@@ -271,30 +369,62 @@ impl LineIndex {
     }
 }
 
-/// Retained after load: path, index, and a file handle for on-demand reads.
+/// Retained after load: path, index, and a shared file handle for on-demand
+/// reads. The handle is shared with background I/O threads (issue #55); all
+/// reads go through the engine's worker, never the UI thread.
 pub struct FileBackedLog {
     pub path: String,
-    pub file: File,
+    pub file: SharedFile,
     pub index: LineIndex,
+    /// On-disk size of `path` when this session was opened (issue #151). Stored
+    /// explicitly — for UTF-16 sessions `index.file_size()` covers the temp
+    /// UTF-8 copy, not the watched original.
+    pub watch_size: u64,
+    /// `path`'s mtime at open; `None` when the platform has no mtime (the
+    /// watcher then degrades to size-only comparison).
+    pub watch_mtime: Option<SystemTime>,
     /// Temp UTF-8 copy backing a UTF-16 session; removed when this is dropped.
+    /// Never read — kept alive for [`TempFileGuard`]'s Drop (file removal).
+    #[allow(dead_code)]
     pub(crate) temp: Option<TempFileGuard>,
 }
 
 impl FileBackedLog {
-    pub fn read_lines(&mut self, start_line: u64, count: usize) -> Result<Vec<String>, String> {
-        // Stale-index guard (issue #108): a truncated/rewritten file makes the
-        // index offsets point at wrong bytes — surface it instead of silently
-        // returning wrong lines.
-        let current = self
-            .file
-            .metadata()
-            .map_err(|e| format!("Stat failed: {e}"))?
-            .len();
-        if current < self.index.file_size() {
-            return Err("File changed on disk (truncated) — reload the session".to_string());
-        }
-        self.index.read_lines(&mut self.file, start_line, count)
+    pub fn read_lines(&self, start_line: u64, count: usize) -> Result<Vec<String>, String> {
+        read_lines_shared(&self.file, &self.index, start_line, count)
     }
+
+    /// True when the on-disk file no longer matches the snapshot this log was
+    /// opened from (truncated, appended, rewritten, or the path is gone) —
+    /// issue #151. Cheap single stat; the engine polls it on the tick.
+    pub fn changed_on_disk(&self) -> bool {
+        let Ok(meta) = std::fs::metadata(&self.path) else {
+            return true;
+        };
+        meta.len() != self.watch_size || meta.modified().ok() != self.watch_mtime
+    }
+}
+
+/// Read `count` lines starting at `start_line` through a shared handle.
+/// Used by background I/O threads that own a clone of the handle + index.
+pub fn read_lines_shared(
+    file: &SharedFile,
+    index: &LineIndex,
+    start_line: u64,
+    count: usize,
+) -> Result<Vec<String>, String> {
+    let mut file = file.lock().unwrap_or_else(|e| e.into_inner());
+    // Stale-index guard (issue #108): a truncated/rewritten file makes the
+    // index offsets point at wrong bytes — surface it instead of silently
+    // returning wrong lines.
+    let current = file
+        .metadata()
+        .map_err(|e| format!("Stat failed: {e}"))?
+        .len();
+    if current < index.file_size() {
+        return Err("File changed on disk (truncated) — reload the session".to_string());
+    }
+    index.read_lines(&mut file, start_line, count)
 }
 
 #[cfg(test)]
@@ -361,6 +491,189 @@ mod tests {
         index.scan_chunk(&mut file, 0, size).unwrap();
         let line = index.line_at_offset(tail_byte);
         assert!(line < 100);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_line_bounded_truncates_and_stays_line_aligned() {
+        // Oversized single line, no trailing newline.
+        let data = vec![b'x'; MAX_LINE_BYTES + 4096];
+        let mut cursor = std::io::Cursor::new(data);
+        let mut out = Vec::new();
+        let (consumed, truncated) = read_line_bounded(&mut cursor, &mut out).unwrap();
+        assert!(truncated);
+        assert_eq!(out.len(), MAX_LINE_BYTES);
+        assert_eq!(consumed, MAX_LINE_BYTES + 4096, "whole line drained");
+
+        // After the oversized line, the next line is read intact: the drain
+        // landed the reader on the next line start.
+        let mut data = vec![b'y'; MAX_LINE_BYTES + 10];
+        data.push(b'\n');
+        data.extend_from_slice(b"after\n");
+        let mut cursor = std::io::Cursor::new(data);
+        let mut first = Vec::new();
+        let (n1, truncated) = read_line_bounded(&mut cursor, &mut first).unwrap();
+        assert!(truncated);
+        let mut second = Vec::new();
+        let (n2, truncated2) = read_line_bounded(&mut cursor, &mut second).unwrap();
+        assert!(!truncated2);
+        assert_eq!(second, b"after\n");
+        assert_eq!(n1 + n2, MAX_LINE_BYTES + 10 + 1 + 6);
+
+        // A normal line under the cap is untouched.
+        let mut cursor = std::io::Cursor::new(b"hello\nworld".to_vec());
+        let mut line = Vec::new();
+        let (n, truncated) = read_line_bounded(&mut cursor, &mut line).unwrap();
+        assert!(!truncated);
+        assert_eq!(line, b"hello\n");
+        assert_eq!(n, 6);
+    }
+
+    #[test]
+    fn single_line_huge_file_indexes_one_line_and_truncates_reads() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noviewlog-huge-line-{stamp}.log"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&vec![b'z'; MAX_LINE_BYTES + 2048]).unwrap();
+        }
+        let size = std::fs::metadata(&path).unwrap().len();
+        let mut file = File::open(&path).unwrap();
+        let mut index = LineIndex::new(size);
+        index.scan_chunk(&mut file, 0, size).unwrap();
+        assert_eq!(index.total_lines(), 1, "newline-free file is one line");
+
+        // Window reads surface the truncation marker instead of ballooning.
+        let lines = index.read_lines(&mut file, 0, 10).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].ends_with(LINE_TRUNCATION_MARKER),
+            "truncation must be visible to the user"
+        );
+        assert_eq!(
+            lines[0].len(),
+            MAX_LINE_BYTES + LINE_TRUNCATION_MARKER.len()
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Open a temp log, load it fully, and return the retained [`FileBackedLog`].
+    #[cfg(test)]
+    fn open_backed(path: &std::path::Path) -> FileBackedLog {
+        let mut state = crate::file_load::FileLoadState::open(path.to_str().unwrap()).unwrap();
+        while !state.is_finished() {
+            state.tick().unwrap();
+        }
+        state.into_backed().unwrap()
+    }
+
+    #[test]
+    fn changed_on_disk_unchanged_file_not_flagged() {
+        // Issue #151: a file untouched since open must stay quiet.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noviewlog-watch-same-{stamp}.log"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "one").unwrap();
+            writeln!(f, "two").unwrap();
+        }
+        let backed = open_backed(&path);
+        assert!(!backed.changed_on_disk());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn changed_on_disk_flags_append() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noviewlog-watch-append-{stamp}.log"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "one").unwrap();
+        }
+        let backed = open_backed(&path);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f, "two").unwrap();
+        }
+        assert!(backed.changed_on_disk(), "appended file must be flagged");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn changed_on_disk_flags_truncate() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noviewlog-watch-trunc-{stamp}.log"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "one").unwrap();
+            writeln!(f, "two").unwrap();
+        }
+        let backed = open_backed(&path);
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "tiny").unwrap();
+        }
+        assert!(backed.changed_on_disk(), "truncated file must be flagged");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn changed_on_disk_flags_missing_file() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noviewlog-watch-gone-{stamp}.log"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "one").unwrap();
+        }
+        let backed = open_backed(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(backed.changed_on_disk(), "deleted file must be flagged");
+    }
+
+    #[test]
+    fn changed_on_disk_flags_same_size_mtime_bump() {
+        // Rewrite in place with an identical byte count: only mtime drifts.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("noviewlog-watch-mtime-{stamp}.log"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "one").unwrap();
+        }
+        let backed = open_backed(&path);
+        let later =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(
+            backed.changed_on_disk(),
+            "same-size rewrite must be flagged via mtime"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

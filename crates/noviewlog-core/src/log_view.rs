@@ -13,12 +13,123 @@ use crate::core::filter::FilterEngine;
 use crate::core::types::{FilterRule, FlatLine, SearchMatch, SeverityFilter, TabConfig};
 use crate::core::visible::{
     append_search_matches, collect_search_matches, compile_search_pattern, rebuild_flat_lines,
-    rebuild_flat_lines_for_records,     record_ids_needing_expand_for_search, SearchPattern,
+    rebuild_flat_lines_for_records, record_ids_needing_expand_for_search, SearchPattern,
 };
 use crate::viewport_layout::VisualRowIndex;
 
 /// Display name of the pinned first tab (index 0).
 pub const TERMINAL_TAB_NAME: &str = "Terminal";
+
+/// Interior-mutability slot holding the maintained [`VisualRowIndex`].
+///
+/// Borrow-safety invariant, made structural: `RefCell` guards never leave
+/// these methods, and the only code that can run while a borrow is live is
+/// [`VisualRowIndex`] methods (a plain data struct with no path back to the
+/// slot). Callers receive owned `Arc` snapshots and pass in plain data plus
+/// flat-line slices, so nothing with access to the slot can execute under a
+/// borrow — a re-entrant borrow across a swap (which would panic the UI
+/// thread) is impossible by construction, not by convention.
+struct VisualRowIndexSlot {
+    index: RefCell<Arc<VisualRowIndex>>,
+}
+
+impl VisualRowIndexSlot {
+    fn new() -> Self {
+        Self {
+            index: RefCell::new(Arc::new(VisualRowIndex::invalid())),
+        }
+    }
+
+    /// Owned snapshot of the index when it still matches the current flat
+    /// lines and geometry; `None` means the caller must rebuild.
+    fn get_valid_for(
+        &self,
+        flat_len: usize,
+        wrap: bool,
+        viewport_width: u32,
+        cell_width: u32,
+    ) -> Option<Arc<VisualRowIndex>> {
+        let slot = self.index.borrow();
+        if slot.is_valid_for(flat_len, wrap, viewport_width, cell_width) {
+            return Some(Arc::clone(&slot));
+        }
+        None
+    }
+
+    fn store(&self, index: Arc<VisualRowIndex>) {
+        *self.index.borrow_mut() = index;
+    }
+
+    fn invalidate(&self) {
+        *self.index.borrow_mut() = Arc::new(VisualRowIndex::invalid());
+    }
+
+    /// Extend a still-valid index after flat lines were appended starting at
+    /// `from_flat`; an index that no longer matches is replaced by an invalid one.
+    fn extend_from(&self, wrap: bool, from_flat: usize, lines: &[FlatLine]) {
+        let mut slot = self.index.borrow_mut();
+        if !slot.valid_geometry_only(wrap) || slot.flat_len() != from_flat {
+            *slot = Arc::new(VisualRowIndex::invalid());
+            return;
+        }
+        let lines = &lines[from_flat..];
+        if lines.is_empty() {
+            return;
+        }
+        Self::apply_in_place(&mut slot, |idx| idx.extend_lines(lines));
+    }
+
+    /// Keep the first `keep` flat-line entries of a still-valid index;
+    /// otherwise mark it invalid.
+    fn truncate_to(&self, wrap: bool, keep: usize) {
+        let mut slot = self.index.borrow_mut();
+        if slot.valid_geometry_only(wrap) && slot.flat_len() >= keep {
+            Self::apply_in_place(&mut slot, |idx| idx.truncate_flat(keep));
+        } else {
+            *slot = Arc::new(VisualRowIndex::invalid());
+        }
+    }
+
+    /// Re-align the index after a ring shift replaced a flat-line prefix:
+    /// truncate to the stable prefix, drop `shifted_raw_lines` more, then
+    /// extend from `lines`; an index that cannot be re-aligned is invalidated.
+    fn patch_after_ring_shift(
+        &self,
+        wrap: bool,
+        stable_flat_before: usize,
+        shifted_raw_lines: usize,
+        lines: &[FlatLine],
+    ) {
+        let mut slot = self.index.borrow_mut();
+        if !slot.valid_geometry_only(wrap) || slot.flat_len() < stable_flat_before {
+            *slot = Arc::new(VisualRowIndex::invalid());
+            return;
+        }
+        Self::apply_in_place(&mut slot, |idx| {
+            idx.truncate_flat(stable_flat_before);
+            if shifted_raw_lines > 0 {
+                idx.drop_prefix(shifted_raw_lines);
+            }
+            let from = idx.flat_len();
+            if from < lines.len() {
+                idx.extend_lines(&lines[from..]);
+            }
+        });
+    }
+
+    /// Mutate through the `Arc` in place, cloning first when a snapshot is
+    /// alive elsewhere.
+    fn apply_in_place(slot: &mut Arc<VisualRowIndex>, update: impl FnOnce(&mut VisualRowIndex)) {
+        match Arc::get_mut(slot) {
+            Some(idx) => update(idx),
+            None => {
+                let mut owned = (**slot).clone();
+                update(&mut owned);
+                *slot = Arc::new(owned);
+            }
+        }
+    }
+}
 
 pub struct LogView {
     pub name: String,
@@ -47,16 +158,30 @@ pub struct LogView {
     flat_lines_dirty: bool,
     pub(crate) flat_lines_record_cursor: usize,
     /// Maintained visual-row prefix index for Wrap ON scroll (invalidated on geometry/flat change).
-    visual_row_index: RefCell<Arc<VisualRowIndex>>,
+    visual_row_index: VisualRowIndexSlot,
     filter_engine: FilterEngine,
     /// Live VT overlay line count at the end of `flat_lines`.
     overlay_len: usize,
-    /// Whole-file match byte offsets for file-session filter tabs (`None` scan = idle).
-    pub match_offsets: Vec<u64>,
+    /// Whole-file match byte offsets for file-session filter tabs. `Arc` so a
+    /// background match-window read can borrow them without the UI thread
+    /// cloning up to ~16 MB per request (issue #55).
+    pub match_offsets: Arc<Vec<u64>>,
     /// Next file byte to scan; `None` means scan complete or not required.
     pub match_scan_pos: Option<u64>,
     /// First match ordinal currently materialized in `flat_lines`.
     pub match_window_start: usize,
+    /// Bumped whenever the scan inputs change; results from a background scan
+    /// thread carrying a stale token are dropped (issue #55).
+    pub match_scan_token: u64,
+    /// A background scan thread is running for this view (issue #55).
+    pub match_scan_inflight: bool,
+    /// True when the last completed match scan stopped at
+    /// [`crate::file_match::MAX_MATCH_OFFSETS`] — the visible match set is
+    /// truncated and the UI must say so (issue #150).
+    pub match_capped: bool,
+    /// Request id of the in-flight background match-window read; the result
+    /// applies only when the ids match (a newer request supersedes).
+    pub match_window_inflight: Option<u64>,
 }
 
 impl LogView {
@@ -83,12 +208,16 @@ impl LogView {
             flat_lines: Arc::new(Vec::new()),
             flat_lines_dirty: true,
             flat_lines_record_cursor: 0,
-            visual_row_index: RefCell::new(Arc::new(VisualRowIndex::invalid())),
+            visual_row_index: VisualRowIndexSlot::new(),
             filter_engine: FilterEngine::new(tab.filters),
             overlay_len: 0,
-            match_offsets: Vec::new(),
+            match_offsets: Arc::new(Vec::new()),
             match_scan_pos: None,
             match_window_start: 0,
+            match_scan_token: 0,
+            match_scan_inflight: false,
+            match_capped: false,
+            match_window_inflight: None,
         }
     }
 
@@ -150,17 +279,26 @@ impl LogView {
         self.set_filters(Vec::new());
     }
 
-    /// Restart whole-file match scan (file filter tabs).
+    /// Restart whole-file match scan (file filter tabs). Bumping the token
+    /// orphans any in-flight background scan or window read for this view.
     pub fn invalidate_match_index(&mut self) {
-        self.match_offsets.clear();
+        self.match_offsets = Arc::new(Vec::new());
         self.match_scan_pos = Some(0);
         self.match_window_start = 0;
+        self.match_scan_token = self.match_scan_token.wrapping_add(1);
+        self.match_scan_inflight = false;
+        self.match_capped = false;
+        self.match_window_inflight = None;
     }
 
     pub fn clear_match_index(&mut self) {
-        self.match_offsets.clear();
+        self.match_offsets = Arc::new(Vec::new());
         self.match_scan_pos = None;
         self.match_window_start = 0;
+        self.match_scan_token = self.match_scan_token.wrapping_add(1);
+        self.match_scan_inflight = false;
+        self.match_capped = false;
+        self.match_window_inflight = None;
     }
 
     pub fn uses_match_index(&self) -> bool {
@@ -407,22 +545,19 @@ impl LogView {
         self.search_match_scan_end = 0;
     }
 
-    /// Ensure the visual-row index matches current flat lines + geometry; return shared handle.
+    /// Ensure the visual-row index matches current flat lines + geometry; return owned snapshot.
     pub fn ensure_visual_row_index(
         &self,
         viewport_width: u32,
         cell_width: u32,
     ) -> Arc<VisualRowIndex> {
-        {
-            let slot = self.visual_row_index.borrow();
-            if slot.is_valid_for(
-                self.flat_lines.len(),
-                self.wrap_lines,
-                viewport_width,
-                cell_width,
-            ) {
-                return Arc::clone(&slot);
-            }
+        if let Some(index) = self.visual_row_index.get_valid_for(
+            self.flat_lines.len(),
+            self.wrap_lines,
+            viewport_width,
+            cell_width,
+        ) {
+            return index;
         }
         let rebuilt = Arc::new(VisualRowIndex::rebuild(
             &self.flat_lines,
@@ -430,7 +565,7 @@ impl LogView {
             viewport_width,
             cell_width,
         ));
-        *self.visual_row_index.borrow_mut() = Arc::clone(&rebuilt);
+        self.visual_row_index.store(Arc::clone(&rebuilt));
         rebuilt
     }
 
@@ -450,28 +585,13 @@ impl LogView {
     }
 
     fn invalidate_visual_row_index(&self) {
-        *self.visual_row_index.borrow_mut() = Arc::new(VisualRowIndex::invalid());
+        self.visual_row_index.invalidate();
     }
 
     /// Extend a still-valid index after flat lines were appended from `from_flat`.
     fn extend_visual_row_index_from(&mut self, from_flat: usize) {
-        let mut slot = self.visual_row_index.borrow_mut();
-        if !slot.valid_geometry_only(self.wrap_lines) || slot.flat_len() != from_flat {
-            *slot = Arc::new(VisualRowIndex::invalid());
-            return;
-        }
-        let lines = &self.flat_lines[from_flat..];
-        if lines.is_empty() {
-            return;
-        }
-        match Arc::get_mut(&mut *slot) {
-            Some(idx) => idx.extend_lines(lines),
-            None => {
-                let mut owned = (**slot).clone();
-                owned.extend_lines(lines);
-                *slot = Arc::new(owned);
-            }
-        }
+        self.visual_row_index
+            .extend_from(self.wrap_lines, from_flat, &self.flat_lines);
     }
 
     pub fn request_match_rebuild(&mut self) {
@@ -506,21 +626,7 @@ impl LogView {
         }
         let keep = self.flat_lines.len().saturating_sub(self.overlay_len);
         Arc::make_mut(&mut self.flat_lines).truncate(keep);
-        {
-            let mut slot = self.visual_row_index.borrow_mut();
-            if slot.valid_geometry_only(self.wrap_lines) && slot.flat_len() >= keep {
-                match Arc::get_mut(&mut *slot) {
-                    Some(idx) => idx.truncate_flat(keep),
-                    None => {
-                        let mut owned = (**slot).clone();
-                        owned.truncate_flat(keep);
-                        *slot = Arc::new(owned);
-                    }
-                }
-            } else {
-                *slot = Arc::new(VisualRowIndex::invalid());
-            }
-        }
+        self.visual_row_index.truncate_to(self.wrap_lines, keep);
         self.overlay_len = 0;
     }
 
@@ -634,38 +740,12 @@ impl LogView {
         lines.extend(overlay.iter().cloned());
         self.flat_lines_record_cursor = new_total;
         self.overlay_len = overlay.len();
-
-        {
-            let mut slot = self.visual_row_index.borrow_mut();
-            if slot.valid_geometry_only(self.wrap_lines) && slot.flat_len() >= stable_flat_before {
-                match Arc::get_mut(&mut *slot) {
-                    Some(idx) => {
-                        idx.truncate_flat(stable_flat_before);
-                        if shifted_raw_lines > 0 {
-                            idx.drop_prefix(shifted_raw_lines);
-                        }
-                        let from = idx.flat_len();
-                        if from < self.flat_lines.len() {
-                            idx.extend_lines(&self.flat_lines[from..]);
-                        }
-                    }
-                    None => {
-                        let mut owned = (**slot).clone();
-                        owned.truncate_flat(stable_flat_before);
-                        if shifted_raw_lines > 0 {
-                            owned.drop_prefix(shifted_raw_lines);
-                        }
-                        let from = owned.flat_len();
-                        if from < self.flat_lines.len() {
-                            owned.extend_lines(&self.flat_lines[from..]);
-                        }
-                        *slot = Arc::new(owned);
-                    }
-                }
-            } else {
-                *slot = Arc::new(VisualRowIndex::invalid());
-            }
-        }
+        self.visual_row_index.patch_after_ring_shift(
+            self.wrap_lines,
+            stable_flat_before,
+            shifted_raw_lines,
+            &self.flat_lines,
+        );
         true
     }
 

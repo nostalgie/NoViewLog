@@ -61,6 +61,9 @@ export component AppWindow inherits Window {
     in-out property <string> status-text: "ready";
     // Live "current / total" line counter (right side of status bar).
     in-out property <string> line-position-text: "";
+    // FILES filter scan hit the match-offset cap: persistent truncation hint
+    // (disc + text, issue #150). Engine clears it on the next scan/invalidate.
+    in-out property <bool> matches-capped: false;
     in-out property <[TabInfo]> tabs-model;
     in-out property <int> active-tab-index: 0;
     in-out property <bool> can-restore-tab: false;
@@ -2630,6 +2633,32 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                             }
 
+                            // Match-set truncation hint (issue #150): Theme disc
+                            // marker — never a Unicode icon — plus plain text.
+                            if root.matches-capped: HorizontalLayout {
+                                horizontal-stretch: 0;
+                                spacing: 6px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+
+                                    Rectangle {
+                                        width: 7px;
+                                        height: 7px;
+                                        border-radius: 3.5px;
+                                        background: Theme.exclude;
+                                    }
+                                }
+
+                                Text {
+                                    text: "matches capped";
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                            }
+
                             if root.line-position-text != "": Text {
                                 text: root.line-position-text;
                                 color: Theme.text-muted;
@@ -2931,6 +2960,7 @@ export component AppWindow inherits Window {
             title: "Close NoViewLog?";
             ok-text: "Close";
             cancel-text: "Cancel";
+            footer-start: true;
             width: 100%;
             cancelled => { root.close-quit-confirm(); }
             confirmed => { root.confirm-quit(); }

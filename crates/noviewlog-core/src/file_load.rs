@@ -1,9 +1,15 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use crate::file_index::{decode_lossy_line, FileBackedLog, LineIndex, TempFileGuard, INDEX_BYTES_PER_TICK};
+use crate::file_index::{
+    decode_lossy_line, read_line_bounded, FileBackedLog, LineIndex, TempFileGuard,
+    INDEX_BYTES_PER_TICK, LINE_TRUNCATION_MARKER,
+};
 
 /// Files above this size show a small tail window immediately while the line
 /// index is built in the background.
@@ -53,10 +59,7 @@ fn sniff_encoding(prefix: &[u8]) -> Result<FileEncoding, String> {
 
 /// Transcode a UTF-16 (BOM-prefixed) file to a UTF-8 temp file and return its
 /// path + size. Unpaired surrogates become U+FFFD instead of failing the load.
-fn transcode_utf16_to_temp(
-    file: &mut File,
-    big_endian: bool,
-) -> Result<(PathBuf, u64), String> {
+fn transcode_utf16_to_temp(file: &mut File, big_endian: bool) -> Result<(PathBuf, u64), String> {
     static TRANSCODE_SEQ: AtomicU64 = AtomicU64::new(0);
     let out_path = std::env::temp_dir().join(format!(
         "noviewlog-utf16-{}-{}.log",
@@ -77,7 +80,9 @@ fn transcode_utf16_to_temp(
     let mut stage: Vec<u8> = Vec::with_capacity(65_536 + 1);
     let mut chunk = vec![0u8; 65_536];
     loop {
-        let n = reader.read(&mut chunk).map_err(|e| format!("Read error: {e}"))?;
+        let n = reader
+            .read(&mut chunk)
+            .map_err(|e| format!("Read error: {e}"))?;
         if n == 0 {
             break;
         }
@@ -138,6 +143,10 @@ pub struct FileLoadState {
     pub index_finished: bool,
     /// File the IO actually targets (temp UTF-8 copy for UTF-16 sessions).
     source_path: PathBuf,
+    /// On-disk identity of the watched original at open time (issue #151),
+    /// carried into the derived [`FileBackedLog`] for change detection.
+    watch_size: u64,
+    watch_mtime: Option<SystemTime>,
     /// Deletes the temp copy when this state (or the derived FileBackedLog) drops.
     temp: Option<TempFileGuard>,
 }
@@ -146,7 +155,9 @@ impl FileLoadState {
     pub fn open(path: &str) -> Result<Self, String> {
         let path = crate::core::config::expand_path(path);
         let mut file = File::open(&path).map_err(|e| format!("Failed to open {path}: {e}"))?;
-        let raw_size = file.metadata().map_err(|e| e.to_string())?.len();
+        let raw_meta = file.metadata().map_err(|e| e.to_string())?;
+        let raw_size = raw_meta.len();
+        let watch_mtime = raw_meta.modified().ok();
 
         // Sniff a BOM on a cloned handle so `file` stays at position 0.
         let encoding = {
@@ -178,8 +189,8 @@ impl FileLoadState {
             FileEncoding::Plain => (PathBuf::from(&path), raw_size, None, 0u64),
         };
 
-        let content_file = File::open(&source_path)
-            .map_err(|e| format!("Failed to open {path}: {e}"))?;
+        let content_file =
+            File::open(&source_path).map_err(|e| format!("Failed to open {path}: {e}"))?;
         let large = file_size > FILE_LARGE_BYTES;
         let (content_reader, content_start_byte) = if large {
             open_tail_reader(content_file, file_size)?
@@ -193,8 +204,8 @@ impl FileLoadState {
             (Some(BufReader::new(content_file)), bom_skip)
         };
 
-        let index_file = File::open(&source_path)
-            .map_err(|e| format!("Failed to open {path}: {e}"))?;
+        let index_file =
+            File::open(&source_path).map_err(|e| format!("Failed to open {path}: {e}"))?;
 
         Ok(Self {
             path,
@@ -213,6 +224,8 @@ impl FileLoadState {
             index_bytes_done: bom_skip,
             index_finished: file_size == 0,
             source_path,
+            watch_size: raw_size,
+            watch_mtime,
             temp,
         })
     }
@@ -228,13 +241,17 @@ impl FileLoadState {
                     .min(limit.saturating_sub(self.content_lines_read as usize));
                 for _ in 0..budget {
                     let mut raw = Vec::new();
-                    match reader.read_until(b'\n', &mut raw) {
-                        Ok(0) => {
+                    match read_line_bounded(reader, &mut raw) {
+                        Ok((0, _)) => {
                             self.content_finished = true;
                             break;
                         }
-                        Ok(_) => {
-                            lines.push(decode_lossy_line(&raw));
+                        Ok((_, truncated)) => {
+                            let mut text = decode_lossy_line(&raw);
+                            if truncated {
+                                text.push_str(LINE_TRUNCATION_MARKER);
+                            }
+                            lines.push(text);
                             self.content_lines_read += 1;
                         }
                         Err(err) => {
@@ -256,9 +273,9 @@ impl FileLoadState {
         // Index in parallel with content so large files become scrollable sooner.
         if let Some(file) = self.index_file.as_mut() {
             if !self.index_finished {
-                let (next, done) = self
-                    .index
-                    .scan_chunk(file, self.index_bytes_done, INDEX_BYTES_PER_TICK)?;
+                let (next, done) =
+                    self.index
+                        .scan_chunk(file, self.index_bytes_done, INDEX_BYTES_PER_TICK)?;
                 self.index_bytes_done = next;
                 if done {
                     self.index_finished = true;
@@ -278,8 +295,10 @@ impl FileLoadState {
             .map_err(|e| format!("Failed to open {}: {e}", self.path))?;
         Ok(FileBackedLog {
             path: self.path,
-            file,
+            file: Arc::new(std::sync::Mutex::new(file)),
             index: self.index,
+            watch_size: self.watch_size,
+            watch_mtime: self.watch_mtime,
             temp: self.temp,
         })
     }
@@ -294,24 +313,182 @@ impl FileLoadState {
     }
 }
 
-fn open_tail_reader(mut file: File, file_size: u64) -> Result<(Option<BufReader<File>>, u64), String> {
+fn open_tail_reader(
+    mut file: File,
+    file_size: u64,
+) -> Result<(Option<BufReader<File>>, u64), String> {
     let seek_pos = file_size.saturating_sub(FILE_INITIAL_TAIL_BYTES);
     file.seek(SeekFrom::Start(seek_pos))
         .map_err(|e| format!("Seek failed: {e}"))?;
 
     let mut reader = BufReader::new(file);
+    let mut content_start = seek_pos;
     if seek_pos > 0 {
         // The seek offset is arbitrary and may land inside a multi-byte UTF-8
         // sequence (Cyrillic / CJK / emoji logs). Discard the partial line as
         // raw bytes: `read_line` would fail UTF-8 validation and abort the
-        // whole file open.
+        // whole file open. Content starts after the discarded bytes, at the
+        // next line start (issue #161).
         let mut discard = Vec::new();
-        if let Err(err) = reader.read_until(b'\n', &mut discard) {
-            return Err(format!("Read error after seek: {err}"));
-        }
+        let (consumed, _) = read_line_bounded(&mut reader, &mut discard)
+            .map_err(|err| format!("Read error after seek: {err}"))?;
+        content_start = seek_pos + consumed as u64;
     }
 
-    Ok((Some(reader), seek_pos))
+    Ok((Some(reader), content_start))
+}
+
+/// One step of background load progress (issue #55): the load/index pipeline
+/// runs on a worker thread and reports through a channel the engine drains
+/// per tick. The UI thread performs zero filesystem work during a load.
+pub enum LoadEvent {
+    /// A content batch plus index state after one worker tick.
+    Progress {
+        lines: Vec<String>,
+        content_done: bool,
+        index_done: bool,
+        content_lines_read: u64,
+        index_progress: f32,
+        /// `Some(line)` once the index can map the tail window start byte;
+        /// `Some(0)` immediately when content starts at byte 0.
+        tail_start_line: Option<u64>,
+    },
+    /// Load finished; `backed` carries the index + shared read handle.
+    Done {
+        backed: Box<FileBackedLog>,
+        content_lines_read: u64,
+        tail_start_line: u64,
+    },
+    Failed(String),
+}
+
+/// Engine-side handle to a background load. Dropping it stops the worker
+/// (the channel send fails on the next tick boundary).
+pub struct FileLoadHandle {
+    pub path: String,
+    rx: mpsc::Receiver<LoadEvent>,
+    /// Mirrored worker state for stats (`file_index_progress`).
+    pub index_progress: f32,
+    pub content_lines_read: u64,
+    pub index_done: bool,
+}
+
+impl FileLoadHandle {
+    /// Take at most `max` pending events (never blocks).
+    pub fn drain(&mut self, max: usize) -> Vec<LoadEvent> {
+        let mut out = Vec::new();
+        while out.len() < max {
+            match self.rx.try_recv() {
+                Ok(event) => {
+                    match &event {
+                        LoadEvent::Progress {
+                            content_lines_read,
+                            index_progress,
+                            index_done,
+                            ..
+                        } => {
+                            self.content_lines_read = *content_lines_read;
+                            self.index_progress = *index_progress;
+                            self.index_done = *index_done;
+                        }
+                        LoadEvent::Done { .. } | LoadEvent::Failed(_) => {}
+                    }
+                    out.push(event);
+                }
+                Err(_) => break,
+            }
+        }
+        out
+    }
+}
+
+/// Cap on load events applied per engine tick: bounds UI work per tick while
+/// the worker free-runs ahead (the channel buffers the rest in order).
+pub const LOAD_EVENTS_PER_TICK: usize = 32;
+
+/// Start a background load of `path`: opening, BOM sniffing, UTF-16
+/// transcoding, content reads, and index scans all run on a worker thread
+/// (issue #55). The handle drains [`LoadEvent`]s on the engine tick.
+pub fn spawn_file_load(path: &str) -> FileLoadHandle {
+    let (tx, rx) = mpsc::channel();
+    let owned_path = path.to_string();
+    std::thread::Builder::new()
+        .name("noviewlog-file-load".into())
+        .spawn(move || {
+            let mut state = match FileLoadState::open(&owned_path) {
+                Ok(state) => state,
+                Err(message) => {
+                    let _ = tx.send(LoadEvent::Failed(message));
+                    return;
+                }
+            };
+            let content_start_byte = state.content_start_byte;
+            // Exact line number of the content window start once the index is
+            // complete (interpolated line_at_offset can be off by a whole
+            // checkpoint stride on uneven line lengths — issue #161).
+            let exact_tail_start_line = |state: &mut FileLoadState| -> u64 {
+                match state.index_file.as_mut() {
+                    Some(file) => state
+                        .index
+                        .line_at_byte_exact(file, content_start_byte)
+                        .unwrap_or_else(|_| state.index.line_at_offset(content_start_byte)),
+                    None => state.index.line_at_offset(content_start_byte),
+                }
+            };
+            loop {
+                match state.tick() {
+                    Ok((lines, content_done, index_done)) => {
+                        let tail_start_line = if state.index_finished {
+                            Some(exact_tail_start_line(&mut state))
+                        } else if content_start_byte == 0 {
+                            Some(0)
+                        } else {
+                            None
+                        };
+                        let event = LoadEvent::Progress {
+                            lines,
+                            content_done,
+                            index_done,
+                            content_lines_read: state.content_lines_read,
+                            index_progress: state.index_progress(),
+                            tail_start_line,
+                        };
+                        if tx.send(event).is_err() {
+                            return;
+                        }
+                        if state.is_finished() {
+                            let content_lines_read = state.content_lines_read;
+                            let tail_start_line = exact_tail_start_line(&mut state);
+                            match state.into_backed() {
+                                Ok(backed) => {
+                                    let _ = tx.send(LoadEvent::Done {
+                                        backed: Box::new(backed),
+                                        content_lines_read,
+                                        tail_start_line,
+                                    });
+                                }
+                                Err(message) => {
+                                    let _ = tx.send(LoadEvent::Failed(message));
+                                }
+                            }
+                            return;
+                        }
+                    }
+                    Err(message) => {
+                        let _ = tx.send(LoadEvent::Failed(message));
+                        return;
+                    }
+                }
+            }
+        })
+        .expect("spawn file-load worker");
+    FileLoadHandle {
+        path: path.to_string(),
+        rx,
+        index_progress: 0.0,
+        content_lines_read: 0,
+        index_done: false,
+    }
 }
 
 /// Create a temp log for tests (line_count lines, each ~20 bytes).
@@ -340,6 +517,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow tier: generates + indexes a large fixture; run with -- --ignored"]
     fn large_file_starts_at_tail_but_indexes_whole_file() {
         let path = temp_log_path("large");
         {
@@ -376,7 +554,7 @@ mod tests {
         assert_eq!(state.index.total_lines(), 90_000);
 
         let backed = state.into_backed().unwrap();
-        let mut file = backed.file;
+        let mut file = backed.file.lock().unwrap();
         let early = backed.index.read_lines(&mut file, 0, 2).unwrap();
         assert!(early[0].contains("line 000000"));
 
@@ -384,6 +562,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow tier: generates + indexes a large fixture; run with -- --ignored"]
     fn tail_seek_mid_utf8_char_opens_large_file() {
         // Regression for issue #50: the tail seek offset (file_size - 2 MiB)
         // must land inside a multi-byte UTF-8 character. Layout (byte offsets):
@@ -407,7 +586,9 @@ mod tests {
         }
         let mut state = FileLoadState::open(path.to_str().unwrap()).unwrap();
         assert!(state.file_size > FILE_LARGE_BYTES);
-        assert_eq!(state.content_start_byte, prefix_len as u64 + 1);
+        // Content starts after the discarded partial line: 2 bytes of the
+        // split char + the first complete "s00000000\n" line (issue #161).
+        assert_eq!(state.content_start_byte, prefix_len as u64 + 13);
 
         // The partial line (rest of the char + first suffix line) is discarded;
         // content starts at the first complete line after it.
@@ -464,7 +645,7 @@ mod tests {
         assert_eq!(lines[1], "plain");
         assert_eq!(state.index.total_lines(), 2);
 
-        let mut backed = state.into_backed().unwrap();
+        let backed = state.into_backed().unwrap();
         let read = backed.read_lines(0, 2).unwrap();
         assert!(read[0].contains('\u{FFFD}'));
         assert_eq!(read[1], "plain");
@@ -480,10 +661,7 @@ mod tests {
             let mut f = std::fs::File::create(&path).unwrap();
             let text = "alpha\r\nerror beta\r\n";
             let units: Vec<u16> = text.encode_utf16().collect();
-            let bytes: Vec<u8> = units
-                .iter()
-                .flat_map(|u| u.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
             f.write_all(&[0xFF, 0xFE]).unwrap();
             f.write_all(&bytes).unwrap();
         }
@@ -492,8 +670,11 @@ mod tests {
         assert_eq!(lines, vec!["alpha", "error beta"]);
         assert_eq!(state.index.total_lines(), 2);
 
-        let mut backed = state.into_backed().unwrap();
-        assert_eq!(backed.read_lines(0, 2).unwrap(), vec!["alpha", "error beta"]);
+        let backed = state.into_backed().unwrap();
+        assert_eq!(
+            backed.read_lines(0, 2).unwrap(),
+            vec!["alpha", "error beta"]
+        );
         drop(backed);
         // Temp copy is removed with the backed log.
         let _ = std::fs::remove_file(path);
@@ -507,10 +688,7 @@ mod tests {
             let mut f = std::fs::File::create(&path).unwrap();
             let text = "one\nдва\n";
             let units: Vec<u16> = text.encode_utf16().collect();
-            let bytes: Vec<u8> = units
-                .iter()
-                .flat_map(|u| u.to_be_bytes())
-                .collect();
+            let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_be_bytes()).collect();
             f.write_all(&[0xFE, 0xFF]).unwrap();
             f.write_all(&bytes).unwrap();
         }
@@ -552,7 +730,7 @@ mod tests {
         let lines = drain_content(&mut state);
         assert_eq!(lines, vec!["alpha", "beta"]);
 
-        let mut backed = state.into_backed().unwrap();
+        let backed = state.into_backed().unwrap();
         assert_eq!(backed.read_lines(0, 2).unwrap(), vec!["alpha", "beta"]);
         let _ = std::fs::remove_file(path);
     }
@@ -591,5 +769,106 @@ mod tests {
             "sparse index took {index_ms}ms (want <15s)"
         );
         assert!(state.index.total_lines() > 100_000);
+    }
+
+    #[test]
+    fn backed_log_records_open_time_watch_identity() {
+        // Issue #151: change detection compares against the ORIGINAL path's
+        // stat at open time.
+        let path = temp_log_path("watch-identity");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "alpha").unwrap();
+            writeln!(f, "beta").unwrap();
+        }
+        let mut state = FileLoadState::open(path.to_str().unwrap()).unwrap();
+        let _ = drain_content(&mut state);
+        let backed = state.into_backed().unwrap();
+        assert_eq!(
+            backed.watch_size,
+            std::fs::metadata(&path).unwrap().len(),
+            "watch size must be the original path's size at open"
+        );
+        assert!(backed.watch_mtime.is_some(), "mtime recorded for watching");
+        assert!(!backed.changed_on_disk());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn utf16_session_watches_original_size_not_temp_copy() {
+        // Issue #151: the index covers the transcoded temp UTF-8 copy, so the
+        // watch baseline must be stored explicitly from the original stat —
+        // deriving it from `index.file_size()` would false-positive forever.
+        let path = temp_log_path("utf16-watch");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).unwrap();
+            let text = "alpha\r\nbeta\r\n";
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let bytes: Vec<u8> = units.iter().flat_map(|u| u.to_le_bytes()).collect();
+            f.write_all(&[0xFF, 0xFE]).unwrap();
+            f.write_all(&bytes).unwrap();
+        }
+        let original_size = std::fs::metadata(&path).unwrap().len();
+        let mut state = FileLoadState::open(path.to_str().unwrap()).unwrap();
+        let _ = drain_content(&mut state);
+        let backed = state.into_backed().unwrap();
+        assert_eq!(backed.watch_size, original_size);
+        assert_ne!(
+            backed.watch_size,
+            backed.index.file_size(),
+            "index size is the temp UTF-8 copy, not the watched original"
+        );
+        assert!(!backed.changed_on_disk());
+        drop(backed);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn content_start_byte_is_an_exact_line_start_on_uneven_lines() {
+        // Issue #161: a huge single line before the tail seek must not skew
+        // content_start_byte or the resolved tail line number.
+        let path = temp_log_path("uneven-tail");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            // One oversized line (no newline) larger than the tail window,
+            // then many short lines.
+            let huge_len = FILE_LARGE_BYTES as usize + 4096;
+            f.write_all(format!("huge {}\n", "h".repeat(huge_len)).as_bytes())
+                .unwrap();
+            for i in 0..3000 {
+                writeln!(f, "t{i:06}").unwrap();
+            }
+        }
+        let mut state = FileLoadState::open(path.to_str().unwrap()).unwrap();
+        assert!(state.file_size > FILE_LARGE_BYTES);
+        let csb = state.content_start_byte;
+        while !state.index_finished {
+            state.tick().unwrap();
+        }
+        assert!(csb > 0);
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        // Ground truth: count newlines strictly before the content start.
+        file.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut all = Vec::new();
+        {
+            use std::io::Read;
+            file.read_to_end(&mut all).unwrap();
+        }
+        let expected_line = all[..csb as usize].iter().filter(|&&b| b == b'\n').count() as u64;
+        let resolved = state.index.line_at_byte_exact(&mut file, csb).unwrap();
+        assert_eq!(
+            resolved, expected_line,
+            "resolved tail line must equal the newline count before content_start_byte"
+        );
+        // Round-trip through the exact offset resolver.
+        assert_eq!(
+            state.index.offset_of_exact(&mut file, resolved).unwrap(),
+            Some(csb),
+            "the resolved line must start exactly at content_start_byte"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 }

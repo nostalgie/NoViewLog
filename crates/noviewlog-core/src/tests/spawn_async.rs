@@ -4,8 +4,8 @@
 //! starts synchronously; Stop cancels a spawn that is still resolving.
 
 use crate::engine::Engine;
-use crate::spawn_resolver::SpawnResolver;
 use crate::spawn_resolve::PreparedSpawn;
+use crate::spawn_resolver::SpawnResolver;
 use crate::tests::USER_CONFIG_LOCK;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -27,21 +27,18 @@ fn engine_isolated() -> Engine {
 fn gated_resolver() -> (SpawnResolver, Arc<(Mutex<bool>, Condvar)>) {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let gate2 = gate.clone();
-    let resolve: BoxedResolve =
-        Arc::new(move |command, args, cwd| {
-            let (lock, cv) = &*gate2;
-            let mut open = lock.lock().unwrap_or_else(|e| e.into_inner());
-            while !*open {
-                open = cv
-                    .wait(open)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-            Ok(PreparedSpawn {
-                command: command.to_string(),
-                args,
-                cwd: cwd.to_string(),
-            })
-        });
+    let resolve: BoxedResolve = Arc::new(move |command, args, cwd| {
+        let (lock, cv) = &*gate2;
+        let mut open = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while !*open {
+            open = cv.wait(open).unwrap_or_else(|e| e.into_inner());
+        }
+        Ok(PreparedSpawn {
+            command: command.to_string(),
+            args,
+            cwd: cwd.to_string(),
+        })
+    });
     (SpawnResolver::with_resolve_fn(resolve), gate)
 }
 
@@ -68,6 +65,7 @@ fn wait_for_pty(engine: &mut Engine, terminal_id: &str) -> bool {
 }
 
 #[test]
+#[ignore = "slow tier: real shell spawn + wall-clock poll; run with -- --ignored"]
 fn cold_start_parks_spawn_then_applies_and_buffers_stdin() {
     let _guard = USER_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut engine = engine_isolated();
@@ -114,20 +112,20 @@ fn cold_start_parks_spawn_then_applies_and_buffers_stdin() {
 }
 
 #[test]
+#[ignore = "slow tier: real shell spawn + wall-clock poll; run with -- --ignored"]
 fn warm_cache_starts_synchronously_without_new_resolution() {
     let _guard = USER_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut engine = engine_isolated();
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
-    let resolve: BoxedResolve =
-        Arc::new(move |command, args, cwd| {
-            calls2.fetch_add(1, Ordering::SeqCst);
-            Ok(PreparedSpawn {
-                command: command.to_string(),
-                args,
-                cwd: cwd.to_string(),
-            })
-        });
+    let resolve: BoxedResolve = Arc::new(move |command, args, cwd| {
+        calls2.fetch_add(1, Ordering::SeqCst);
+        Ok(PreparedSpawn {
+            command: command.to_string(),
+            args,
+            cwd: cwd.to_string(),
+        })
+    });
     let resolver = SpawnResolver::with_resolve_fn(resolve);
     engine.set_spawn_resolver_for_test(resolver.clone());
 
@@ -159,20 +157,20 @@ fn warm_cache_starts_synchronously_without_new_resolution() {
 }
 
 #[test]
+#[ignore = "slow tier: real shell spawn + wall-clock poll; run with -- --ignored"]
 fn warm_saved_launch_starts_synchronously() {
     let _guard = USER_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut engine = engine_isolated();
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
-    let resolve: BoxedResolve =
-        Arc::new(move |command, args, cwd| {
-            calls2.fetch_add(1, Ordering::SeqCst);
-            Ok(PreparedSpawn {
-                command: command.to_string(),
-                args,
-                cwd: cwd.to_string(),
-            })
-        });
+    let resolve: BoxedResolve = Arc::new(move |command, args, cwd| {
+        calls2.fetch_add(1, Ordering::SeqCst);
+        Ok(PreparedSpawn {
+            command: command.to_string(),
+            args,
+            cwd: cwd.to_string(),
+        })
+    });
     let resolver = SpawnResolver::with_resolve_fn(resolve);
     engine.set_spawn_resolver_for_test(resolver.clone());
 
@@ -220,6 +218,7 @@ fn warm_saved_launch_starts_synchronously() {
 }
 
 #[test]
+#[ignore = "slow tier: real shell spawn + wall-clock poll; run with -- --ignored"]
 fn stop_cancels_spawn_still_resolving() {
     let _guard = USER_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut engine = engine_isolated();
@@ -231,7 +230,10 @@ fn stop_cancels_spawn_still_resolving() {
     assert!(!engine.has_pty_for_test(&id));
 
     engine.stop(Some(&id));
-    assert!(!engine.spawn_pending_for_test(&id), "stop must cancel the parked spawn");
+    assert!(
+        !engine.spawn_pending_for_test(&id),
+        "stop must cancel the parked spawn"
+    );
     assert!(!engine.active_terminal_running_for_test());
 
     // Even when the stale resolution lands afterwards, no PTY may appear.
@@ -249,6 +251,7 @@ fn stop_cancels_spawn_still_resolving() {
 }
 
 #[test]
+#[ignore = "slow tier: real shell spawn + wall-clock poll; run with -- --ignored"]
 fn launch_spawn_failure_surfaces_status_and_unsticks() {
     let _guard = USER_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut engine = engine_isolated();
@@ -275,7 +278,10 @@ fn launch_spawn_failure_surfaces_status_and_unsticks() {
         if !engine.active_terminal_running_for_test() && !engine.spawn_pending_for_test(&id) {
             break;
         }
-        assert!(Instant::now() < deadline, "spawn failure was never surfaced");
+        assert!(
+            Instant::now() < deadline,
+            "spawn failure was never surfaced"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(

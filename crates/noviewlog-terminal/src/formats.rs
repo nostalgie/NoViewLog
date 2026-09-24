@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::types::{compile_regex, FormatPreset, LogFormat};
+use crate::types::{compile_regex, FormatPreset, LogFormat};
 
 pub fn builtin_format_presets() -> HashMap<String, FormatPreset> {
     HashMap::from([

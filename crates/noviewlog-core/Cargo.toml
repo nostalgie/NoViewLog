@@ -11,6 +11,7 @@ name = "noviewlog_core"
 crate-type = ["rlib"]
 
 [dependencies]
+noviewlog-terminal = { path = "../noviewlog-terminal", version = "0.1.0" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dirs = "6"
 fontdue = "0.9"
@@ -25,6 +26,9 @@ serde_json = "1"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 ttf-parser = "0.25"
 vte = "0.15"
+
+[lints]
+workspace = true
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10"

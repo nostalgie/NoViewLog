@@ -113,11 +113,7 @@ mod tests {
             for &maximum in &maxima {
                 for &page in &pages {
                     for t in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
-                        let value = if maximum <= 0.5 {
-                            0.0
-                        } else {
-                            maximum * t
-                        };
+                        let value = if maximum <= 0.5 { 0.0 } else { maximum * t };
                         assert_in_bounds(track, value, maximum, page);
                     }
                 }

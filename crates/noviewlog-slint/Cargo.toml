@@ -23,6 +23,9 @@ rfd = "0.15"
 # unstable-winit-030: Occluded / minimize events (Wayland often leaves Window::is_minimized stuck).
 slint = { version = "~1.17", features = ["unstable-winit-030"] }
 
+[lints]
+workspace = true
+
 [build-dependencies]
 slint-build = "1.17"
 

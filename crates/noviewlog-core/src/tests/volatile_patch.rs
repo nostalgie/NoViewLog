@@ -141,7 +141,11 @@ fn filter_tab_does_not_see_uncommitted_live_screen() {
     assert!(before > 0);
 
     ingest.feed(b"spinner-frame-aaaa", &mut buffer, &mut parser);
-    assert_eq!(buffer.records_len(), 100, "live screen must not add Records");
+    assert_eq!(
+        buffer.records_len(),
+        100,
+        "live screen must not add Records"
+    );
     filter_tab.rebuild(&mut buffer);
     assert_eq!(
         filter_tab.flat_lines.len(),
@@ -178,14 +182,7 @@ fn failed_patch_does_not_strip_overlay() {
     let overlay_n = view.overlay_len();
     let recs = buffer.records_len();
     assert!(
-        !view.try_patch_committed_and_overlay(
-            &mut buffer,
-            overlay_n,
-            recs,
-            &overlay,
-            recs,
-            0
-        ),
+        !view.try_patch_committed_and_overlay(&mut buffer, overlay_n, recs, &overlay, recs, 0),
         "filtered view must refuse patch"
     );
     assert_eq!(
@@ -213,14 +210,7 @@ fn first_patch_with_zero_overlay_len_keeps_committed_prefix() {
     let overlay = ingest.overlay_flat_lines();
     let new_total = buffer.records_len();
     assert!(
-        view.try_patch_committed_and_overlay(
-            &mut buffer,
-            0,
-            80,
-            &overlay,
-            new_total,
-            shifted
-        ),
+        view.try_patch_committed_and_overlay(&mut buffer, 0, 80, &overlay, new_total, shifted),
         "first overlay apply must patch"
     );
     assert_eq!(
