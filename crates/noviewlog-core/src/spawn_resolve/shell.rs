@@ -4,10 +4,10 @@ use crate::core::types::ShellPreference;
 
 /// Executable name for an interactive shell (issue #68). Pure on explicit
 /// preferences; `auto`/`pwsh` probe PATH for PowerShell 7 on Windows.
-pub(super) fn default_interactive_shell(shell: ShellPreference) -> String {
+pub(super) fn default_interactive_shell(_shell: ShellPreference) -> String {
     #[cfg(windows)]
     {
-        match shell {
+        match _shell {
             ShellPreference::Cmd => "cmd.exe".to_string(),
             ShellPreference::Powershell => "powershell.exe".to_string(),
             // Explicit pwsh keeps the name even when missing, so the spawn
@@ -72,3 +72,7 @@ fn pwsh_available() -> bool {
 pub fn prewarm_shell_probe() {
     std::thread::spawn(pwsh_available);
 }
+
+/// No pwsh probe off Windows: `auto` shells resolve directly on POSIX.
+#[cfg(not(windows))]
+pub fn prewarm_shell_probe() {}

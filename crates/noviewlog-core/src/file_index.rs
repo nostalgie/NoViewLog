@@ -71,7 +71,9 @@ pub(crate) fn read_line_bounded(
             None => {
                 let keep = available.len().min(MAX_LINE_BYTES.saturating_sub(total));
                 out.extend_from_slice(&available[..keep]);
-                truncated |= total + available.len() >= MAX_LINE_BYTES;
+                // Flag truncation only when bytes were actually dropped — a
+                // line of exactly MAX_LINE_BYTES is intact (#197).
+                truncated |= keep < available.len();
                 available.len()
             }
         };
@@ -199,13 +201,20 @@ impl LineIndex {
         line.min(self.line_count.saturating_sub(1))
     }
 
+    /// Last checkpoint with line number `<= line` (`None` before the first).
+    /// Binary search: the vector is sorted by line number; a linear reverse
+    /// scan was O(checkpoints) per read (issue #238).
+    fn checkpoint_at_or_before(&self, line: u64) -> Option<(u64, u64)> {
+        let idx = self.checkpoints.partition_point(|(l, _)| *l <= line);
+        idx.checked_sub(1).map(|i| self.checkpoints[i])
+    }
+
     /// Exact byte offset of `line`, walking from the nearest checkpoint at or before it.
     pub fn offset_of_exact(&self, file: &mut File, line: u64) -> Result<Option<u64>, String> {
         if line >= self.line_count {
             return Ok(None);
         }
-        let Some(&(cp_line, cp_off)) = self.checkpoints.iter().rev().find(|(l, _)| *l <= line)
-        else {
+        let Some((cp_line, cp_off)) = self.checkpoint_at_or_before(line) else {
             return Ok(None);
         };
         if cp_line == line {
@@ -235,11 +244,8 @@ impl LineIndex {
         if line >= self.line_count {
             return None;
         }
-        self.checkpoints
-            .iter()
-            .rev()
-            .find(|(l, _)| *l <= line)
-            .and_then(|(l, o)| if *l == line { Some(*o) } else { None })
+        self.checkpoint_at_or_before(line)
+            .and_then(|(l, o)| if l == line { Some(o) } else { None })
     }
 
     /// Exact line number of the line that starts at `byte` (`byte` must be a
@@ -437,6 +443,42 @@ mod tests {
         for i in 0..n {
             writeln!(f, "line {i:06}").unwrap();
         }
+    }
+
+    /// Issue #238: the binary-search checkpoint lookup must agree with the old
+    /// reverse linear scan on every interesting case.
+    #[test]
+    fn checkpoint_lookup_matches_reverse_scan_reference() {
+        let mut index = LineIndex::new(64 * 1024);
+        // Synthetic set: first checkpoint not at line 0, exact hits, gaps.
+        index.checkpoints = vec![(512, 4096), (1024, 8192), (1536, 16_384)];
+        index.line_count = 2000;
+        let reference = |line: u64| -> Option<(u64, u64)> {
+            index
+                .checkpoints
+                .iter()
+                .rev()
+                .find(|(l, _)| *l <= line)
+                .copied()
+        };
+        for line in [
+            0, 1, 100, 511, 512, 513, 600, 1023, 1024, 1025, 1535, 1536, 1600, 1999, 2000, 5000,
+        ] {
+            assert_eq!(
+                index.checkpoint_at_or_before(line),
+                reference(line),
+                "lookup drift at line {line}"
+            );
+        }
+        // Before the first checkpoint there is no checkpoint to walk from.
+        assert_eq!(index.checkpoint_at_or_before(0), None);
+        assert_eq!(index.checkpoint_at_or_before(511), None);
+        assert_eq!(index.offset_of(0), None);
+        // Exact checkpoint hits resolve without a walk.
+        assert_eq!(index.offset_of(1024), Some(8192));
+        // Non-checkpoint line and beyond-last both miss in `offset_of`.
+        assert_eq!(index.offset_of(1500), None);
+        assert_eq!(index.offset_of(5000), None);
     }
 
     #[test]

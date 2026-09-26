@@ -3,6 +3,13 @@ use chrono::Utc;
 use crate::ansi::strip_ansi;
 use crate::types::{LogFormat, LogRecord};
 
+/// Maximum lines accumulated in one pending record before it is force-flushed.
+/// A stream whose start regex fires once and whose every following line
+/// matches a continuation regex (e.g. `^\s+`) would otherwise grow
+/// `pending_lines` without bound — `RecordBuffer::max_records` never applies
+/// because no record is created (issue #189).
+const MAX_PENDING_LINES: usize = 256;
+
 pub struct RecordParser {
     format: LogFormat,
     pending_lines: Vec<String>,
@@ -49,6 +56,11 @@ impl RecordParser {
         }
 
         if !self.pending_lines.is_empty() && self.is_continuation(&plain) {
+            // Force-flush a full pending record so a continuation-only
+            // stream cannot accumulate without bound (issue #189).
+            if self.pending_lines.len() >= MAX_PENDING_LINES {
+                records.push(self.flush());
+            }
             self.pending_lines.push(line);
             self.pending_plain.push(Some(plain));
             return records;
@@ -141,4 +153,44 @@ pub fn reparse_lines(lines: &[String], format: LogFormat) -> Vec<LogRecord> {
         records.push(last);
     }
     records
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn continuation_only_stream_is_bounded() {
+        // Issue #189: after one start line, lines that all match a
+        // continuation regex must not accumulate without bound.
+        let format = LogFormat {
+            id: "python-test".into(),
+            name: "python-test".into(),
+            start: r"^\[start\]".into(),
+            continuation: vec![r"^\s+".into()],
+            start_regex: Some(Arc::new(regex::Regex::new(r"^\[start\]").unwrap())),
+            continuation_regexes: vec![
+                Arc::new(regex::Regex::new(r"^\s+").unwrap()),
+                Arc::new(regex::Regex::new(r"^\s*$").unwrap()),
+            ],
+        };
+        let mut parser = RecordParser::new(format);
+        parser.push_line("[start] trace".to_string());
+        let mut produced = 0usize;
+        for i in 0..10_000 {
+            let recs = parser.push_line(format!("  line {i}"));
+            produced += recs.len();
+        }
+        // Pending flushes every MAX_PENDING_LINES continuation lines instead
+        // of growing without bound.
+        assert_eq!(produced, 10_000 / MAX_PENDING_LINES);
+        let recs = parser.push_line("[start] next".to_string());
+        assert_eq!(
+            recs.len(),
+            1,
+            "pending record flushes on the next start line"
+        );
+        assert!(parser.has_pending());
+    }
 }

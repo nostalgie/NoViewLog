@@ -1,6 +1,18 @@
 //! Filter-tab lifecycle: add, close, restore, switch, rename, reorder tabs.
 
 use super::*;
+use std::sync::atomic::Ordering;
+
+/// Flip a terminal's in-flight whole-file match-scan cancel flags before its
+/// views are dropped, or the scan runs to cap/EOF holding the shared file
+/// lock for a result nobody will read (issue #237, #255).
+pub(crate) fn cancel_terminal_match_scans(term: &mut crate::terminal_state::TerminalState) {
+    for view in &mut term.views {
+        if let Some(cancel) = view.match_scan_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
 
 impl Engine {
     pub(crate) fn add_tab(&mut self) {
@@ -32,6 +44,13 @@ impl Engine {
             return;
         }
         let tab = terminal.views[index].to_tab_config();
+        // The scan cancel flag lives in the view: flip it before the view is
+        // dropped, or an in-flight whole-file scan runs to cap/EOF holding the
+        // shared file lock for a result nobody will read (#237). Switching
+        // away deliberately keeps the scan running (the user may come back).
+        if let Some(cancel) = terminal.views[index].match_scan_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         terminal.views.remove(index);
         terminal.closed_tabs.push_back(tab);
         while terminal.closed_tabs.len() > MAX_CLOSED_TABS {

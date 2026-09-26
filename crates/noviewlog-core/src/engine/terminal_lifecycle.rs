@@ -173,21 +173,22 @@ impl Engine {
                     };
                     let old_total = self.terminals[term_idx].buffer.records_len();
 
-                    let shifted = {
+                    let (shifted_records, shifted_lines) = {
                         let term = &mut self.terminals[term_idx];
-                        let shifted = term.ingest.feed(&data, &mut term.buffer, &mut term.parser);
+                        let (records, lines) =
+                            term.ingest.feed(&data, &mut term.buffer, &mut term.parser);
                         if let Some(cwd) = term.ingest.take_cwd_update() {
                             term.cwd = cwd;
                             chrome_changed = true;
                         }
                         term.last_line_at = Some(Instant::now());
-                        shifted
+                        (records, lines)
                     };
 
                     if is_active {
                         active_changed = true;
                         if skip_logview_patch {
-                            if shifted > 0 {
+                            if shifted_lines > 0 {
                                 let terminal = &mut self.terminals[term_idx];
                                 for (i, view) in terminal.views.iter_mut().enumerate() {
                                     if i != 0 {
@@ -205,11 +206,12 @@ impl Engine {
                                 old_total,
                                 overlay,
                                 new_total,
-                                shifted,
+                                shifted_records,
+                                shifted_lines,
                             );
                             self.snap_follow_scroll_after_ingest(term_idx);
                         }
-                    } else if shifted > 0 {
+                    } else if shifted_lines > 0 {
                         for view in &mut self.terminals[term_idx].views {
                             view.mark_flat_lines_dirty();
                         }
@@ -295,7 +297,8 @@ impl Engine {
         old_total: usize,
         overlay: Vec<crate::core::types::FlatLine>,
         new_total: usize,
-        shifted_raw_lines: usize,
+        shifted_records: usize,
+        shifted_flat_lines: usize,
     ) {
         let row_stride = self.renderer.metrics().row_stride;
         let cell_width = self.renderer.metrics().cell_width;
@@ -303,7 +306,7 @@ impl Engine {
 
         let terminal = &mut self.terminals[term_idx];
         let active_view = terminal.active_view;
-        let records_changed = new_total != old_total || shifted_raw_lines > 0;
+        let records_changed = new_total != old_total || shifted_flat_lines > 0;
         for (i, view) in terminal.views.iter_mut().enumerate() {
             if i == 0 {
                 continue;
@@ -331,12 +334,12 @@ impl Engine {
         // Visual height of the flat prefix that will disappear from the top.
         // Wrap OFF: 1 flat line == 1 visual row (matches scroll_by_lines).
         // Wrap ON: measure the prefix about to be drained (stable head only).
-        let dropped_h = if shifted_raw_lines == 0 {
+        let dropped_h = if shifted_flat_lines == 0 {
             0.0
         } else if !wrap {
-            shifted_raw_lines as f32 * row_stride
+            shifted_flat_lines as f32 * row_stride
         } else if let Some(tab) = terminal.views.first() {
-            let n = shifted_raw_lines.min(tab.flat_lines.len().saturating_sub(old_overlay));
+            let n = shifted_flat_lines.min(tab.flat_lines.len().saturating_sub(old_overlay));
             if n == 0 {
                 0.0
             } else {
@@ -364,7 +367,8 @@ impl Engine {
             old_total,
             &overlay,
             new_total,
-            shifted_raw_lines,
+            shifted_records,
+            shifted_flat_lines,
         );
         if !patched {
             terminal_tab.mark_flat_lines_dirty();
@@ -373,12 +377,12 @@ impl Engine {
         }
 
         // Anchor even if patch falls back to dirty rebuild — buffer already trimmed by `shifted`.
-        if shifted_raw_lines > 0 {
+        if shifted_flat_lines > 0 {
             if !follow && dropped_h > 0.0 {
                 *scroll_offset_y = (*scroll_offset_y - dropped_h).max(0.0);
             }
             if let Some(sel) = selection.as_mut() {
-                shift_selection_after_prefix_drop(sel, shifted_raw_lines);
+                shift_selection_after_prefix_drop(sel, shifted_flat_lines);
             }
         }
     }
@@ -827,6 +831,7 @@ impl Engine {
                 if let Some(mut pty) = self.ptys.remove(&id) {
                     pty.stop();
                 }
+                super::tabs::cancel_terminal_match_scans(&mut self.terminals[idx]);
                 self.terminals.remove(idx);
                 self.ensure_valid_state();
                 self.sync_active_project_from_terminals();
@@ -840,6 +845,7 @@ impl Engine {
         if let Some(mut pty) = self.ptys.remove(&id) {
             pty.stop();
         }
+        super::tabs::cancel_terminal_match_scans(&mut self.terminals[idx]);
         self.terminals.remove(idx);
         if self.active_terminal >= self.terminals.len() {
             self.active_terminal = self.terminals.len() - 1;

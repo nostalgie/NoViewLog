@@ -3180,6 +3180,7 @@ dependencies = [
  "arboard",
  "crossterm",
  "noviewlog-core",
+ "noviewlog-terminal",
 ]
 
 [[package]]

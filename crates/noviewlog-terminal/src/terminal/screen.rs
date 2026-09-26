@@ -667,6 +667,14 @@ impl TerminalEmulator {
         self.screen.push(Row::new(self.cols));
     }
 
+    /// Reverse index at the top row: insert a blank line at the top, drop the
+    /// bottom row of the grid. Nothing is committed to scrollback (content
+    /// moves down, off-screen rows appear at the bottom).
+    pub(super) fn scroll_down(&mut self) {
+        self.screen.pop();
+        self.screen.insert(0, Row::new(self.cols));
+    }
+
     pub(super) fn line_feed(&mut self) {
         if self.cursor_row + 1 < self.rows {
             self.cursor_row += 1;

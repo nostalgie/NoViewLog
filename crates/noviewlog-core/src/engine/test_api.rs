@@ -152,6 +152,37 @@ impl Engine {
     }
 
     #[cfg(test)]
+    pub fn file_loads_pending_any_for_test(&self) -> bool {
+        self.terminals.iter().any(|t| t.file_load.is_some())
+    }
+
+    #[cfg(test)]
+    pub fn file_backed_count_for_test(&self) -> usize {
+        self.terminals
+            .iter()
+            .filter(|t| t.file_backed.is_some())
+            .count()
+    }
+
+    #[cfg(test)]
+    pub fn finish_all_file_loads_for_test(&mut self) {
+        // Time-bounded so a regression (background loads never advancing)
+        // fails the test instead of hanging the suite; the worker thread may
+        // need real time to emit its first events under a loaded test run.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if !self.file_loads_pending_any_for_test() {
+                return;
+            }
+            self.advance_file_load();
+            if std::time::Instant::now() > deadline {
+                panic!("file loads did not drain within 10s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(test)]
     pub fn buffer_record_count_for_test(&self) -> usize {
         if !self.has_active_terminal() {
             return 0;

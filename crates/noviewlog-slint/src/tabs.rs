@@ -12,6 +12,9 @@ use crate::engine_bridge::bump_fast_timer;
 use noviewlog_slint::ui::{AppWindow, TabInfo};
 
 /// Active tab after closing `index`, computed against the post-removal row count.
+/// Retained for tests: tab-close now relies on the stats flush instead of
+/// precomputing the next active row (#198).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn active_after_close(index: i32, old_active: i32, remaining: usize) -> i32 {
     let max = (remaining.saturating_sub(1)) as i32;
     if index < old_active {
@@ -40,7 +43,7 @@ pub(crate) fn install(
     );
     install_move(ui, ctx);
     install_add(ui, ctx, tabs_model.clone(), terminal_tab_active.clone());
-    install_close(ui, ctx, tabs_model.clone(), terminal_tab_active.clone());
+    install_close(ui, ctx);
     install_restore(ui, ctx, terminal_tab_active);
     install_rename(ui, ctx, tabs_model);
 }
@@ -58,21 +61,34 @@ fn install_switch(
     let timer_fast = ctx.timer_fast.clone();
     let ui_tabs = ui.as_weak();
     ui.on_tab_switch(move |index| {
+        // Reject negative indices before the usize cast (mirrors on_tab_move).
+        if index < 0 {
+            return;
+        }
         if let Some(ui) = ui_tabs.upgrade() {
             ui.set_active_tab_index(index);
             ui.set_filters_editable(index != 0);
         }
         terminal_tab_active.set(index == 0);
-        let mut eng = engine.borrow_mut();
-        let _ = eng.send_command(Command::TabSwitch {
-            index: index as usize,
-        });
-        force_render.set(true);
+        // Send the switch with its own borrow: arm_terminal_caret below can
+        // re-enter on_viewport_focused (focus-viewport → has-focus change)
+        // when focus actually moves, and that handler borrows the same
+        // engine (issues #232, #252).
+        {
+            let mut eng = engine.borrow_mut();
+            let _ = eng.send_command(Command::TabSwitch {
+                index: index as usize,
+            });
+            force_render.set(true);
+        }
         bump_fast_timer(&timer, &timer_fast);
         if let Some(ui) = ui_tabs.upgrade() {
             if index == 0 {
                 viewport_focused.set(true);
-                arm_terminal_caret(&ui, &mut eng, *logical_size.borrow());
+                // arm_terminal_caret takes the handle and invokes
+                // focus-viewport before borrowing, so no RefMut is alive
+                // across the synchronous re-entry (issues #232, #252).
+                arm_terminal_caret(&ui, &engine, *logical_size.borrow());
             } else {
                 ui.set_caret_visible(false);
             }
@@ -103,13 +119,12 @@ fn install_add(
     let ui_tabs = ui.as_weak();
     ui.on_tab_add(move || {
         let _ = ctx.send(Command::TabAdd);
+        // Do not touch tabs_model optimistically: if the engine rejects or
+        // reorders the add, the chip strip would show a phantom tab until
+        // the next stats flush (same reasoning as terminals::install_add).
+        // The chip appears with the immediate stats flush; naming stays
+        // consistent via stats_sync ("Tab {index + 1}" default).
         let next_index = tabs_model.row_count() as i32;
-        let name = SharedString::from(format!("Tab {}", next_index + 1));
-        tabs_model.push(TabInfo {
-            index: next_index,
-            name,
-            is_terminal_tab: false,
-        });
         if let Some(ui) = ui_tabs.upgrade() {
             ui.set_active_tab_index(next_index);
             ui.set_filters_editable(true);
@@ -120,42 +135,20 @@ fn install_add(
     });
 }
 
-fn install_close(
-    ui: &AppWindow,
-    ctx: &Ctx,
-    tabs_model: Rc<VecModel<TabInfo>>,
-    terminal_tab_active: Rc<Cell<bool>>,
-) {
+fn install_close(ui: &AppWindow, ctx: &Ctx) {
     let ctx = ctx.clone();
-    let ui_tabs = ui.as_weak();
     ui.on_tab_close(move |index| {
         if index <= 0 {
             return;
         }
-        let old_active = ui_tabs
-            .upgrade()
-            .map(|u| u.get_active_tab_index())
-            .unwrap_or(0);
         let _ = ctx.send(Command::TabClose {
             index: index as usize,
         });
-        let row = index as usize;
-        if row < tabs_model.row_count() {
-            tabs_model.remove(row);
-            for i in row..tabs_model.row_count() {
-                if let Some(mut t) = tabs_model.row_data(i) {
-                    t.index = i as i32;
-                    tabs_model.set_row_data(i, t);
-                }
-            }
-        }
-        let new_active = active_after_close(index, old_active, tabs_model.row_count());
-        if let Some(ui) = ui_tabs.upgrade() {
-            ui.set_active_tab_index(new_active);
-            ui.set_can_restore_tab(true);
-            ui.set_filters_editable(new_active != 0);
-        }
-        terminal_tab_active.set(new_active == 0);
+        // No optimistic model mutation (#198): if the engine refuses the close
+        // (or a TabMove is still in flight) removing the chip here would show
+        // a tab that still exists until the next flush. The immediate stats
+        // flush updates chips, active index, can-restore and filter
+        // editability from engine truth.
         ctx.refresh();
     });
 }

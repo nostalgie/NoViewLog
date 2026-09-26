@@ -83,25 +83,31 @@ impl ColorEmojiAtlas {
 
     fn glyph_for_key(&self, key: &str) -> Option<ColorEmojiGlyph> {
         {
-            let cache = self.cache.lock().ok()?;
+            // Poison-tolerant like the second lock below (issue #238): a
+            // panicked holder must not permanently disable color emoji.
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(entry) = cache.get(key) {
                 return entry.clone();
             }
         }
         let decoded = decode_glyph_or_cluster(&self.face, key);
-        if let Ok(mut cache) = self.cache.lock() {
-            // Bounded (issue #61): a decoded strike is ~65 KB RGBA; without a
-            // cap a long emoji-heavy session grew the map for hours. Drop
-            // ~1/8 arbitrary entries (HashMap order) when full.
-            if !cache.contains_key(key) && cache.len() >= EMOJI_CACHE_CAP {
-                let victims: Vec<String> =
-                    cache.keys().take(EMOJI_CACHE_CAP / 8).cloned().collect();
-                for victim in victims {
-                    cache.remove(&victim);
-                }
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Bounded (issue #61): a decoded strike is ~65 KB RGBA; without a
+        // cap a long emoji-heavy session grew the map for hours. Drop
+        // ~1/8 arbitrary entries (HashMap order) when full.
+        if !cache.contains_key(key) && cache.len() >= EMOJI_CACHE_CAP {
+            let victims: Vec<String> = cache.keys().take(EMOJI_CACHE_CAP / 8).cloned().collect();
+            for victim in victims {
+                cache.remove(&victim);
             }
-            cache.insert(key.to_string(), decoded.clone());
         }
+        cache.insert(key.to_string(), decoded.clone());
         decoded
     }
 }

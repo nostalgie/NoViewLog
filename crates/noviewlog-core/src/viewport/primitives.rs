@@ -61,15 +61,20 @@ pub(super) fn highlight_selection_in_segments(
             continue;
         }
 
+        // Clamp offsets to char boundaries: a selection that survived a buffer
+        // swap can hold stale offsets landing mid-character, and plain slicing
+        // would panic (issue #235). Mirrors the guard in selection_plain_text.
+        let local_start = floor_char_boundary(&seg.text, abs_start.saturating_sub(seg_start));
+        let local_end = floor_char_boundary(&seg.text, (abs_end - seg_start).min(seg.text.len()))
+            .max(local_start);
+
         if seg_start < abs_start {
             out.push(TextSegment {
-                text: seg.text[..abs_start - seg_start].to_string(),
+                text: seg.text[..local_start].to_string(),
                 style: seg.style.clone(),
             });
         }
 
-        let local_start = abs_start.saturating_sub(seg_start);
-        let local_end = (abs_end - seg_start).min(seg.text.len());
         let mut style = seg.style.clone().unwrap_or_default();
         style.selected = true;
         out.push(TextSegment {
@@ -85,6 +90,17 @@ pub(super) fn highlight_selection_in_segments(
         }
     }
     out
+}
+
+/// Largest char boundary `<= at` (and `<= s.len()`), matching the guard in
+/// `selection_plain_text`.
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    let at = at.min(s.len());
+    if s.is_char_boundary(at) {
+        at
+    } else {
+        (0..at).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+    }
 }
 /// (fg, bold, bg, underline) for a segment style.
 pub(super) fn style_to_draw(style: Option<&LineStyle>) -> ([u8; 4], bool, Option<[u8; 4]>, bool) {

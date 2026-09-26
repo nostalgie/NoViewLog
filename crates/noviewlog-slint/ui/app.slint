@@ -427,6 +427,12 @@ export component AppWindow inherits Window {
         // Always set both the model property and Flickable — assigning viewport-x
         // breaks a one-way binding from tabs-scroll-x.
         root.tabs-scroll-x = clamp(root.tabs-scroll-x - delta-y, 0.0, root.tabs-scroll-max());
+        root.clamp-tabs-scroll();
+    }
+
+    // Same shrink case as clamp-terminals-scroll (last tab closed).
+    function clamp-tabs-scroll() {
+        root.tabs-scroll-x = clamp(root.tabs-scroll-x, 0.0, root.tabs-scroll-max());
         tab-flick.viewport-x = -root.tabs-scroll-x * 1px;
         root.sync-tabs-bar-visible();
     }
@@ -434,6 +440,13 @@ export component AppWindow inherits Window {
     function scroll-terminals-by(delta-y: float) {
         // Wheel up (positive delta-y) → scroll content up / reveal upper rows.
         root.terminals-scroll-y = clamp(root.terminals-scroll-y - delta-y, 0.0, root.terminals-scroll-max());
+        root.clamp-terminals-scroll();
+    }
+
+    // Model shrink (terminal close) can leave the stored offset past the new
+    // max — re-clamp on Flickable geometry change, not only on scroll-by.
+    function clamp-terminals-scroll() {
+        root.terminals-scroll-y = clamp(root.terminals-scroll-y, 0.0, root.terminals-scroll-max());
         term-flick.viewport-y = -root.terminals-scroll-y * 1px;
         root.sync-terminals-bar-visible();
     }
@@ -444,6 +457,12 @@ export component AppWindow inherits Window {
 
     function scroll-files-by(delta-y: float) {
         root.files-scroll-y = clamp(root.files-scroll-y - delta-y, 0.0, root.files-scroll-max());
+        root.clamp-files-scroll();
+    }
+
+    // Same shrink case as clamp-terminals-scroll (last file closed).
+    function clamp-files-scroll() {
+        root.files-scroll-y = clamp(root.files-scroll-y, 0.0, root.files-scroll-max());
         files-flick.viewport-y = -root.files-scroll-y * 1px;
         root.sync-files-bar-visible();
     }
@@ -454,8 +473,12 @@ export component AppWindow inherits Window {
         if (n < 2 || !root.term-dragging) {
             return;
         }
+        // `terms-col.absolute-position` already reflects the Flickable's
+        // viewport shift (viewport-y = -scroll-y), so the content-space
+        // coordinate is (abs-y - origin) alone; adding the scroll offset
+        // double-counted it and dragged to the wrong row when scrolled.
         let origin = terms-col.absolute-position.y;
-        let y_px = (abs-y - origin) / 1px + root.terminals-scroll-y;
+        let y_px = (abs-y - origin) / 1px;
         let raw = floor(y_px / 47.0);
         root.term-drop-to = max(0, min(n - 1, raw));
     }
@@ -480,6 +503,9 @@ export component AppWindow inherits Window {
             root.tab-drop-line-visible = false;
             return;
         }
+        // Chip pitch must equal TabChip preferred-width (sidebar.slint).
+        // Guarded cross-file by tests/tab_chip_pitch_wiring.rs — changing one
+        // without the other fails that test.
         let pitch = 120.0;
         let x_px = local-x / 1px;
         let raw_slot = floor(x_px / pitch);
@@ -1379,8 +1405,13 @@ export component AppWindow inherits Window {
                                 changed viewport-y => {
                                     root.terminals-scroll-y = clamp(-self.viewport-y / 1px, 0.0, root.terminals-scroll-max());
                                 }
-                                changed height => { root.sync-terminals-bar-visible(); }
-                                changed viewport-height => { root.sync-terminals-bar-visible(); }
+                                // A window resize shrinks the Flickable itself;
+                                // re-clamp so the offset never stays past max.
+                                changed height => {
+                                    root.sync-terminals-bar-visible();
+                                    root.clamp-terminals-scroll();
+                                }
+                                changed viewport-height => { root.clamp-terminals-scroll(); }
 
                                 terms-col := VerticalLayout {
                                     spacing: 3px;
@@ -1558,8 +1589,12 @@ export component AppWindow inherits Window {
                                 changed viewport-y => {
                                     root.files-scroll-y = clamp(-self.viewport-y / 1px, 0.0, root.files-scroll-max());
                                 }
-                                changed height => { root.sync-files-bar-visible(); }
-                                changed viewport-height => { root.sync-files-bar-visible(); }
+                                // Window-resize shrink path must re-clamp too.
+                                changed height => {
+                                    root.sync-files-bar-visible();
+                                    root.clamp-files-scroll();
+                                }
+                                changed viewport-height => { root.clamp-files-scroll(); }
 
                                 files-col := VerticalLayout {
                                     spacing: 3px;
@@ -1911,8 +1946,12 @@ export component AppWindow inherits Window {
                                     changed viewport-x => {
                                         root.tabs-scroll-x = clamp(-self.viewport-x / 1px, 0.0, root.tabs-scroll-max());
                                     }
-                                    changed width => { root.sync-tabs-bar-visible(); }
-                                    changed viewport-width => { root.sync-tabs-bar-visible(); }
+                                    // Window-resize shrink path must re-clamp too.
+                                    changed width => {
+                                        root.sync-tabs-bar-visible();
+                                        root.clamp-tabs-scroll();
+                                    }
+                                    changed viewport-width => { root.clamp-tabs-scroll(); }
 
                                     tabs-row := HorizontalLayout {
                                         spacing: 0px;
@@ -2769,7 +2808,7 @@ export component AppWindow inherits Window {
         width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
-        FormDialogPanel {
+        edit-launch-panel := FormDialogPanel {
             title: "Edit launch";
             ok-text: "Save";
             width: 100%;
@@ -2794,14 +2833,25 @@ export component AppWindow inherits Window {
                 cancelled => { edit-launch-dlg.close(); }
                 tab-move(shift) => {
                     if (shift) { launch-command-field.take-focus(); }
-                    else { launch-cwd-field.take-focus(); }
+                    else {
+                        // Forward into the distro field when it is visible.
+                        if (root.host-is-windows && root.launch-wsl-draft) {
+                            launch-wsl-distro-field.take-focus();
+                        } else {
+                            launch-cwd-field.take-focus();
+                        }
+                    }
                 }
             }
             if root.host-is-windows: FormCheckField {
                 label: "Run in WSL";
                 checked <=> root.launch-wsl-draft;
             }
-            if root.host-is-windows && root.launch-wsl-draft: FormTextField {
+            // `visible`, not `if`: the id must stay reachable from the
+            // neighbouring fields' tab-move handlers, and invisible elements
+            // occupy no layout space anyway.
+            launch-wsl-distro-field := FormTextField {
+                visible: root.host-is-windows && root.launch-wsl-draft;
                 label: "WSL distro (empty = default)";
                 text <=> root.launch-wsl-distro-draft;
                 accepted => { root.confirm-edit-launch(); }
@@ -2819,8 +2869,17 @@ export component AppWindow inherits Window {
                 accepted => { root.confirm-edit-launch(); }
                 cancelled => { edit-launch-dlg.close(); }
                 tab-move(shift) => {
-                    if (shift) { launch-args-field.take-focus(); }
-                    else { launch-command-field.take-focus(); }
+                    if (shift) {
+                        // Include the distro field only while it is visible,
+                        // otherwise Shift+Tab from cwd skips back to args.
+                        if (root.host-is-windows && root.launch-wsl-draft) {
+                            launch-wsl-distro-field.take-focus();
+                        } else {
+                            launch-args-field.take-focus();
+                        }
+                    } else {
+                        launch-command-field.take-focus();
+                    }
                 }
             }
         }
@@ -2833,7 +2892,7 @@ export component AppWindow inherits Window {
         width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
-        FormDialogPanel {
+        settings-panel := FormDialogPanel {
             title: "Settings";
             ok-text: "OK";
             width: 100%;
@@ -2874,7 +2933,7 @@ export component AppWindow inherits Window {
         width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
-        FormDialogPanel {
+        about-panel := FormDialogPanel {
             title: "About";
             ok-text: "OK";
             show-cancel: false;
@@ -2956,7 +3015,7 @@ export component AppWindow inherits Window {
         width: Theme.overlay-width;
         close-policy: close-on-click-outside;
 
-        FormDialogPanel {
+        quit-panel := FormDialogPanel {
             title: "Close NoViewLog?";
             ok-text: "Close";
             cancel-text: "Cancel";

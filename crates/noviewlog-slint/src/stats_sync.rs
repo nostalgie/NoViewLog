@@ -80,14 +80,17 @@ fn apply_stats_to_tabs(
         .iter()
         .map(|tab| {
             let index = tab.index as i32;
-            let name = if tab.name.is_empty() {
+            let name: String = if tab.name.is_empty() {
                 if index == 0 {
-                    TERMINAL_TAB_NAME
+                    TERMINAL_TAB_NAME.to_string()
                 } else {
-                    "Tab"
+                    // Stable default matching what the UI shows optimistically
+                    // on creation ("Tab 2" for the first extra tab), so the
+                    // chip does not visibly snap right after tab-add.
+                    format!("Tab {}", index + 1)
                 }
             } else {
-                tab.name.as_str()
+                tab.name.clone()
             };
             TabInfo {
                 index,
@@ -691,7 +694,7 @@ mod tests {
         assert_eq!(terminal_tab.name.as_str(), TERMINAL_TAB_NAME);
         assert!(terminal_tab.is_terminal_tab);
         let view_tab = h.tabs.row_data(1).expect("row 1");
-        assert_eq!(view_tab.name.as_str(), "Tab");
+        assert_eq!(view_tab.name.as_str(), "Tab 2");
         assert!(!view_tab.is_terminal_tab);
     }
 

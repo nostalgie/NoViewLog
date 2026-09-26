@@ -36,25 +36,33 @@ impl Engine {
     }
 
     pub(crate) fn flush_idle_pending(&mut self) {
-        if !self.has_active_terminal() {
-            return;
+        // Every terminal, not just the active one (issue #193): a background
+        // terminal's last line stays pending in its RecordParser and must not
+        // wait for the user to switch back to it.
+        for term_idx in 0..self.terminals.len() {
+            let should_flush = self.terminals[term_idx]
+                .last_line_at
+                .is_some_and(|at| at.elapsed() >= PENDING_IDLE_FLUSH);
+            if !should_flush {
+                continue;
+            }
+            let flushed = {
+                let terminal = &mut self.terminals[term_idx];
+                terminal
+                    .ingest
+                    .idle_flush(&mut terminal.buffer, &mut terminal.parser)
+            };
+            self.terminals[term_idx].last_line_at = None;
+            if !flushed {
+                continue;
+            }
+            if term_idx == self.active_terminal {
+                self.mark_all_views_dirty();
+            } else {
+                for view in &mut self.terminals[term_idx].views {
+                    view.mark_flat_lines_dirty();
+                }
+            }
         }
-        let should_flush = self
-            .active_terminal()
-            .last_line_at
-            .is_some_and(|at| at.elapsed() >= PENDING_IDLE_FLUSH);
-        if !should_flush {
-            return;
-        }
-        let flushed = {
-            let terminal = self.active_terminal_mut();
-            terminal
-                .ingest
-                .idle_flush(&mut terminal.buffer, &mut terminal.parser)
-        };
-        if flushed {
-            self.mark_all_views_dirty();
-        }
-        self.active_terminal_mut().last_line_at = None;
     }
 }

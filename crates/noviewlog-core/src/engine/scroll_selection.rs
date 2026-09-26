@@ -209,6 +209,7 @@ impl Engine {
                     return self.local_window_max_scroll();
                 }
                 // Huge match sets: ordinal scrollbar, never below the resident window's visual max.
+                // Same f32 ~2^24 px precision boundary as the whole-file branch (#237).
                 let ordinal = (total as f32 * stride - self.viewport_height as f32).max(0.0);
                 let local = self.local_window_max_scroll();
                 let global_floor = view.match_window_start as f32 * stride + local;
@@ -218,6 +219,13 @@ impl Engine {
                 // Whole-file scrollbar range (1 file line ≈ 1 visual row for unread spans).
                 // When the last window is resident, raise the range to the real visual
                 // height so Wrap ON can still scroll to the true bottom.
+                // f32 precision boundary (#237): `total as f32 * stride` is only
+                // exact while the product stays under 2^24 (~16.7M px, e.g.
+                // ~800k lines at 20 px/row). Beyond it consecutive f32 values
+                // are more than 1 px apart (≈128 px near 100M lines), so
+                // sub-row scroll precision degrades. Inherent to the f32
+                // `Scroll { offset }` wire contract with Slint — accepted,
+                // widening the wire type is a cross-crate API break.
                 let total = backed.index.total_lines();
                 let window = self.file_view_window_lines() as u64;
                 let max_start = total.saturating_sub(window);
@@ -308,6 +316,8 @@ impl Engine {
             return local.clamp(0.0, max_y);
         }
         let view = terminal.active_view();
+        // Ordinal base + local mapping hits the f32 ~2^24 px precision
+        // boundary on very large files (see max_scroll_offset, #237).
         let y = if view.uses_match_index() {
             // Small match sets: local visual Y only (match_window_start stays 0).
             // Large sets: ordinal base + local within the materialized window.
@@ -324,9 +334,12 @@ impl Engine {
         y.clamp(0.0, max_y)
     }
 
-    /// 1-based line at the **bottom** of the viewport and total lines for the status bar.
+    /// 1-based line at the **top** of the viewport and total lines for the status bar.
     ///
-    /// Using the top line left EOF looking short by roughly one screen (`363177 / 363194`).
+    /// An earlier revision used the bottom line so EOF (without a snap) would
+    /// not read short by one viewport; the at-EOF snap below makes the top
+    /// line safe, and the top line is what "at top of scrollback" should read
+    /// as 1 (#212).
     pub(crate) fn viewport_line_position(&self) -> (u64, u64) {
         if !self.has_active_terminal() {
             return (0, 0);
@@ -335,7 +348,6 @@ impl Engine {
         let stride = metrics.row_stride.max(0.001);
         let terminal = self.active_terminal();
         let view = terminal.active_view();
-        let viewport_h = self.viewport_height as f32;
 
         if terminal.is_file_session() {
             if let Some(backed) = &terminal.file_backed {
@@ -349,11 +361,10 @@ impl Engine {
                     let local_y = terminal.scroll_offset_y;
                     let index =
                         view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
-                    let bottom_visual =
-                        ((local_y + viewport_h - 0.01) / stride).floor().max(0.0) as usize;
-                    let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
+                    let top_visual = (local_y / stride).floor().max(0.0) as usize;
+                    let top_visual = top_visual.min(index.total_rows().saturating_sub(1));
                     let flat = index
-                        .flat_at_visual_row(bottom_visual)
+                        .flat_at_visual_row(top_visual)
                         .map(|(i, _)| i)
                         .unwrap_or(0);
                     let cur = (view.match_window_start as u64 + flat as u64 + 1).min(total.max(1));
@@ -379,15 +390,17 @@ impl Engine {
                     return (total, total);
                 }
                 let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
-                let bottom_visual =
-                    ((local_y + viewport_h - 0.01) / stride).floor().max(0.0) as usize;
-                let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
+                let top_visual = (local_y / stride).floor().max(0.0) as usize;
+                let top_visual = top_visual.min(index.total_rows().saturating_sub(1));
                 let flat = index
-                    .flat_at_visual_row(bottom_visual)
+                    .flat_at_visual_row(top_visual)
                     .map(|(i, _)| i)
                     .unwrap_or(0);
                 let cur = (base + flat as u64 + 1).min(total.max(1));
                 // At (or past) max scroll, snap to last file line so EOF reads `N / N`.
+                // Near the f32 ~2^24 px boundary the 1 px tolerance is finer than
+                // the quantization, but both sides share the same quantized max,
+                // so the clamp still compares equal at EOF (#237).
                 let at_eof = self.stats_scroll_y() + 1.0 >= self.max_scroll_offset();
                 let cur = if at_eof { total } else { cur };
                 return (cur, total);
@@ -414,10 +427,10 @@ impl Engine {
         }
         let local_y = terminal.scroll_offset_y;
         let index = view.ensure_visual_row_index(self.viewport_width, metrics.cell_width);
-        let bottom_visual = ((local_y + viewport_h - 0.01) / stride).floor().max(0.0) as usize;
-        let bottom_visual = bottom_visual.min(index.total_rows().saturating_sub(1));
+        let top_visual = (local_y / stride).floor().max(0.0) as usize;
+        let top_visual = top_visual.min(index.total_rows().saturating_sub(1));
         let flat = index
-            .flat_at_visual_row(bottom_visual)
+            .flat_at_visual_row(top_visual)
             .map(|(i, _)| i)
             .unwrap_or(0);
         let cur = (flat as u64 + 1).min(total);
@@ -598,8 +611,29 @@ impl Engine {
     }
 }
 
+/// Scheme allow-list + shell-metacharacter rejection for [`open_url`].
+fn openable_uri(uri: &str) -> bool {
+    let lower = uri.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
+    }
+    !uri.chars().any(|c| {
+        matches!(
+            c,
+            '"' | '\'' | '%' | '&' | '|' | '<' | '>' | '^' | '!' | '`' | '$' | ';' | '\\'
+        )
+    })
+}
+
 /// Launch the OS opener for an OSC 8 URI (xdg-open / open / cmd start).
+///
+/// URIs come from log content, i.e. untrusted input: only http/https is
+/// opened at all, and Windows `cmd /c start` additionally re-parses its
+/// argument string, so shell metacharacters are rejected outright (#audit-2).
 fn open_url(uri: &str) {
+    if !openable_uri(uri) {
+        return;
+    }
     let result = if cfg!(target_os = "windows") {
         std::process::Command::new("cmd")
             .args(["/c", "start", "", uri])
@@ -622,6 +656,16 @@ fn open_url(uri: &str) {
 mod tests {
     use super::*;
     use crate::core::visible::flat_lines_from_raw_lines;
+
+    #[test]
+    fn openable_uri_allowlists_scheme_and_metacharacters() {
+        assert!(openable_uri("https://example.com/a?b=1"));
+        assert!(openable_uri("http://localhost:8080/x"));
+        assert!(!openable_uri("file:///C:/Windows/System32/calc.exe"));
+        assert!(!openable_uri("https://x.com/a&calc"));
+        assert!(!openable_uri("https://x.com/%PATH%"));
+        assert!(!openable_uri("not-a-url"));
+    }
 
     #[test]
     fn scroll_to_row_uses_visual_rows_when_wrap_is_on() {

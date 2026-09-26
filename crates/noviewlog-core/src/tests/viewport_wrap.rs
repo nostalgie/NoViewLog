@@ -211,7 +211,15 @@ fn viewport_font_size_clamps_and_defaults() {
 
 #[test]
 fn set_viewport_font_size_updates_metrics_and_dirties() {
-    let _guard = USER_CONFIG_LOCK.lock().expect("user config lock");
+    // Persistence writes to a temp config dir so the developer's real
+    // config.yaml is never touched, even on a failed assert (issue #239).
+    // Lock FIRST, then set the override (issue #253): the override is a
+    // process global, so constructing the guard before acquiring
+    // USER_CONFIG_LOCK lets a parallel test's guard Drop clear the override
+    // while this test runs, redirecting the persistence write to the real
+    // `~/.config/noviewlog`.
+    let _config_lock = USER_CONFIG_LOCK.lock().expect("user config lock");
+    let _guard = super::ConfigDirGuard::new("viewport-font-metrics");
     let mut engine = crate::Engine::new();
     let original = engine.viewport_font_size_for_test();
     let baseline = engine.viewport_row_stride_for_test();
@@ -242,24 +250,19 @@ fn set_viewport_font_size_updates_metrics_and_dirties() {
         .send_command_json(r#"{"cmd":"set_viewport_font_size","size":50}"#)
         .expect("clamp high");
     assert!((engine.viewport_font_size_for_test() - 32.0).abs() < 0.01);
-
-    // Restore prior size so we don't leave a zoomed size in the developer's user config.
-    engine
-        .send_command_json(&format!(
-            r#"{{"cmd":"set_viewport_font_size","size":{original}}}"#
-        ))
-        .expect("restore");
-    assert!((engine.viewport_font_size_for_test() - original).abs() < 0.01);
 }
 
 #[test]
 fn viewport_font_size_persists_across_engine_restart() {
-    let _guard = USER_CONFIG_LOCK.lock().expect("user config lock");
+    // Persistence writes to a temp config dir so the developer's real
+    // config.yaml is never touched, even on a failed assert (issue #239).
+    // Lock FIRST, then set the override (issue #253) — see the metrics test.
+    let _config_lock = USER_CONFIG_LOCK.lock().expect("user config lock");
+    let guard = super::ConfigDirGuard::new("viewport-font-persist");
     let mut engine = crate::Engine::new();
     // Persistence is debounced and skipped by default in tests; opt in and
     // flush explicitly so the restart below reads the saved value.
     engine.skip_projects_persist = false;
-    let original = engine.viewport_font_size_for_test();
     engine
         .send_command_json(r#"{"cmd":"set_viewport_font_size","size":18}"#)
         .expect("set 18");
@@ -271,14 +274,7 @@ fn viewport_font_size_persists_across_engine_restart() {
         (reloaded.viewport_font_size_for_test() - 18.0).abs() < 0.01,
         "new engine should load saved viewport_font_size"
     );
-
-    // Restore prior size for the developer's config.
-    let mut cleanup = crate::Engine::new();
-    cleanup.skip_projects_persist = false;
-    cleanup
-        .send_command_json(&format!(
-            r#"{{"cmd":"set_viewport_font_size","size":{original}}}"#
-        ))
-        .expect("restore");
-    cleanup.flush_persist();
+    drop(reloaded);
+    drop(engine);
+    drop(guard);
 }

@@ -33,17 +33,12 @@ pub fn argv_for_profile(profile: &SshProfile) -> Vec<String> {
 /// Verify the system ssh client exists before `Command::Start` (a missing
 /// client must be a clear error, esp. the Windows optional feature).
 pub fn probe_ssh_client() -> Result<(), String> {
-    match std::process::Command::new("ssh")
-        .arg("-V")
-        .output()
-    {
+    match std::process::Command::new("ssh").arg("-V").output() {
         Ok(_) => Ok(()),
-        Err(_) => Err(
-            "the `ssh` client was not found on PATH. \
+        Err(_) => Err("the `ssh` client was not found on PATH. \
              Install OpenSSH (Windows: Settings → Apps → Optional Features → OpenSSH Client) \
              or fix your PATH, then retry."
-                .to_string(),
-        ),
+            .to_string()),
     }
 }
 

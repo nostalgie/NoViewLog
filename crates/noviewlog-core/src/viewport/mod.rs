@@ -274,13 +274,10 @@ pub fn caret_pixel_pos(
     height: u32,
 ) -> Option<(i32, f32)> {
     let line = lines.get(caret.flat_index)?;
-    let char_len = line.raw.chars().count();
-    let byte_at = line
-        .raw
-        .char_indices()
-        .nth(caret.col)
-        .map(|(i, _)| i)
-        .unwrap_or(line.raw.len());
+    // Caret columns are display cells: zero-width marks (VS16, ZWJ, combining
+    // marks) occupy no cell, matching the draw path's glyph placement (#238).
+    let char_len = crate::color_emoji::display_cell_count(&line.raw);
+    let byte_at = crate::viewport_layout::byte_offset_for_char_col(&line.raw, caret.col);
 
     for (vis_i, visual) in visual_lines.iter().enumerate() {
         if visual.flat_index != caret.flat_index {
@@ -305,13 +302,12 @@ pub fn caret_pixel_pos(
             return None;
         }
         let cols_before = if caret.col >= char_len && is_last {
-            line.raw[visual.start..visual.end.min(line.raw.len())]
-                .chars()
-                .count()
-                + (caret.col - char_len)
+            crate::color_emoji::display_cell_count(
+                &line.raw[visual.start..visual.end.min(line.raw.len())],
+            ) + (caret.col - char_len)
         } else {
             let end = byte_at.min(line.raw.len()).max(visual.start);
-            line.raw[visual.start..end].chars().count()
+            crate::color_emoji::display_cell_count(&line.raw[visual.start..end])
         };
         let x = x_base + (cols_before as i32) * cell_width as i32;
         return Some((x, row_top));
@@ -613,11 +609,74 @@ mod tests {
     use crate::color_emoji::EMOJI_CACHE_CAP;
     use crate::core::types::TextSegment;
     use crate::core::visible::{compile_search_pattern, highlight_search_in_segments};
+    use crate::viewport_layout::TextPos;
     use fontdue::Font;
 
     #[test]
     fn drawable_text_strips_embedded_ansi() {
         assert_eq!(drawable_text("\u{1b}[32mhello\u{1b}[0m"), "hello");
+    }
+
+    /// Issue #238: the caret column is a display cell — `⏱️` (U+23F1 + U+FE0F)
+    /// occupies one cell, so the caret block under cell 3 must sit at the same
+    /// x as the glyph the draw path paints there (3 cells from the base).
+    #[test]
+    fn caret_pixel_pos_uses_display_cells() {
+        let line = FlatLine {
+            record_id: 1,
+            line_index: 0,
+            segments: vec![TextSegment {
+                text: "ab\u{23F1}\u{FE0F}cd".to_string(),
+                style: None,
+            }],
+            raw: "ab\u{23F1}\u{FE0F}cd".to_string(),
+            level: None,
+            collapsible: false,
+            collapsed: false,
+            hidden_line_count: 0,
+        };
+        let lines = vec![line];
+        let visual = vec![crate::viewport_layout::VisualLine {
+            flat_index: 0,
+            start: 0,
+            end: lines[0].raw.len(),
+        }];
+        let cell = 8u32;
+        // Caret on 'c' (cell 3; VS16 shifts nothing).
+        let (x, _) = caret_pixel_pos(
+            &lines,
+            &visual,
+            ViewportCaret {
+                flat_index: 0,
+                col: 3,
+            },
+            0,
+            0.0,
+            LEFT_PAD as i32,
+            16.0,
+            cell,
+            100,
+        )
+        .expect("caret visible");
+        assert_eq!(x, LEFT_PAD as i32 + 3 * cell as i32);
+        // Past the line end the caret parks `caret.col` cells from the base
+        // (same overflow semantics as before; the base is now display cells).
+        let (x, _) = caret_pixel_pos(
+            &lines,
+            &visual,
+            ViewportCaret {
+                flat_index: 0,
+                col: 9,
+            },
+            0,
+            0.0,
+            LEFT_PAD as i32,
+            16.0,
+            cell,
+            100,
+        )
+        .expect("caret visible");
+        assert_eq!(x, LEFT_PAD as i32 + 9 * cell as i32);
     }
 
     /// The Layout-free draw path must place glyphs exactly where a one-line
@@ -1823,5 +1882,33 @@ mod tests {
 
         renderer.set_font_size(100.0);
         assert!((renderer.font_size() - 32.0).abs() < 0.01);
+    }
+
+    // Issue #235: a selection that survived a buffer swap can hold stale byte
+    // offsets landing mid-character; the highlight path used to slice without
+    // the char-boundary guard selection_plain_text has and panicked.
+    #[test]
+    fn highlight_selection_tolerates_stale_mid_char_offsets() {
+        let text = "日本語です"; // 2 bytes per char, 10 bytes total
+        let segments = vec![TextSegment {
+            text: text.to_string(),
+            style: None,
+        }];
+        let sel = TextSelection::new(
+            TextPos {
+                line_index: 0,
+                byte_offset: 1,
+            }, // mid-char (stale)
+            TextPos {
+                line_index: 0,
+                byte_offset: 5,
+            }, // mid-char (stale)
+        );
+        let out = highlight_selection_in_segments(&segments, &sel, 0, 0, text.len());
+        let joined: String = out.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, text, "highlight must not drop or corrupt chars");
+        assert!(out
+            .iter()
+            .any(|s| s.style.as_ref().is_some_and(|st| st.selected)));
     }
 }

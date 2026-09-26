@@ -249,19 +249,6 @@ pub fn compile_search_pattern(
         .map_err(|e| e.to_string())
 }
 
-/// Backward-compatible helper used by older call sites / tests.
-pub fn compile_search_regex(query: &str, regex_mode: bool) -> Result<Arc<Regex>, String> {
-    match compile_search_pattern(query, regex_mode, false, false)? {
-        SearchPattern::Regex(re) => Ok(re),
-        SearchPattern::AsciiLiteral(needle) => {
-            let escaped = regex::escape(&needle);
-            Regex::new(&format!("(?i){escaped}"))
-                .map(Arc::new)
-                .map_err(|e| e.to_string())
-        }
-    }
-}
-
 pub fn collect_search_matches(
     flat_lines: &[FlatLine],
     pattern: &SearchPattern,

@@ -5,16 +5,27 @@ use super::*;
 impl Engine {
     pub fn set_launch(&mut self, launch: LaunchConfig) {
         if let Some(path) = &launch.config_path {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                self.config = load_config_from_yaml(&text);
-                self.formats = merge_formats(
-                    &crate::core::config::all_format_presets(&self.config),
-                    &HashMap::new(),
-                );
-                // The in-memory config now comes from the launch file, NOT the
-                // user's config.yaml (issue #110): disable persistence so a
-                // later debounced flush cannot overwrite the user's file.
-                self.config_persist_disabled = true;
+            match std::fs::read_to_string(path) {
+                Ok(text) => {
+                    self.config = load_config_from_yaml(&text);
+                    self.formats = merge_formats(
+                        &crate::core::config::all_format_presets(&self.config),
+                        &HashMap::new(),
+                    );
+                    // The in-memory config now comes from the launch file,
+                    // NOT the user's config.yaml (issue #110): disable
+                    // persistence so a later debounced flush cannot overwrite
+                    // the user's file.
+                    self.config_persist_disabled = true;
+                }
+                // A file that is simply absent is not a launch config —
+                // keep persistence as-is.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                // Any other read failure (permissions, transient IO, ...)
+                // must also disable persistence: the in-memory config may be
+                // stale, and flushing it could overwrite the user's YAML
+                // (issue #255).
+                Err(_) => self.config_persist_disabled = true,
             }
         }
         if let Some(preset) = launch.preset.clone() {
@@ -102,6 +113,9 @@ impl Engine {
                 view.clear_flat_lines();
             }
             terminal.scroll_offset_y = 0.0;
+            // Type-ahead typed before the restart must not flush into the
+            // fresh process (same semantics as `set_launch`).
+            terminal.pending_stdin.clear();
         }
         let id = self.active_terminal().id.clone();
         if let Some(mut pty) = self.ptys.remove(&id) {

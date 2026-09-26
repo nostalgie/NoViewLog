@@ -630,6 +630,63 @@ fn active_project_saves_and_restores_file_sessions() {
     let _ = std::fs::remove_file(&path);
 }
 
+// Issue #234: restored FILE sessions must finish loading on engine ticks while
+// a live terminal stays active — the user must not have to click each tab.
+#[test]
+fn project_open_restored_files_load_without_activation() {
+    use std::io::Write;
+
+    let path =
+        std::env::temp_dir().join(format!("noviewlog-proj-bgload-{}.log", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        for i in 0..8 {
+            writeln!(f, "bg line {i}").unwrap();
+        }
+    }
+    let mut engine = engine_isolated();
+    engine
+        .send_command_json(r#"{"cmd":"project_create","name":"BgLogs"}"#)
+        .expect("create");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+    engine
+        .send_command_json(&format!(r#"{{"cmd":"load_file","path":"{path_str}"}}"#))
+        .expect("load_file");
+    engine.finish_file_load_for_test();
+
+    let project_id = engine.projects.projects[0].id.clone();
+    // Live terminal so the resume tab is NOT the file session.
+    engine.terminal_add_blank_for_test();
+    engine
+        .send_command_json(&format!(
+            r#"{{"cmd":"project_open","project_id":"{project_id}"}}"#
+        ))
+        .expect("reopen");
+
+    assert!(
+        !engine.active_is_file_session_for_test(),
+        "a live terminal must stay active after restore"
+    );
+    assert!(
+        engine.file_loads_pending_any_for_test(),
+        "restored file session should have a load in flight"
+    );
+
+    // No tab switch: plain ticks must complete the background load.
+    engine.finish_all_file_loads_for_test();
+    assert_eq!(
+        engine.file_backed_count_for_test(),
+        1,
+        "file session must become file-backed without activation"
+    );
+    assert!(
+        !engine.file_loads_pending_any_for_test(),
+        "no load may be left pending after draining"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 #[test]
 fn project_open_replaces_leftover_files() {
     use std::io::Write;

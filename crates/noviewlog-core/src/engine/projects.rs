@@ -45,6 +45,9 @@ impl Engine {
         }
         self.projects_dirty = true;
         self.persist_changed_at = Some(Instant::now());
+        // Fresh dirty mark re-arms the normal debounce (issue #253): the
+        // failure backoff applies only to retries of the same change.
+        self.persist_retry_delay = PERSIST_DEBOUNCE;
     }
 
     /// Snapshot live TERMINALS then FILES into the active Project's Programs.
@@ -102,6 +105,11 @@ impl Engine {
             if let Some(mut pty) = self.ptys.remove(id) {
                 pty.stop();
             }
+        }
+        // Dropping the old terminals must cancel any in-flight whole-file
+        // match scans, same as tab close (#237) and terminal close (#255).
+        for term in &mut self.terminals {
+            super::tabs::cancel_terminal_match_scans(term);
         }
         self.terminals.clear();
 

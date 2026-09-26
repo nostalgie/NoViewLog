@@ -89,6 +89,9 @@ pub(crate) fn install(
     let resync_for_events = resync_pointer_after_drag.clone();
     // Last cursor (logical px) — MouseInput has no position.
     let last_cursor = Rc::new(Cell::new((0.0f32, 0.0f32)));
+    // False until the first CursorMoved: a press before any move event must
+    // not be hit-tested at the (0,0) default (#198).
+    let cursor_seen = Rc::new(Cell::new(false));
     // Press origin while chrome menu open + press hit title-drag gap (VS Code-like).
     let pending_title_drag = Rc::new(Cell::new(None::<(f32, f32)>));
     const TITLE_DRAG_SLOP: f32 = 4.0;
@@ -174,6 +177,7 @@ pub(crate) fn install(
     }
 
     let last_cursor_ev = last_cursor.clone();
+    let cursor_seen_ev = cursor_seen.clone();
     let pending_title_drag_ev = pending_title_drag.clone();
     let begin_title_drag_ev = begin_title_drag.clone();
     let pending_open_ev = pending_open_url.clone();
@@ -224,6 +228,7 @@ pub(crate) fn install(
                 let lx = logical.x as f32;
                 let ly = logical.y as f32;
                 last_cursor_ev.set((lx, ly));
+                cursor_seen_ev.set(true);
 
                 if resync_for_events.get() {
                     resync_for_events.set(false);
@@ -259,6 +264,12 @@ pub(crate) fn install(
                         let Some(ui) = ui_weak.upgrade() else {
                             return EventResult::Propagate;
                         };
+                        // Without a prior CursorMoved the stored position is
+                        // the (0,0) default — hit-testing there would
+                        // misfire on click-to-focus (see #198).
+                        if !cursor_seen_ev.get() {
+                            return EventResult::Propagate;
+                        }
                         let (lx, ly) = last_cursor_ev.get();
                         // Popup blocks gap TouchArea — close menus + arm drag on same press.
                         if ui.get_menu_bar_active() && ui.invoke_title_bar_chrome_press(lx, ly) {

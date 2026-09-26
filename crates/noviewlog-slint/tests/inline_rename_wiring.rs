@@ -40,13 +40,32 @@ fn viewport_press_dismisses_rename() {
     let src = app_slint();
     assert!(src.contains("function dismiss-any-rename-if-any()"));
     assert!(src.contains("viewport-host.focus();"));
-    let down = src
+    // Anchor at the viewport TouchArea itself: it is the only I-beam cursor
+    // region (`mouse-cursor: text`). The FIRST PointerEventKind.down in the
+    // file belongs to the sidebar dead-space handler — anchoring there used to
+    // keep this test green even with the viewport wiring deleted.
+    assert_eq!(
+        src.matches("mouse-cursor: text;").count(),
+        1,
+        "viewport TouchArea anchor (I-beam cursor) must stay unique"
+    );
+    let area = src.find("mouse-cursor: text;").expect("viewport TouchArea");
+    let down = src[area..]
         .find("if (event.kind == PointerEventKind.down)")
-        .expect("viewport pointer down");
-    let window = &src[down..down.saturating_add(220).min(src.len())];
+        .expect("viewport pointer down")
+        + area;
+    // Wide window: the selection wiring follows the right-click branch and
+    // explanatory comments (~1300 bytes).
+    let window = &src[down..down.saturating_add(1500).min(src.len())];
+    // The window must be the viewport handler (starts selection via
+    // viewport-pointer), not the sidebar dead-space TouchArea.
     assert!(
-        window.contains("dismiss-any-rename-if-any()"),
-        "viewport pointer-down must dismiss rename"
+        window.contains("root.viewport-pointer("),
+        "anchored window must be the viewport TouchArea handler"
+    );
+    assert!(
+        window.contains("dismiss-any-rename-if-any()") && window.contains("viewport-host.focus();"),
+        "viewport pointer-down must dismiss rename and focus the viewport"
     );
 }
 

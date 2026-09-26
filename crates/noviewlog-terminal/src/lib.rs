@@ -7,8 +7,9 @@
 //!
 //! No PTY, no fonts, no filesystem, no GUI: a host supplies bytes and
 //! consumes records / [`types::FlatLine`]s. This crate is the intended
-//! publishable/WASM target; product concerns (config files, presets,
-//! engine façade, viewport) stay in `noviewlog-core`.
+//! publish target (its dependency set is wasm-friendly; actual wasm gating
+//! is deferred until a wasm host exists — #200); product concerns (config
+//! files, presets, engine façade, viewport) stay in `noviewlog-core`.
 
 pub mod ansi;
 pub mod buffer;

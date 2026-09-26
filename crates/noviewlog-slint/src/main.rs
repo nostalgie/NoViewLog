@@ -264,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         find_stats_tab: find_stats_tab.clone(),
         find_pending: find_pending.clone(),
         find_debounce: find_debounce.clone(),
+        pending_viewport_focus: ctx.pending_viewport_focus.clone(),
         viewport_pixels,
     });
     tick::install_pty_wake(&engine, &controls);

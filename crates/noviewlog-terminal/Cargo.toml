@@ -5,6 +5,7 @@ edition = "2021"
 description = "NoViewLog terminal layer — VTE ingest, log record parsing, filters, SGR"
 license = "MIT"
 repository = "https://github.com/nostalgie/noviewlog"
+readme = "README.md"
 
 [lib]
 name = "noviewlog_terminal"

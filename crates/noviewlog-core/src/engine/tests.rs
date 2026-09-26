@@ -293,3 +293,207 @@ fn flush_persist_test_mode_clears_dirty_without_writes() {
     assert!(!engine.projects_dirty);
     assert!(engine.persist_changed_at.is_none());
 }
+
+#[test]
+fn persist_retry_backoff_grows_times_four_and_caps() {
+    use crate::engine::persist::next_persist_retry_delay;
+    let mut delay = PERSIST_DEBOUNCE;
+    assert_eq!(delay, Duration::from_millis(750));
+    delay = next_persist_retry_delay(delay);
+    assert_eq!(delay, Duration::from_millis(3000));
+    delay = next_persist_retry_delay(delay);
+    assert_eq!(delay, Duration::from_millis(12000));
+    delay = next_persist_retry_delay(delay);
+    assert_eq!(delay, PERSIST_RETRY_MAX, "48 s must clamp to the 30 s cap");
+    assert_eq!(next_persist_retry_delay(delay), PERSIST_RETRY_MAX);
+}
+
+#[test]
+fn persist_failure_retries_with_backoff_and_announces_once() {
+    let mut engine = Engine::new();
+    // Failure is injected: no real config write happens, but take the lock
+    // anyway in case recovery below lands a save alongside other tests.
+    let _guard = crate::tests::USER_CONFIG_LOCK
+        .lock()
+        .expect("user config lock");
+    engine.skip_projects_persist = false;
+    engine.persist_fail_saves = true;
+    engine.mark_config_dirty();
+    assert!(engine.config_dirty);
+
+    engine.flush_persist();
+    assert!(
+        engine.config_dirty,
+        "failed save must stay dirty (issue #109)"
+    );
+    assert_eq!(engine.persist_retry_delay, Duration::from_millis(3000));
+    assert_eq!(
+        drain_events(&mut engine).len(),
+        1,
+        "first failure announces"
+    );
+
+    // Later retries stay silent while the delay keeps growing.
+    engine.flush_persist();
+    engine.flush_persist();
+    engine.flush_persist();
+    assert_eq!(
+        engine.persist_retry_delay, PERSIST_RETRY_MAX,
+        "backoff caps at 30 s"
+    );
+    assert_eq!(
+        drain_events(&mut engine).len(),
+        0,
+        "retries must not re-announce"
+    );
+
+    // A successful save clears the backoff and re-arms status reporting.
+    engine.persist_fail_saves = false;
+    engine.flush_persist();
+    assert!(!engine.config_dirty);
+    assert_eq!(engine.persist_retry_delay, PERSIST_DEBOUNCE);
+    assert!(!engine.config_failure_announced);
+    engine.skip_projects_persist = true;
+}
+
+#[test]
+fn fresh_dirty_mark_resets_backoff_so_new_edit_persists_promptly() {
+    let mut engine = Engine::new();
+    // Lock FIRST, then redirect the config dir: the final flush really saves
+    // config.yaml, and it must land in a temp dir, not the developer's.
+    let _config_lock = crate::tests::USER_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _dir = crate::tests::ConfigDirGuard::new("persist-fresh-edit");
+    engine.skip_projects_persist = false;
+    engine.persist_fail_saves = true;
+
+    // Failure streak drives the retry delay to the 30 s cap.
+    engine.mark_config_dirty();
+    for _ in 0..4 {
+        engine.flush_persist();
+    }
+    assert_eq!(engine.persist_retry_delay, PERSIST_RETRY_MAX);
+
+    // A NEW user edit (cause resolved) re-arms the normal debounce: the very
+    // next flush after the debounce window must succeed, not wait 30 s.
+    engine.persist_fail_saves = false;
+    engine.mark_config_dirty();
+    assert_eq!(
+        engine.persist_retry_delay, PERSIST_DEBOUNCE,
+        "a fresh dirty mark must reset the backoff (issue #253)"
+    );
+    engine.persist_changed_at = Some(Instant::now() - PERSIST_DEBOUNCE - Duration::from_millis(1));
+    engine.flush_persist();
+    assert!(!engine.config_dirty, "fresh edit must persist immediately");
+    engine.skip_projects_persist = true;
+}
+
+#[test]
+fn persist_failure_announcement_is_tracked_per_store() {
+    let mut engine = Engine::new();
+    // Lock FIRST, then redirect the config dir: the recovery flush really
+    // saves both stores, and they must land in a temp dir.
+    let _config_lock = crate::tests::USER_CONFIG_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _dir = crate::tests::ConfigDirGuard::new("persist-per-store");
+    engine.skip_projects_persist = false;
+
+    // Both stores fail: each announces under its OWN store, once.
+    engine.persist_fail_saves = true;
+    engine.mark_config_dirty();
+    engine.persist_projects_store();
+    engine.flush_persist();
+    assert!(engine.config_failure_announced);
+    assert!(engine.projects_failure_announced);
+    let events = drain_events(&mut engine);
+    assert_eq!(
+        events.len(),
+        2,
+        "one announcement per store, got {events:?}"
+    );
+    assert!(events.iter().any(|e| e.contains("projects")));
+    assert!(events.iter().any(|e| e.contains("Config")));
+
+    // Later retries of the same unwritten changes stay silent.
+    engine.flush_persist();
+    engine.flush_persist();
+    assert_eq!(
+        drain_events(&mut engine).len(),
+        0,
+        "retries must not re-announce"
+    );
+
+    // Both stores save: each store's announcement clears with its own
+    // success (issue #253 per-store tracking).
+    engine.persist_fail_saves = false;
+    engine.flush_persist();
+    assert!(!engine.projects_dirty);
+    assert!(!engine.config_dirty);
+    assert!(!engine.projects_failure_announced);
+    assert!(!engine.config_failure_announced);
+    engine.skip_projects_persist = true;
+}
+
+#[test]
+fn disconnected_file_load_fails_and_unwedges_host_work_pending() {
+    let mut engine = Engine::new();
+    // Simulate a worker that died right after channel setup: the handle's
+    // channel is disconnected and will never deliver Done/Failed (issue #253).
+    engine.terminals[0].file_load = Some(crate::file_load::disconnected_file_load_handle_for_test(
+        "stalled.log",
+    ));
+    assert!(engine.host_work_pending());
+
+    engine.advance_file_load();
+    assert!(
+        engine.terminals[0].file_load.is_none(),
+        "disconnected load must convert to Failed, not stay pending"
+    );
+    assert!(
+        !engine.host_work_pending(),
+        "a dead load must not wedge the fast tick cadence"
+    );
+    let events = drain_events(&mut engine);
+    assert!(
+        events.iter().any(|e| e.contains("stalled")),
+        "stall must surface a status event, got {events:?}"
+    );
+}
+
+#[test]
+fn file_load_stall_timeout_backstop_pure_logic() {
+    let now = Instant::now();
+    assert!(!TerminalState::file_load_stall_expired(now, now));
+    assert!(!TerminalState::file_load_stall_expired(
+        now - crate::file_load::FILE_LOAD_STALL_TIMEOUT + Duration::from_secs(1),
+        now
+    ));
+    assert!(TerminalState::file_load_stall_expired(
+        now - crate::file_load::FILE_LOAD_STALL_TIMEOUT,
+        now
+    ));
+    assert!(TerminalState::file_load_stall_expired(
+        now - crate::file_load::FILE_LOAD_STALL_TIMEOUT - Duration::from_secs(60),
+        now
+    ));
+}
+
+#[test]
+fn stalled_file_load_does_not_report_host_work() {
+    let mut engine = Engine::new();
+    engine.terminals[0].file_load = Some(crate::file_load::disconnected_file_load_handle_for_test(
+        "stalled.log",
+    ));
+    // Backstop: even while the handle lingers, once the quiet period is past
+    // the timeout the engine must stop reporting host work (issue #253).
+    engine.terminals[0].file_load_stalled_at =
+        Some(Instant::now() - crate::file_load::FILE_LOAD_STALL_TIMEOUT - Duration::from_secs(1));
+    assert!(
+        !engine.host_work_pending(),
+        "a load stalled past the timeout must not pin the fast cadence"
+    );
+    engine.advance_file_load();
+    assert!(engine.terminals[0].file_load.is_none());
+}

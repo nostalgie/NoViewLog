@@ -26,9 +26,10 @@ pub fn load_config_from_yaml(yaml_text: &str) -> AppConfig {
     merge_config_sources(&sources)
 }
 
-/// Load the user `config.yaml`. On read/parse failure the corrupt file is
-/// preserved as `config.yaml.corrupt` and a status message is returned instead
-/// of silently resetting to defaults (issue #49).
+/// Load the user `config.yaml`. On parse failure the corrupt file is preserved
+/// as `config.yaml.corrupt` and a status message is returned instead of
+/// silently resetting to defaults (issue #49). A read failure (transient lock,
+/// permission) never renames the file (issue #239).
 pub fn load_user_config() -> (Option<AppConfig>, Option<String>) {
     let path = match user_config_path() {
         Ok(p) => p,
@@ -44,7 +45,10 @@ fn load_user_config_from(path: &Path) -> (Option<AppConfig>, Option<String>) {
     }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(err) => return (None, quarantine_corrupt_file(path, &err.to_string())),
+        // A read error is not corruption (issue #239): a sharing violation or
+        // AV lock must not rename a valid config aside. Keep the file, report
+        // it, and fall back to defaults.
+        Err(err) => return (None, Some(unreadable_file_message(path, &err))),
     };
     match serde_yaml::from_str::<AppConfig>(&text) {
         Ok(user) => (
@@ -77,10 +81,11 @@ pub fn projects_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "no home dir".to_string())
 }
 
-/// Load `projects.yaml`. On read/parse failure the corrupt file is preserved
+/// Load `projects.yaml`. On parse failure the corrupt file is preserved
 /// as `projects.yaml.corrupt` and a status message is returned; the in-memory
 /// store starts empty but the original bytes are never silently discarded
-/// (issue #49).
+/// (issue #49). A read failure (transient lock, permission) never renames the
+/// file (issue #239).
 pub fn load_projects_store() -> (ProjectsStore, Option<String>) {
     let path = match projects_path() {
         Ok(p) => p,
@@ -95,10 +100,11 @@ fn load_projects_store_from(path: &Path) -> (ProjectsStore, Option<String>) {
     }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
+        // See load_user_config_from: read errors are not corruption (#239).
         Err(err) => {
             return (
                 ProjectsStore::default(),
-                quarantine_corrupt_file(path, &err.to_string()),
+                Some(unreadable_file_message(path, &err)),
             )
         }
     };
@@ -111,9 +117,23 @@ fn load_projects_store_from(path: &Path) -> (ProjectsStore, Option<String>) {
     }
 }
 
+/// Status message for a config file that exists but could not be read; the
+/// file is left untouched (issue #239).
+fn unreadable_file_message(path: &Path, err: &std::io::Error) -> String {
+    format!(
+        "could not read {} ({}); starting with defaults and leaving the file untouched",
+        path.display(),
+        err
+    )
+}
+
 /// Move a corrupt file aside so no later save can overwrite it without a
 /// surviving copy: rename to `<name>.corrupt`, falling back to a copy when
 /// rename is not possible. Returns a user-facing status message.
+///
+/// Only for parse failures on successfully read content — never for read
+/// errors, which may be transient (sharing violation, AV lock) and must not
+/// rename a valid file (issue #239).
 fn quarantine_corrupt_file(path: &Path, reason: &str) -> Option<String> {
     let corrupt = corrupt_backup_path(path);
     let preserved = match fs::rename(path, &corrupt) {
@@ -166,7 +186,14 @@ fn write_private_file(path: &Path, data: &[u8]) -> Result<(), String> {
         .ok_or_else(|| format!("no file name for {}", path.display()))?;
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!("{}.{}.tmp", file_name.to_string_lossy(), seq));
+    // The pid keeps two app instances from picking the same temp name
+    // (issue #239); the counter keeps one process's concurrent writes apart.
+    let tmp = dir.join(format!(
+        "{}.{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        seq
+    ));
 
     if let Err(err) = write_private_file_data(&tmp, data) {
         let _ = fs::remove_file(&tmp);
@@ -174,9 +201,14 @@ fn write_private_file(path: &Path, data: &[u8]) -> Result<(), String> {
     }
 
     // Back up the previous version before replacing it. Also covers replacing
-    // a corrupt file: the .bak keeps the recoverable bytes.
+    // a corrupt file: the .bak keeps the recoverable bytes. Serialized
+    // process-wide (issue #253): two concurrent writers copying to the same
+    // `.bak` can trip over each other on Windows (sharing violation), which
+    // would fail an otherwise fine write.
     if path.exists() {
         let bak = dir.join(format!("{}.bak", file_name.to_string_lossy()));
+        static BACKUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = BACKUP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(err) = fs::copy(path, &bak) {
             let _ = fs::remove_file(&tmp);
             return Err(format!(
@@ -228,18 +260,39 @@ pub fn program_workspace_snapshot(tabs: &[TabConfig], active_tab: usize) -> Work
     views_to_workspace(tabs, active_tab)
 }
 
+/// Test seam (issue #239): redirect the user config directory so tests that
+/// opt into real persistence never touch the developer's `~/.config/noviewlog`.
+#[cfg(test)]
+static CONFIG_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_config_dir_override(dir: Option<PathBuf>) {
+    *CONFIG_DIR_OVERRIDE
+        .lock()
+        .expect("config dir override lock") = dir;
+}
+
 fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = CONFIG_DIR_OVERRIDE
+        .lock()
+        .expect("config dir override lock")
+        .clone()
+    {
+        return Some(dir);
+    }
     dirs::home_dir().map(|h| h.join(".config").join("noviewlog"))
 }
 
-/// Expand a leading `~` or `~/` to the user's home directory.
+/// Expand a leading `~`, `~/`, or `~\` to the user's home directory.
 pub fn expand_path(path: &str) -> String {
     if path == "~" {
         return dirs::home_dir()
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string());
     }
-    if let Some(rest) = path.strip_prefix("~/") {
+    // Windows shells suggest `~\` — treat it like `~/` (#197).
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
         return dirs::home_dir()
             .map(|h| h.join(rest).to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string());
@@ -297,7 +350,12 @@ pub fn merge_config_sources(sources: &[AppConfig]) -> AppConfig {
         if !source.default_format.is_empty() {
             merged.default_format = source.default_format.clone();
         }
-        merged.default_preset = source.default_preset.clone();
+        // Same "empty means unset" rule as default_format above: an empty
+        // default_preset in a later source must not wipe the bundled
+        // default and silently yield zero filters (see load_preset).
+        if !source.default_preset.is_empty() {
+            merged.default_preset = source.default_preset.clone();
+        }
         merged.max_scrollback_lines = clamp_max_scrollback_lines(source.max_scrollback_lines);
         merged.viewport_font_size = clamp_viewport_font_size(source.viewport_font_size);
         merged.terminals_section_expanded = source.terminals_section_expanded;
@@ -390,6 +448,19 @@ pub fn load_preset(config: &AppConfig, preset_name: &str) -> Vec<FilterRule> {
     }
 }
 
+/// Status message when the configured `default_preset` does not exist, so a
+/// typo in config.yaml is observable instead of silently yielding zero
+/// filters (issue #239). `None` when the preset resolves.
+pub fn missing_default_preset_warning(config: &AppConfig) -> Option<String> {
+    if config.presets.contains_key(&config.default_preset) {
+        return None;
+    }
+    Some(format!(
+        "Default preset '{}' not found; no default filters applied",
+        config.default_preset
+    ))
+}
+
 pub fn compile_preset_filters(filters: &[FilterRule]) -> Vec<FilterRule> {
     filters.iter().cloned().map(compile_filter).collect()
 }
@@ -457,6 +528,24 @@ mod tests {
     }
 
     #[test]
+    fn expand_path_handles_windows_tilde_backslash() {
+        // Issue #197: Windows shells suggest `~\`; it must expand like `~/`.
+        let home = dirs::home_dir().expect("home dir");
+        let sep = std::path::MAIN_SEPARATOR;
+        let expected = home.join("logs").join("app.log");
+        assert_eq!(expand_path("~"), home.to_string_lossy());
+        assert_eq!(
+            std::path::PathBuf::from(expand_path(&format!("~{sep}logs{sep}app.log"))),
+            expected
+        );
+        assert_eq!(
+            std::path::PathBuf::from(expand_path("~/logs/app.log")),
+            expected
+        );
+        assert_eq!(expand_path("relative/x.log"), "relative/x.log");
+    }
+
+    #[test]
     fn write_is_atomic_and_keeps_previous_version() {
         let dir = temp_config_dir("atomic");
         fs::create_dir_all(&dir).unwrap();
@@ -479,6 +568,110 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_error_does_not_quarantine_projects_yaml() {
+        // Issue #239: a transient read failure (sharing violation, AV lock)
+        // must not rename the file aside. A directory at the file path makes
+        // read_to_string fail while the path still exists — portable stand-in
+        // for a locked file.
+        let dir = temp_config_dir("read-err-projects");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("projects.yaml");
+        fs::create_dir(&path).unwrap();
+
+        let (store, msg) = load_projects_store_from(&path);
+        assert!(store.projects.is_empty());
+        let msg = msg.expect("a read failure must surface a status message");
+        assert!(
+            msg.contains("could not read"),
+            "message must report a read failure: {msg}"
+        );
+        assert!(
+            !msg.contains("corrupted"),
+            "a read failure is not corruption: {msg}"
+        );
+        assert!(
+            path.is_dir(),
+            "the file path must not be renamed or removed"
+        );
+        assert!(!dir.join("projects.yaml.corrupt").exists());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_error_does_not_quarantine_user_config_yaml() {
+        // Issue #239: same contract as projects.yaml for the user config.
+        let dir = temp_config_dir("read-err-user");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        fs::create_dir(&path).unwrap();
+
+        let (config, msg) = load_user_config_from(&path);
+        assert!(config.is_none());
+        let msg = msg.expect("a read failure must surface a status message");
+        assert!(
+            msg.contains("could not read") && !msg.contains("corrupted"),
+            "message: {msg}"
+        );
+        assert!(
+            path.is_dir(),
+            "the file path must not be renamed or removed"
+        );
+        assert!(!dir.join("config.yaml.corrupt").exists());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writes_from_two_instances_never_collide() {
+        // Issue #239: temp names include the pid, so two processes writing the
+        // same path cannot pick the same temp file.
+        let dir = temp_config_dir("pid-tmp");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("projects.yaml");
+
+        let handles: Vec<_> = ["writer-a", "writer-b", "writer-c"]
+            .iter()
+            .map(|payload| {
+                let path = path.clone();
+                let payload = payload.to_string();
+                std::thread::spawn(move || {
+                    write_private_file(&path, payload.as_bytes()).unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let winner = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert!(
+            ["writer-a", "writer-b", "writer-c"].contains(&winner.as_str()),
+            "final content must be one whole payload, got: {winner}"
+        );
+        assert!(
+            leftover_tmp_files(&dir).is_empty(),
+            "no temp files may survive concurrent writes"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_default_preset_is_reported() {
+        // Issue #239: a typo'd default_preset must be observable.
+        let mut config = load_bundled_config();
+        assert!(
+            missing_default_preset_warning(&config).is_none(),
+            "bundled defaults must resolve"
+        );
+        config.default_preset = "no-such-preset".to_string();
+        let msg = missing_default_preset_warning(&config)
+            .expect("an unknown default_preset must produce a warning");
+        assert!(msg.contains("no-such-preset"), "message: {msg}");
     }
 
     #[test]

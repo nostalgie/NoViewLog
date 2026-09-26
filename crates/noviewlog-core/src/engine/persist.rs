@@ -2,13 +2,27 @@
 
 use super::*;
 
+/// Backoff for consecutive persist failures: ×4 per failure, capped at
+/// [`PERSIST_RETRY_MAX`] (issue #237).
+pub(super) fn next_persist_retry_delay(current: Duration) -> Duration {
+    (current * 4).min(PERSIST_RETRY_MAX)
+}
+
+/// Which persisted store a save result refers to (issue #253: announcement
+/// state and recovery are tracked per store).
+#[derive(Clone, Copy)]
+enum PersistStore {
+    Projects,
+    Config,
+}
+
 impl Engine {
     /// Write dirty `projects.yaml` / `config.yaml` once the gesture burst has
     /// gone quiet (issue #62). Called from [`Self::tick`].
     pub(crate) fn flush_persist_if_due(&mut self) {
         if self
             .persist_changed_at
-            .is_some_and(|at| at.elapsed() >= PERSIST_DEBOUNCE)
+            .is_some_and(|at| at.elapsed() >= self.persist_retry_delay)
         {
             self.flush_persist();
         }
@@ -28,27 +42,94 @@ impl Engine {
             if let Some(idx) = self.active_project {
                 self.projects.active_project = idx;
             }
-            if let Err(err) = crate::core::config::save_projects_store(&self.projects) {
-                // Stay dirty: the next tick retries after the quiet period
-                // instead of silently losing the change (issue #109).
-                self.projects_dirty = true;
-                self.persist_changed_at = Some(Instant::now());
-                self.status_message = format!("Failed to save projects: {err}");
-                self.push_event(json!({"type":"status","message": self.status_message}));
+            match self.save_projects_checked() {
+                Ok(()) => self.persist_recovered(PersistStore::Projects),
+                Err(err) => {
+                    // Stay dirty: the next tick retries after the backoff
+                    // instead of silently losing the change (issue #109).
+                    self.projects_dirty = true;
+                    self.persist_failed(
+                        PersistStore::Projects,
+                        format!("Failed to save projects: {err}"),
+                    );
+                }
             }
         }
         if self.config_dirty {
             self.config_dirty = false;
-            if let Err(err) = save_user_config(&self.config) {
-                self.config_dirty = true;
-                self.persist_changed_at = Some(Instant::now());
-                self.status_message = format!("Config save failed: {err}");
-                self.push_event(json!({"type":"status","message": self.status_message}));
+            match self.save_config_checked() {
+                Ok(()) => self.persist_recovered(PersistStore::Config),
+                Err(err) => {
+                    self.config_dirty = true;
+                    self.persist_failed(PersistStore::Config, format!("Config save failed: {err}"));
+                }
             }
         }
     }
 
+    /// Test seam: `persist_fail_saves` forces the failure path so backoff can
+    /// be tested without a read-only config dir (issue #237).
+    #[cfg(test)]
+    fn save_projects_checked(&self) -> Result<(), String> {
+        if self.persist_fail_saves {
+            return Err("injected persist failure".into());
+        }
+        crate::core::config::save_projects_store(&self.projects)
+    }
+
+    #[cfg(not(test))]
+    fn save_projects_checked(&self) -> Result<(), String> {
+        crate::core::config::save_projects_store(&self.projects)
+    }
+
+    /// Test seam: see [`Self::save_projects_checked`].
+    #[cfg(test)]
+    fn save_config_checked(&self) -> Result<(), String> {
+        if self.persist_fail_saves {
+            return Err("injected persist failure".into());
+        }
+        save_user_config(&self.config)
+    }
+
+    #[cfg(not(test))]
+    fn save_config_checked(&self) -> Result<(), String> {
+        save_user_config(&self.config)
+    }
+
+    /// A store saved cleanly: clear the failure backoff and re-arm status
+    /// reporting for the next failure streak (issue #237). Announcement
+    /// state is per store (issue #253): a projects success must not re-arm
+    /// the config failure announcement (and vice versa).
+    fn persist_recovered(&mut self, store: PersistStore) {
+        self.persist_retry_delay = PERSIST_DEBOUNCE;
+        match store {
+            PersistStore::Projects => self.projects_failure_announced = false,
+            PersistStore::Config => self.config_failure_announced = false,
+        }
+    }
+
+    /// A store failed to save: schedule a ×4-delayed retry (capped at
+    /// [`PERSIST_RETRY_MAX`]) and surface the status event only on the first
+    /// failure of a streak, so a permanently failing save pushes one event
+    /// instead of one per debounce period (issue #237).
+    fn persist_failed(&mut self, store: PersistStore, message: String) {
+        self.persist_changed_at = Some(Instant::now());
+        self.persist_retry_delay = next_persist_retry_delay(self.persist_retry_delay);
+        let announced = match store {
+            PersistStore::Projects => &mut self.projects_failure_announced,
+            PersistStore::Config => &mut self.config_failure_announced,
+        };
+        if !*announced {
+            *announced = true;
+            self.status_message = message;
+            self.push_event(json!({"type":"status","message": self.status_message}));
+        }
+    }
+
     /// Mark `config.yaml` changed; the write lands after [`PERSIST_DEBOUNCE`].
+    /// A fresh dirty mark re-arms the normal debounce (issue #253): the
+    /// failure backoff applies only to consecutive retries of the SAME
+    /// unwritten change, never to a new user edit.
     pub(crate) fn mark_config_dirty(&mut self) {
         if self.config_persist_disabled {
             return;
@@ -59,6 +140,7 @@ impl Engine {
         }
         self.config_dirty = true;
         self.persist_changed_at = Some(Instant::now());
+        self.persist_retry_delay = PERSIST_DEBOUNCE;
     }
 
     pub(crate) fn preset_apply(&mut self, name: &str) {

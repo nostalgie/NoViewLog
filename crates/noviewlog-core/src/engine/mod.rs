@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::core::config::{
     build_runtime_config, load_bundled_config, load_config_from_yaml, load_preset,
-    load_projects_store, load_user_config, save_user_config,
+    load_projects_store, load_user_config, missing_default_preset_warning, save_user_config,
 };
 use crate::core::formats::{get_builtin_format, merge_formats};
 use crate::core::parser::{reparse_lines, RecordParser};
@@ -77,6 +77,9 @@ pub(crate) const VIEWPORT_PAINT_MIN_INTERVAL: Duration = Duration::from_millis(3
 /// write lands (issue #62). One fsync burst-write per gesture storm, not per
 /// tab switch / filter toggle / zoom notch.
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(750);
+/// Cap for the exponential retry backoff after consecutive persist failures
+/// (issue #237): retries keep going quietly instead of spamming status events.
+const PERSIST_RETRY_MAX: Duration = Duration::from_secs(30);
 
 mod caret;
 mod commands;
@@ -159,6 +162,20 @@ pub struct Engine {
     /// Last persistence-relevant change; the deferred write lands after
     /// [`PERSIST_DEBOUNCE`] of quiet (or immediately at engine drop).
     pub(crate) persist_changed_at: Option<Instant>,
+    /// Delay before the next persist retry; grows ×4 per consecutive failure
+    /// up to [`PERSIST_RETRY_MAX`] so a permanently failing save (read-only
+    /// config dir, full disk) does not push a status event every debounce
+    /// period (issue #237). Reset on a successful save.
+    pub(crate) persist_retry_delay: Duration,
+    /// True once the current projects-store persist failure streak has
+    /// surfaced a status event; later retries stay silent until that store
+    /// saves successfully (issue #237, per-store tracking per issue #253).
+    pub(crate) projects_failure_announced: bool,
+    /// Same as [`Self::projects_failure_announced`] for `config.yaml`.
+    pub(crate) config_failure_announced: bool,
+    /// When true (tests only), persist saves report failure (issue #237 tests).
+    #[cfg(test)]
+    pub(crate) persist_fail_saves: bool,
     /// When true (tests only), do not write `projects.yaml` / `config.yaml`.
     #[cfg(test)]
     pub(crate) skip_projects_persist: bool,
@@ -199,6 +216,14 @@ impl Engine {
         let max_scrollback = config.max_scrollback_lines;
         let viewport_font_size = config.viewport_font_size;
         let preset_name = config.default_preset.clone();
+        // A typo'd default_preset must be observable, not silently yield zero
+        // filters (issue #239).
+        if let Some(msg) = missing_default_preset_warning(&config) {
+            if !startup_status.is_empty() {
+                startup_status.push_str("; ");
+            }
+            startup_status.push_str(&msg);
+        }
         let runtime = build_runtime_config(&config, Some(&preset_name));
         let formats = merge_formats(
             &crate::core::config::all_format_presets(&config),
@@ -264,9 +289,14 @@ impl Engine {
             projects_dirty: false,
             config_dirty: false,
             persist_changed_at: None,
+            persist_retry_delay: PERSIST_DEBOUNCE,
+            projects_failure_announced: false,
+            config_failure_announced: false,
             // Unit tests must never touch the developer's real projects/config.
             #[cfg(test)]
             skip_projects_persist: cfg!(test),
+            #[cfg(test)]
+            persist_fail_saves: false,
             config_persist_disabled: false,
             spawn_resolver: SpawnResolver::new(),
             spawn_prewarm_seen: std::collections::HashSet::new(),
@@ -436,8 +466,14 @@ impl Engine {
         if !self.has_active_terminal() {
             return false;
         }
+        // Any terminal's file load keeps the fast cadence (background FILE
+        // sessions must progress without being activated, issue #234) — but
+        // a stalled load must not wedge the cadence forever (issue #253).
+        if self.terminals.iter().any(|t| t.file_load_active()) {
+            return true;
+        }
         let terminal = self.active_terminal();
-        if terminal.file_load.is_some() || terminal.pending_file_window.is_some() {
+        if terminal.pending_file_window.is_some() {
             return true;
         }
         if terminal.pending_spawn.is_some() {
@@ -577,7 +613,11 @@ impl Engine {
         if !self.has_active_terminal() {
             return true;
         }
-        (self.max_scroll_offset() - self.active_terminal().scroll_offset_y).abs() < 1.0
+        // File/match sessions keep `scroll_offset_y` local to the resident
+        // window (issue #195); `stats_scroll_y()` maps it into the same global
+        // space as `max_scroll_offset()`, so both sides of the comparison stay
+        // comparable for every session kind.
+        (self.max_scroll_offset() - self.stats_scroll_y()).abs() < 1.0
     }
 
     /// TUI hosts: mouse selection in **cell units** — the TUI has no font

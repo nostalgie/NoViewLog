@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How often the tick sweeps open file sessions for external changes
 /// (issue #151). One cheap stat per loaded session per sweep.
@@ -143,6 +144,7 @@ impl Engine {
             let terminal = self.active_terminal_mut();
             // Dropping the previous handle stops its worker.
             terminal.file_load = None;
+            terminal.file_load_stalled_at = None;
             terminal.file_backed = None;
             terminal.file_changed = false;
             terminal.pending_file_window = None;
@@ -164,18 +166,60 @@ impl Engine {
     }
 
     /// Apply load events drained from the background worker (issue #55).
+    /// Loads for *inactive* terminals (e.g. project-restore FILE sessions,
+    /// issue #234) progress too: each pending load briefly borrows the active
+    /// slot that `push_lines` and friends write through, then the original
+    /// active terminal is restored.
     pub(crate) fn advance_file_load(&mut self) {
         if !self.has_active_terminal() {
             return;
         }
+        let original = self.active_terminal;
+        for idx in 0..self.terminals.len() {
+            if self.terminals[idx].file_load.is_none() {
+                continue;
+            }
+            self.active_terminal = idx;
+            self.advance_active_file_load();
+        }
+        self.active_terminal = original.min(self.terminals.len() - 1);
+    }
+
+    fn advance_active_file_load(&mut self) {
         let Some(mut load) = self.active_terminal_mut().file_load.take() else {
             return;
         };
         let events = load.drain(crate::file_load::LOAD_EVENTS_PER_TICK);
-        if events.is_empty() {
-            self.active_terminal_mut().file_load = Some(load);
-            return;
-        }
+        let events = if events.is_empty() {
+            // Stall guard (issue #253). Probe liveness WITHOUT consuming
+            // events silently: a Done/Failed that lands between the drain and
+            // the check comes back in `probed` (a bare try_recv probe used to
+            // eat it and misclassify the load as stalled).
+            let (disconnected, probed) = load.probe();
+            let stalled = self.active_terminal().file_load_stalled_at;
+            let timed_out = stalled
+                .is_some_and(|at| TerminalState::file_load_stall_expired(at, Instant::now()));
+            if probed.is_empty() {
+                if disconnected || timed_out {
+                    // A disconnected worker can never post Done/Failed; a
+                    // silent one gets the timeout backstop so the fast tick
+                    // cadence cannot wedge forever.
+                    self.fail_active_file_load("File load stalled — load aborted".to_string());
+                    return;
+                }
+                let terminal = self.active_terminal_mut();
+                if terminal.file_load_stalled_at.is_none() {
+                    terminal.file_load_stalled_at = Some(Instant::now());
+                }
+                terminal.file_load = Some(load);
+                return;
+            }
+            probed
+        } else {
+            events
+        };
+        // Progress observed: reset the stall clock (issue #253).
+        self.active_terminal_mut().file_load_stalled_at = None;
 
         let display_path = load.path.clone();
         for event in events {
@@ -232,6 +276,7 @@ impl Engine {
                         terminal.buffer_line_end = tail_start_line + content_lines_read;
                         terminal.file_backed = Some(*backed);
                         terminal.file_load = None;
+                        terminal.file_load_stalled_at = None;
                     }
                     self.mark_all_views_dirty();
                     self.mark_viewport_dirty();
@@ -242,7 +287,9 @@ impl Engine {
                     return;
                 }
                 crate::file_load::LoadEvent::Failed(message) => {
-                    self.active_terminal_mut().file_load = None;
+                    let terminal = self.active_terminal_mut();
+                    terminal.file_load = None;
+                    terminal.file_load_stalled_at = None;
                     self.status_message = message.clone();
                     self.push_event(json!({"type":"status","message": message}));
                     return;
@@ -253,6 +300,19 @@ impl Engine {
         if self.active_terminal().file_load.is_none() {
             self.active_terminal_mut().file_load = Some(load);
         }
+    }
+
+    /// Drop the active terminal's pending load and surface a failure status
+    /// event. Used both for worker-reported failures and for the stall guard
+    /// (disconnected worker / timeout backstop, issue #253).
+    fn fail_active_file_load(&mut self, message: String) {
+        {
+            let terminal = self.active_terminal_mut();
+            terminal.file_load = None;
+            terminal.file_load_stalled_at = None;
+        }
+        self.status_message = message.clone();
+        self.push_event(json!({"type":"status","message": message}));
     }
 
     /// Detect external truncation / append / rewrite of open file sessions
@@ -978,6 +1038,12 @@ impl Engine {
         };
         self.active_view_mut().match_scan_inflight = true;
 
+        // Shared cancellation flag: bumped tokens / cleared filters flip it so
+        // the worker stops scanning instead of running to the cap or EOF for
+        // a result nobody will read (#206).
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.active_view_mut().match_scan_cancel = Some(cancel.clone());
+
         // Scan the whole file on a worker thread (issue #55), reporting
         // progress per chunk; the UI thread never touches the file.
         let cap = self.match_scan_cap();
@@ -991,6 +1057,10 @@ impl Engine {
                 let mut offsets: Vec<u64> = Vec::new();
                 let mut pos = from;
                 let outcome = loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        // Superseded mid-scan: exit quietly, no result event.
+                        return;
+                    }
                     let mut file = shared.lock().unwrap_or_else(|e| e.into_inner());
                     match crate::file_match::scan_match_chunk_with_cap(
                         &mut file,

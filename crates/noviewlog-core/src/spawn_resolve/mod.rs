@@ -240,6 +240,17 @@ mod tests {
         );
     }
 
+    // Issue #233: a fixed-offset string slice panicked when byte 4 fell inside
+    // a multi-byte char (len() >= 4 counts bytes, not chars).
+    #[test]
+    fn normalize_windows_cwd_survives_multibyte_after_prefix() {
+        // "UN€x": bytes 55 4E E2 82 AC 78 — index 4 splits the €.
+        assert_eq!(normalize_windows_cwd(r"\\?\UN€x"), "UN€x");
+        assert_eq!(normalize_windows_cwd(r"\\?\ÜNC\x"), "ÜNC\\x");
+        // Regression must not break the real UNC rewrite.
+        assert_eq!(normalize_windows_cwd(r"\\?\UNC\srv\share"), r"\\srv\share");
+    }
+
     #[test]
     fn is_unc_detects_wsl_and_share() {
         assert!(is_unc_path(r"\\wsl$\Ubuntu\home\x"));
@@ -271,6 +282,20 @@ mod tests {
         );
         assert_eq!(parse_wsl_unc(r"\\nas\share\dir"), None);
         assert_eq!(parse_wsl_unc(r"C:\Users"), None);
+    }
+
+    #[test]
+    fn parse_wsl_unc_trims_distro_segment() {
+        // Issue #255: a trailing space in a copied UNC path must not become
+        // part of the distro name (`wsl -d "Ubuntu "` is rejected).
+        assert_eq!(
+            parse_wsl_unc(r"\\wsl$\Ubuntu \home\user"),
+            Some(("Ubuntu".into(), "/home/user".into()))
+        );
+        assert_eq!(
+            parse_wsl_unc(r"\\wsl$\ Ubuntu\home"),
+            Some(("Ubuntu".into(), "/home".into()))
+        );
     }
 
     #[test]

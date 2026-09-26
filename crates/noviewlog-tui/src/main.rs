@@ -17,8 +17,8 @@ use std::io::{self, stdout, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -26,7 +26,9 @@ use crossterm::terminal::{
 };
 
 use noviewlog_core::core::config::load_user_config;
-use noviewlog_core::core::types::{FilterType, FlatLine, LaunchConfig, ShellPreference, SshProfile};
+use noviewlog_core::core::types::{
+    FilterType, FlatLine, LaunchConfig, ShellPreference, SshProfile,
+};
 use noviewlog_core::spawn_resolve::resolve_interactive_shell;
 use noviewlog_core::{parse_engine_event, Command, Engine, EngineEvent, StatsSnapshot};
 
@@ -131,7 +133,8 @@ impl App {
         };
         app.engine.finish_startup(LaunchConfig::default());
         // Whole flat lines are the TUI render unit (no font metrics here).
-        app.engine.send_command(Command::SetWrapLines { wrap: false })?;
+        app.engine
+            .send_command(Command::SetWrapLines { wrap: false })?;
         Ok(app)
     }
 
@@ -149,10 +152,14 @@ impl App {
                 })?;
             }
             SessionChoice::Ssh { label, argv } => {
-                let mut args = argv.clone();
-                let command = args.remove(0);
+                // No panic path on an empty argv (would currently be
+                // unreachable, but build errors, not panics, surface it).
+                let (command, rest) = argv
+                    .split_first()
+                    .ok_or_else(|| format!("ssh profile `{label}` has an empty command"))?;
+                let args = rest.to_vec();
                 self.engine.send_command(Command::Start {
-                    command,
+                    command: command.clone(),
                     args,
                     cwd: None,
                 })?;
@@ -172,6 +179,26 @@ impl App {
             if let Some(s) = self.stats.as_mut() {
                 s.status = format!("cmd error: {e}");
             }
+        }
+    }
+
+    /// Route a terminal paste: into the filter buffer (capped) while the
+    /// input line is focused; otherwise to the wrapped shell as plain stdin.
+    /// A dead session has no shell to receive it — drop silently instead of
+    /// surfacing a cmd error banner (#241).
+    fn handle_paste(&mut self, text: &str) {
+        // Gate order mirrors handle_key: a dead session drops the paste
+        // before the filter buffer is touched (#254).
+        if self.exited.is_some() {
+            return;
+        }
+        if self.input_focus {
+            paste_append(&mut self.filter_buf, text);
+        } else {
+            self.cmd(Command::Stdin {
+                text: String::new(),
+                bytes: Some(text.as_bytes().to_vec()),
+            });
         }
     }
 
@@ -272,6 +299,7 @@ impl App {
         }
         // The filter input line is the only modal element.
         if self.input_focus {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
                 KeyCode::Enter => {
                     let pattern = std::mem::take(&mut self.filter_buf);
@@ -291,7 +319,9 @@ impl App {
                 KeyCode::Backspace => {
                     self.filter_buf.pop();
                 }
-                KeyCode::Char(c) => self.filter_buf.push(c),
+                // Ignore Ctrl-chords in the input line (Ctrl+A/E/U are edit
+                // motions, not text) instead of typing the literal letter.
+                KeyCode::Char(c) if !ctrl => self.filter_buf.push(c),
                 _ => {}
             }
             return Some(());
@@ -325,6 +355,20 @@ impl App {
         let col = self.cols.saturating_sub(40) / 2;
         let row = self.rows.saturating_sub(items as u16 + 2) / 2;
         (col, row, items)
+    }
+
+    /// Inner width of the connect overlay box at left column `col` — the
+    /// same clamp the painter uses, so hit-testing only maps to visibly
+    /// drawn cells on narrow terminals (#241).
+    pub(crate) fn connect_box_width(col: u16, cols: u16) -> u16 {
+        38u16.min(cols.saturating_sub(col).saturating_sub(2))
+    }
+
+    /// Drawn width of the context menu box at left column `col` — the same
+    /// clamp the painter uses, so the hit region only covers visibly drawn
+    /// cells at any terminal width (#254).
+    pub(crate) fn menu_width(col: u16, cols: u16) -> u16 {
+        24u16.min(cols.saturating_sub(col))
     }
 
     fn handle_mouse(&mut self, m: MouseEvent) {
@@ -370,10 +414,7 @@ impl App {
                             .to_string()
                     })
                     .unwrap_or_default();
-                let collapsed = self
-                    .visible
-                    .get(content_row)
-                    .is_some_and(|l| l.collapsed);
+                let collapsed = self.visible.get(content_row).is_some_and(|l| l.collapsed);
                 self.menu = Some(Menu {
                     row,
                     col,
@@ -398,8 +439,9 @@ impl App {
                     // Box geometry matches the painter: title row at orow+1,
                     // items start at orow+2.
                     let (ocol, orow, items) = self.connect_geo();
+                    let box_cols = Self::connect_box_width(ocol, self.cols);
                     let idx = if m.column >= ocol
-                        && m.column < ocol + 40
+                        && m.column < ocol.saturating_add(box_cols).saturating_add(2)
                         && m.row >= orow + 2
                         && ((m.row - orow - 2) as usize) < items
                     {
@@ -440,7 +482,7 @@ impl App {
                     self.menu = None;
                     // Hit-test: item 0 = box top border row; items start one row below.
                     if m.column >= mcol
-                        && m.column < mcol + 24
+                        && m.column < mcol.saturating_add(Self::menu_width(mcol, self.cols))
                         && m.row > mrow
                         && (m.row - mrow - 1) as usize <= items.len()
                     {
@@ -464,13 +506,15 @@ impl App {
                     return;
                 }
                 if m.row == 0 {
-                    if let Some(&(_, _, index)) =
-                        self.tab_spans.iter().find(|&&(s, l, _)| m.column >= s && m.column < s + l)
+                    if let Some(&(_, _, index)) = self
+                        .tab_spans
+                        .iter()
+                        .find(|&&(s, l, _)| m.column >= s && m.column < s.saturating_add(l))
                     {
                         self.cmd(Command::TabSwitch { index });
                     } else if self
                         .tab_add_span
-                        .is_some_and(|(s, l)| m.column >= s && m.column < s + l)
+                        .is_some_and(|(s, l)| m.column >= s && m.column < s.saturating_add(l))
                     {
                         self.cmd(Command::TabAdd);
                         self.filter_buf.clear();
@@ -482,11 +526,9 @@ impl App {
                     // Double-click toggles record expand/collapse; single
                     // clicks start a text selection.
                     let now = Instant::now();
-                    let dbl = self
-                        .last_click
-                        .is_some_and(|((r, c), t)| {
-                            (r, c) == (m.row, m.column) && now.duration_since(t) <= DOUBLE_CLICK
-                        });
+                    let dbl = self.last_click.is_some_and(|((r, c), t)| {
+                        (r, c) == (m.row, m.column) && now.duration_since(t) <= DOUBLE_CLICK
+                    });
                     self.last_click = Some(((m.row, m.column), now));
                     if dbl {
                         if let Some(Some(id)) = self.row_records.get(cell.0) {
@@ -524,15 +566,20 @@ impl App {
     /// Text of the selected span across the visible slice (inclusive of the
     /// end cell's column on its last row; missing cells are skipped).
     fn selected_text(&self, a: (usize, usize), b: (usize, usize)) -> String {
+        // Empty visible slice: `len().saturating_sub(1)` would saturate to
+        // usize::MAX and the first index panics (#199).
+        if self.visible.is_empty() {
+            return String::new();
+        }
         let mut out = String::new();
         for row in a.0..=b.0.min(self.visible.len().saturating_sub(1)) {
             let line = &self.visible[row];
             let text: String = line.segments.iter().map(|s| s.text.as_str()).collect();
-            let chars: Vec<char> = text.chars().collect();
             let start = if row == a.0 { a.1 } else { 0 };
-            let end = (if row == b.0 { b.1 + 1 } else { chars.len() }).min(chars.len());
-            if start < end {
-                out.push_str(&chars[start..end].iter().collect::<String>());
+            let end = if row == b.0 { b.1 } else { usize::MAX };
+            let slice = text_in_cells(&text, start, end);
+            if !slice.is_empty() {
+                out.push_str(&slice);
             }
             if row != b.0 {
                 out.push('\n');
@@ -574,7 +621,7 @@ impl App {
                     && self.exited.is_none()
                     && (r as u16) < self.content_rows() =>
             {
-                let x = (c as u16 + 2).min(self.cols.saturating_sub(1));
+                let x = caret_x(c, self.cols);
                 let _ = execute!(
                     out,
                     crossterm::cursor::Show,
@@ -591,6 +638,45 @@ impl App {
     }
 }
 
+/// Part of `text` covering display-cell range `[start, end]` (end cell
+/// inclusive). Selection coordinates are cells, not char indices: wide CJK
+/// glyphs take two cells and zero-width marks take none, so chars are
+/// included by the cell their glyph starts at (#254). Pure-ASCII lines keep
+/// the exact span the old char-index slice produced.
+fn text_in_cells(text: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
+    let mut cell = 0usize;
+    for ch in text.chars() {
+        if cell >= start && cell <= end {
+            out.push(ch);
+        }
+        cell = cell.saturating_add(noviewlog_terminal::terminal::width::char_width(ch));
+    }
+    out
+}
+
+/// Screen x of the engine caret in column `c` (after the 2-char prefix):
+/// clamp in usize first, then cast — clamping after `as u16` could truncate
+/// to a wrong position instead of the right edge.
+fn caret_x(c: usize, cols: u16) -> u16 {
+    (c.min(usize::from(cols.saturating_sub(3))) as u16 + 2).min(cols.saturating_sub(1))
+}
+
+/// Paste cap for the filter buffer: a multi-megabyte clipboard paste must
+/// not balloon the input line (the frame paints the whole buffer).
+const FILTER_BUF_CAP: usize = 64 * 1024;
+
+/// Append pasted text to the filter buffer up to [`FILTER_BUF_CAP`],
+/// stopping on a char boundary (never a partial UTF-8 tail).
+fn paste_append(buf: &mut String, text: &str) {
+    for ch in text.chars() {
+        if buf.len() + ch.len_utf8() > FILTER_BUF_CAP {
+            break;
+        }
+        buf.push(ch);
+    }
+}
+
 /// Encode a key event as PTY bytes (POSIX terminal encoding, valid for the
 /// wrapped shell on both platforms).
 fn shell_key_bytes(key: &KeyEvent) -> Vec<u8> {
@@ -599,7 +685,14 @@ fn shell_key_bytes(key: &KeyEvent) -> Vec<u8> {
         KeyCode::Char('c') if ctrl => b"\x03".to_vec(),
         KeyCode::Char('d') if ctrl => b"\x04".to_vec(),
         KeyCode::Char(c) if ctrl => {
-            vec![u8::try_from(c.to_ascii_uppercase() as u16 & 0x1f).unwrap_or(b' ')]
+            // Ctrl + non-ASCII (e.g. Ctrl+ü) has no control-byte encoding —
+            // send nothing instead of garbage ('ü' & 0x1f = FS) (#199).
+            let upper = c.to_ascii_uppercase();
+            if upper.is_ascii_alphabetic() {
+                vec![upper as u8 & 0x1f]
+            } else {
+                Vec::new()
+            }
         }
         KeyCode::Enter => b"\r".to_vec(),
         KeyCode::Backspace => b"\x7f".to_vec(),
@@ -638,7 +731,11 @@ fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
@@ -679,9 +776,7 @@ fn parse_cli() -> Result<CliChoice, String> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--ssh" => {
-                let target = iter
-                    .next()
-                    .ok_or("--ssh requires a target (user@host)")?;
+                let target = iter.next().ok_or("--ssh requires a target (user@host)")?;
                 ssh::probe_ssh_client()?;
                 choice = CliChoice::Ssh(SessionChoice::Ssh {
                     label: target.clone(),
@@ -691,17 +786,14 @@ fn parse_cli() -> Result<CliChoice, String> {
             "--profile" => {
                 let name = iter.next().ok_or("--profile requires a profile name")?;
                 let profiles = load_profiles()?;
-                let p = profiles
-                    .iter()
-                    .find(|p| p.name == *name)
-                    .ok_or_else(|| {
-                        format!(
-                            "no ssh profile `{name}` — add it to {} under tui_ssh_profiles",
-                            noviewlog_core::core::config::user_config_path()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|_| "~/.config/noviewlog/config.yaml".into())
-                        )
-                    })?;
+                let p = profiles.iter().find(|p| p.name == *name).ok_or_else(|| {
+                    format!(
+                        "no ssh profile `{name}` — add it to {} under tui_ssh_profiles",
+                        noviewlog_core::core::config::user_config_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| "~/.config/noviewlog/config.yaml".into())
+                    )
+                })?;
                 ssh::probe_ssh_client()?;
                 choice = CliChoice::Ssh(SessionChoice::Ssh {
                     label: format!("{} ({})", p.name, p.target),
@@ -709,7 +801,11 @@ fn parse_cli() -> Result<CliChoice, String> {
                 });
             }
             "--connect" => choice = CliChoice::Connect,
-            other => return Err(format!("unknown argument `{other}` (use --ssh, --profile, --connect)")),
+            other => {
+                return Err(format!(
+                    "unknown argument `{other}` (use --ssh, --profile, --connect)"
+                ))
+            }
         }
     }
     Ok(choice)
@@ -730,7 +826,16 @@ fn run() -> Result<(), String> {
     // Mouse capture is always on: the wheel scrolls our output like a
     // terminal buffer (on the alternate screen the host would otherwise
     // translate it to arrow keys = shell history). Selection is our own.
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+    // Bracketed paste: pastes arrive as Event::Paste (filter input) or are
+    // forwarded to the shell as plain stdin instead of being replayed as a
+    // stream of fake keystrokes (#199).
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .map_err(|e| e.to_string())?;
     // Any panic (and normal exit) must restore the user's terminal.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -771,7 +876,8 @@ fn event_loop(app: &mut App) -> Result<(), String> {
                     app.rows = rows;
                     app.sync_geometry();
                 }
-                Event::FocusGained | Event::FocusLost | Event::Paste(_) => {}
+                Event::Paste(text) => app.handle_paste(&text),
+                Event::FocusGained | Event::FocusLost => {}
             }
         }
         app.engine.tick();
@@ -792,6 +898,130 @@ fn restore_terminal() -> io::Result<()> {
         out,
         crossterm::cursor::Show,
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caret_x_clamps_before_cast() {
+        // Clamp happens in usize: an extreme engine column saturates to the
+        // right edge instead of truncating through u16 to a bogus x (#241).
+        assert_eq!(caret_x(usize::MAX, 80), 79);
+        assert_eq!(caret_x(5_000, 80), 79);
+        assert_eq!(caret_x(usize::MAX, 40), 39);
+        // In-range columns keep the +2 prefix offset.
+        assert_eq!(caret_x(0, 80), 2);
+        assert_eq!(caret_x(10, 80), 12);
+    }
+
+    #[test]
+    fn paste_append_caps_filter_buffer() {
+        let mut buf = String::new();
+        let chunk = "a".repeat(FILTER_BUF_CAP);
+        paste_append(&mut buf, &chunk);
+        paste_append(&mut buf, &chunk);
+        assert_eq!(buf.len(), FILTER_BUF_CAP);
+        assert_eq!(buf.chars().count(), FILTER_BUF_CAP);
+    }
+
+    #[test]
+    fn paste_append_stops_on_char_boundary() {
+        // Two-byte chars: the cap must never split a UTF-8 sequence.
+        let mut buf = String::new();
+        let wide = "é".repeat(FILTER_BUF_CAP);
+        paste_append(&mut buf, &wide);
+        assert!(buf.chars().all(|c| c == 'é'));
+        assert!(buf.len() <= FILTER_BUF_CAP);
+        assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn connect_box_width_matches_draw_clamp() {
+        // 40-col terminal: full box fits, inner width 38 (draw and hit test
+        // must agree so phantom clicks cannot select unseen items).
+        assert_eq!(App::connect_box_width(0, 40), 38);
+        // 20-col terminal: the box clamps to the terminal width.
+        assert_eq!(App::connect_box_width(0, 20), 18);
+    }
+
+    #[test]
+    fn menu_width_matches_draw_clamp() {
+        // Wide terminal: fixed 24-col menu.
+        assert_eq!(App::menu_width(0, 80), 24);
+        // cols=20 with the menu at col=10: only the 10 drawn cells are
+        // clickable (draw and hit test share this helper, #254).
+        assert_eq!(App::menu_width(10, 20), 10);
+        assert_eq!(App::menu_width(20, 20), 0);
+        // No overflow at the terminal edge.
+        assert_eq!(App::menu_width(u16::MAX, 80), 0);
+    }
+
+    #[test]
+    fn text_in_cells_slices_ascii_like_char_indices() {
+        // Pure ASCII: identical to the old chars[start..end] slice.
+        assert_eq!(text_in_cells("hello world", 0, 4), "hello");
+        assert_eq!(text_in_cells("hello", 1, 3), "ell");
+        assert_eq!(text_in_cells("abc", 5, 9), "");
+    }
+
+    #[test]
+    fn text_in_cells_maps_wide_chars_to_cells() {
+        // "日志ab": 日 = cells 0..1, 志 = cells 2..3, a = 4, b = 5.
+        // Cell selection 0..=3 must copy exactly the two CJK glyphs — the
+        // old char-index slice returned "日日" (4 chars for 4 "indices").
+        assert_eq!(text_in_cells("日志ab", 0, 3), "日志");
+        assert_eq!(text_in_cells("日志ab", 2, 4), "志a");
+        assert_eq!(text_in_cells("日志ab", 4, 5), "ab");
+        assert_eq!(text_in_cells("日志", 1, 2), "志");
+    }
+
+    #[test]
+    fn selected_text_uses_cell_coords_on_mixed_lines() {
+        // End-to-end through selected_text: one CJK+ASCII line, drag over a
+        // known cell range; the copied substring must be exact.
+        let app = app_with_visible_lines(&["日志ab"]);
+        assert_eq!(app.selected_text((0, 0), (0, 3)), "日志");
+        assert_eq!(app.selected_text((0, 2), (0, 4)), "志a");
+        assert_eq!(app.selected_text((0, 4), (0, 5)), "ab");
+    }
+
+    /// Minimal App for selection tests: engine built off-session, one
+    /// pre-populated visible slice (no terminal, no PTY).
+    fn app_with_visible_lines(lines: &[&str]) -> App {
+        use noviewlog_core::core::types::{LogLevel, TextSegment};
+        let mut app = App::new(80, 24, Vec::new()).expect("app");
+        app.visible = lines
+            .iter()
+            .map(|l| FlatLine {
+                record_id: 0,
+                line_index: 0,
+                raw: (*l).to_string(),
+                hidden_line_count: 0,
+                collapsible: false,
+                collapsed: false,
+                level: Some(LogLevel::Info),
+                segments: vec![TextSegment {
+                    text: (*l).to_string(),
+                    style: None,
+                }],
+            })
+            .collect();
+        app
+    }
+
+    #[test]
+    fn handle_paste_drops_before_filter_buf_when_exited() {
+        // Gate order: an exited session swallows the paste even with the
+        // filter input focused (#254).
+        let mut app = App::new(80, 24, Vec::new()).expect("app");
+        app.input_focus = true;
+        app.exited = Some("ssh x exited (code 0)".to_string());
+        app.handle_paste("leak");
+        assert!(app.filter_buf.is_empty());
+    }
 }

@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::spawn_resolve::PreparedSpawn;
 
@@ -48,6 +49,44 @@ struct MasterSlot {
 /// a status message instead of blocking the UI thread in `write_all`.
 const STDIN_QUEUE_CAPACITY: usize = 256;
 
+/// Poll interval for the reader's full-queue send retry (issue #196). A
+/// blocking `SyncSender::send` parks until the queue drains or the receiver
+/// drops — `stop()` (kill child, drop master) can unblock `read`, but never
+/// `send`, so the reader and the exit-waiter joined to it leaked until the
+/// engine dropped `pty_rx`. With `try_send` + this interval, `stop()` breaks
+/// the wait within one tick; bursts still fill the queue without sleeping,
+/// so the cap only applies while the consumer is the bottleneck
+/// (~4 KB chunks → ≥40 MB/s sustained feed).
+const QUEUE_FULL_RETRY: Duration = Duration::from_micros(100);
+
+/// Session-stop-aware queue send (issue #196): retries [`QUEUE_FULL_RETRY`]
+/// while the bounded queue is full, re-checking `running` every attempt so
+/// [`PtyManager::stop`] releases a reader parked on a flooded queue. Returns
+/// false — dropping `event` — when the session was stopped or the channel
+/// disconnected; bytes of a stopped session are stale by definition.
+fn send_until_accepted(
+    tx: &SyncSender<PtyEvent>,
+    running: &AtomicBool,
+    mut event: PtyEvent,
+) -> bool {
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            return false;
+        }
+        match tx.try_send(event) {
+            Ok(()) => return true,
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                event = returned;
+                thread::sleep(QUEUE_FULL_RETRY);
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                running.store(false, Ordering::SeqCst);
+                return false;
+            }
+        }
+    }
+}
+
 pub struct PtyManager {
     /// Running flag of the CURRENT session. `start_prepared()` replaces the
     /// Arc so a stale exit-waiter of a prior session stores false on a dead
@@ -63,6 +102,12 @@ pub struct PtyManager {
     stdin_tx: Option<SyncSender<Vec<u8>>>,
     /// Writer-thread errors surfaced by [`Self::take_stdin_error`].
     stdin_error: Arc<Mutex<Option<String>>>,
+    /// True once [`Self::take_stdin_error`] reported the error as a status
+    /// event. The error itself stays sticky (until the session restarts) so
+    /// `write_bytes` still refuses input after the per-tick drain consumed
+    /// the report — otherwise keystrokes would silently queue into a dead
+    /// writer channel (#194).
+    stdin_error_reported: AtomicBool,
     /// Must outlive the child on Windows: dropping the ConPTY master calls
     /// `ClosePseudoConsole`, which makes the child exit with `0xC0000142`
     /// (`STATUS_DLL_INIT_FAILED`) if it has not finished console init yet.
@@ -79,6 +124,10 @@ pub struct PtyManager {
     generation: u64,
     /// Monotonic token for the current master slot (guards stale waiters).
     start_seq: u64,
+    /// Exit flags of the CURRENT session's reader + exit-waiter threads,
+    /// replaced by every [`Self::start_prepared`]. Leak observability for
+    /// tests (issue #196): a flag flips when its thread has exited.
+    session_threads_done: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
 }
 
 impl PtyManager {
@@ -89,6 +138,7 @@ impl PtyManager {
             child_killer: None,
             stdin_tx: None,
             stdin_error: Arc::new(Mutex::new(None)),
+            stdin_error_reported: AtomicBool::new(false),
             master: Arc::new(Mutex::new(None)),
             size: PtySize {
                 rows: 40,
@@ -98,6 +148,7 @@ impl PtyManager {
             },
             generation: 0,
             start_seq: 0,
+            session_threads_done: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -212,6 +263,7 @@ impl PtyManager {
         let (stdin_tx, stdin_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(STDIN_QUEUE_CAPACITY);
         self.stdin_tx = Some(stdin_tx);
         self.stdin_error = Arc::new(Mutex::new(None));
+        self.stdin_error_reported = AtomicBool::new(false);
         let stdin_error = self.stdin_error.clone();
         let running_writer = running.clone();
         thread::spawn(move || {
@@ -245,6 +297,14 @@ impl PtyManager {
         let reader_wake = activity_wake.clone();
         let bytes_generation = generation;
         let running_reader = running.clone();
+        // Leak observability for tests (issue #196): done-flags of the current
+        // session's reader + exit-waiter, replaced on every start.
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let waiter_done = Arc::new(AtomicBool::new(false));
+        *self
+            .session_threads_done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = vec![reader_done.clone(), waiter_done.clone()];
         let reader_handle = thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             let session_id = reader_id;
@@ -263,15 +323,12 @@ impl PtyManager {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if tx
-                            .send(PtyEvent::Bytes {
-                                id: session_id.clone(),
-                                data: chunk[..n].to_vec(),
-                                generation: bytes_generation,
-                            })
-                            .is_err()
-                        {
-                            running.store(false, Ordering::SeqCst);
+                        let event = PtyEvent::Bytes {
+                            id: session_id.clone(),
+                            data: chunk[..n].to_vec(),
+                            generation: bytes_generation,
+                        };
+                        if !send_until_accepted(&tx, &running, event) {
                             break;
                         }
                         wake();
@@ -279,13 +336,14 @@ impl PtyManager {
                     Err(_) => break,
                 }
             }
+            reader_done.store(true, Ordering::SeqCst);
         });
 
         // Exit-waiter thread: detects child exit independently of reader EOF.
         let stop_requested = self.stop_requested.clone();
         let master_slot = self.master.clone();
         let tx = tx_waiter;
-        thread::spawn(move || {
+        let waiter_handle = thread::spawn(move || {
             // portable-pty reports the raw DWORD; cast to i32 so NTSTATUS values
             // like 0xC0000142 surface as the familiar negative -1073741502 in the UI.
             // A wait() failure is NOT a natural exit (issue #111): report the
@@ -317,7 +375,10 @@ impl PtyManager {
                     w();
                 }
             }
+            waiter_done.store(true, Ordering::SeqCst);
         });
+        // Detached spawn, as before — the waiter is only joined by itself.
+        drop(waiter_handle);
 
         Ok(())
     }
@@ -342,11 +403,13 @@ impl PtyManager {
         let Some(tx) = &self.stdin_tx else {
             return Err("process is not running".to_string());
         };
-        // Surface a writer-thread failure once (e.g. broken pipe after the
-        // child exited) instead of silently queueing into a dead channel.
-        if let Some(err) = self.take_stdin_error() {
+        // A writer-thread failure (e.g. broken pipe after the child exited)
+        // is sticky until the session restarts: even when the engine tick
+        // already consumed the status report, later input must fail fast
+        // instead of silently queueing into a dead channel (#194).
+        if self.has_stdin_error() {
             self.stdin_tx = None;
-            return Err(format!("stdin write failed: {err}"));
+            return Err("stdin write failed".to_string());
         }
         tx.try_send(data.to_vec()).map_err(|e| match e {
             std::sync::mpsc::TrySendError::Full(_) => {
@@ -356,13 +419,36 @@ impl PtyManager {
         })
     }
 
-    /// Take the last stdin writer error, if any (polled by the engine tick to
-    /// surface it as a status event).
+    /// Take the last stdin writer error once (polled by the engine tick to
+    /// surface it as a status event). The error stays present for
+    /// [`Self::has_stdin_error`] so input keeps failing fast until restart.
     pub fn take_stdin_error(&self) -> Option<String> {
+        let guard = self.stdin_error.lock().unwrap_or_else(|e| e.into_inner());
+        let err = guard.as_ref()?;
+        if !self.stdin_error_reported.swap(true, Ordering::Relaxed) {
+            Some(err.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Sticky stdin-error indicator (not consumed by taking).
+    fn has_stdin_error(&self) -> bool {
         self.stdin_error
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .is_some()
+    }
+
+    /// Test-only leak assertion (issue #196): true when every thread of the
+    /// CURRENT session has exited. Only meaningful after [`Self::start_prepared`].
+    #[cfg(test)]
+    pub(crate) fn test_session_threads_finished(&self) -> bool {
+        self.session_threads_done
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .all(|f| f.load(Ordering::SeqCst))
     }
 }
 
@@ -521,5 +607,29 @@ mod tests {
             2,
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn stdin_error_stays_sticky_after_status_report() {
+        // Issue #194: the per-tick drain (surface_stdin_errors) takes the
+        // error for the status event; write_bytes must still fail fast
+        // instead of silently queueing keystrokes into the dead writer.
+        let mut pty = PtyManager::new();
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        pty.stdin_tx = Some(tx);
+        *pty.stdin_error.lock().unwrap() = Some("broken pipe".to_string());
+
+        assert_eq!(
+            pty.take_stdin_error().as_deref(),
+            Some("broken pipe"),
+            "first tick surfaces the error"
+        );
+        assert_eq!(pty.take_stdin_error(), None, "reported only once");
+
+        assert!(
+            pty.write_bytes(b"x").is_err(),
+            "input must fail fast while the error is sticky"
+        );
+        assert!(pty.stdin_tx.is_none(), "dead writer channel dropped");
     }
 }

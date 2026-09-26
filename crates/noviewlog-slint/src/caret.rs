@@ -38,15 +38,27 @@ pub(crate) fn sync_terminal_caret(
 }
 
 /// Focus Terminal tab viewport + engine flag + overlay (startup / tab switch).
-pub(crate) fn arm_terminal_caret(ui: &AppWindow, eng: &mut Engine, logical: (f32, f32)) {
+///
+/// Takes the engine handle, not a borrowed `Engine`: `invoke_focus_viewport`
+/// can synchronously re-enter `on_viewport_focused` (focus-viewport →
+/// `has-focus` change), which borrows the same engine. The focus invocation
+/// therefore happens BEFORE any `borrow_mut()` — a `RefMut` temporary in a
+/// caller's argument expression would live across the re-entry and panic with
+/// `BorrowMutError` (issues #232, #252).
+pub(crate) fn arm_terminal_caret(
+    ui: &AppWindow,
+    engine: &Rc<RefCell<Engine>>,
+    logical: (f32, f32),
+) {
     ui.invoke_focus_viewport();
+    let mut eng = engine.borrow_mut();
     let _ = eng.send_command(Command::SetViewportFocus { focused: true });
     eng.reset_caret_blink();
     ui.set_caret_blink_on(true);
     let scale = ui.window().scale_factor().max(0.5) as f32;
     let width = (logical.0 * scale).ceil().max(1.0) as u32;
     let height = (logical.1 * scale).ceil().max(1.0) as u32;
-    let _ = sync_terminal_caret(ui, eng, width, height, scale);
+    let _ = sync_terminal_caret(ui, &eng, width, height, scale);
 }
 
 /// Blink only flips overlay opacity — never re-rasters the log Image.
@@ -80,6 +92,7 @@ pub(crate) fn install_boot_arm(
         let logical_size = logical_size.clone();
         let viewport_focused = viewport_focused.clone();
         let ctx = ctx.clone();
+        let delayed = delay_ms > 0;
         Timer::single_shot(Duration::from_millis(delay_ms), move || {
             let Some(ui) = ui_boot.upgrade() else {
                 return;
@@ -87,9 +100,17 @@ pub(crate) fn install_boot_arm(
             if ui.get_active_tab_index() != 0 {
                 return;
             }
+            // Don't steal focus the user already placed elsewhere (sidebar,
+            // find bar) during the boot delay: their click sets
+            // viewport_focused=false, so only re-arm while it is still true.
+            if delayed && !viewport_focused.get() {
+                return;
+            }
             viewport_focused.set(true);
-            let mut eng = engine.borrow_mut();
-            arm_terminal_caret(&ui, &mut eng, *logical_size.borrow());
+            // arm_terminal_caret invokes focus-viewport with NO engine borrow
+            // held: it can re-enter on_viewport_focused, which borrows the
+            // same engine (issues #232, #252).
+            arm_terminal_caret(&ui, &engine, *logical_size.borrow());
             ctx.refresh();
         });
     };

@@ -48,7 +48,11 @@ fn rgb(c: (u8, u8, u8)) -> Color {
 fn build_row(buf: &mut Vec<u8>, y: u16, paint: impl FnOnce(&mut Vec<u8>)) {
     let _ = queue!(buf, MoveTo(0, y), Clear(ClearType::CurrentLine));
     paint(buf);
-    let _ = queue!(buf, SetForegroundColor(Color::Reset), SetBackgroundColor(Color::Reset));
+    let _ = queue!(
+        buf,
+        SetForegroundColor(Color::Reset),
+        SetBackgroundColor(Color::Reset)
+    );
 }
 
 /// Append segments; chars within `hl` (start..end col) get the selection
@@ -83,10 +87,34 @@ fn queue_segments(
             } else {
                 queue!(buf, SetForegroundColor(fg), Print(ch))
             };
-            col += 1;
+            // Wide glyphs occupy two cells in the emulator; zero-width marks
+            // occupy none — count cells, not chars, so selection spans and
+            // truncation line up with what the user sees (#199).
+            col += noviewlog_terminal::terminal::width::char_width(ch);
         }
     }
     let _ = queue!(buf, SetBackgroundColor(Color::Reset));
+}
+
+/// Display-cell width of a label: the emulator advances the cursor in cells,
+/// so hit spans must count the same cells the paint cursor moved (wide CJK
+/// chars take two cells), not `chars().count()` (#241).
+fn label_width(s: &str) -> u16 {
+    s.chars()
+        .map(|ch| noviewlog_terminal::terminal::width::char_width(ch) as u16)
+        .fold(0u16, u16::saturating_add)
+}
+
+/// Span of the "+" (new-tab) button starting at cell `x`: drawn only when
+/// all three cells fit, ending at the last column at the latest (`x + 3 <=
+/// cols`) — the old `x + 3 < cols` bound suppressed it one column early
+/// (#254).
+fn tab_add_span(x: u16, cols: u16) -> Option<(u16, u16)> {
+    if x.saturating_add(3) <= cols {
+        Some((x, 3))
+    } else {
+        None
+    }
 }
 
 /// Selection column span for content row `i`, from the drag state.
@@ -121,7 +149,9 @@ pub fn frame(
     }
 
     // Row 0: tab bar with tabs then a "+" (new filter tab). Column spans are
-    // recorded for mouse hit-testing.
+    // recorded for mouse hit-testing. The labels are queued via the
+    // build_row paint closure: emitting them before build_row would print
+    // them at the stale cursor position and then have the row cleared.
     let mut row0 = Vec::new();
     let mut x: u16 = 0;
     let tabs: Vec<(usize, String, bool)> = app
@@ -135,8 +165,7 @@ pub fn frame(
         })
         .unwrap_or_default();
     app.tab_spans.clear();
-    {
-        let buf = &mut row0;
+    let paint_tabs = |buf: &mut Vec<u8>| {
         for (index, name, active) in &tabs {
             let label = if *active {
                 format!(" [{name}] ")
@@ -151,18 +180,19 @@ pub fn frame(
             } else {
                 Color::DarkGrey
             };
+            let width = label_width(&label);
             let _ = queue!(buf, SetForegroundColor(color), Print(&label));
-            app.tab_spans.push((x, label.chars().count() as u16, *index));
-            x = x.saturating_add(label.chars().count() as u16);
+            app.tab_spans.push((x, width, *index));
+            x = x.saturating_add(width);
         }
-        if x + 3 < cols as u16 {
+        if let Some((x, len)) = tab_add_span(x, cols as u16) {
             let _ = queue!(buf, SetForegroundColor(Color::Cyan), Print(" + "));
-            app.tab_add_span = Some((x, 3));
+            app.tab_add_span = Some((x, len));
         } else {
             app.tab_add_span = None;
         }
-    }
-    build_row(&mut row0, 0, |_| {});
+    };
+    build_row(&mut row0, 0, paint_tabs);
     rows.push(row0);
 
     // Content rows 1..1+content_rows.
@@ -198,9 +228,12 @@ pub fn frame(
         rows.push(buf);
     }
     // Rows the previous frame used but this one doesn't (content shrank):
-    // emit clear-row buffers; the diff writes them exactly once.
+    // emit clear-row buffers; the diff writes them exactly once. A previous
+    // frame is [tab, N content, input, status], so its content occupied
+    // rows 0..prev_len-3 — the old `-2` bound cleared into the input row
+    // and misaligned the frame diff (#199).
     let prev_len = app.frame_prev.len();
-    for row in lines.len().min(content_rows)..prev_len.saturating_sub(2) {
+    for row in lines.len().min(content_rows)..prev_len.saturating_sub(3) {
         let y = (row + 1) as u16;
         if y.saturating_add(1) < app.rows {
             let mut buf = Vec::new();
@@ -219,7 +252,10 @@ pub fn frame(
                 buf,
                 SetForegroundColor(Color::DarkCyan),
                 Print(truncate(
-                    &format!("filter include: {}_  (Enter apply, Esc cancel)", app.filter_buf),
+                    &format!(
+                        "filter include: {}_  (Enter apply, Esc cancel)",
+                        app.filter_buf
+                    ),
                     cols
                 ))
             );
@@ -294,14 +330,24 @@ pub fn frame(
 
     // Context menu overlay (drawn last, on top).
     if let Some(menu) = &app.menu {
-        let width = 24usize.min(cols.saturating_sub(usize::from(menu.col)));
+        let width = usize::from(crate::App::menu_width(menu.col, app.cols.max(1)));
         let mut buf = Vec::new();
-        let _ = queue!(buf, SetForegroundColor(Color::White), SetBackgroundColor(Color::DarkBlue));
+        let _ = queue!(
+            buf,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::DarkBlue)
+        );
         let top: String = format!("+{:-<width$}+", "");
         let _ = queue!(buf, MoveTo(menu.col, menu.row), Print(top));
         for (idx, item) in menu.items.iter().enumerate() {
-            let line = format!("| {:<width$} |", item);
-            let _ = queue!(buf, MoveTo(menu.col, menu.row + idx as u16 + 1), Print(line));
+            // Truncate before the fill format: `{:<width$}` never shortens,
+            // so an over-long item would expand past the box (#241).
+            let line = format!("| {:<width$} |", truncate(item, width.saturating_sub(2)));
+            let _ = queue!(
+                buf,
+                MoveTo(menu.col, menu.row + idx as u16 + 1),
+                Print(line)
+            );
         }
         let bottom: String = format!("+{:-<width$}+", "");
         let _ = queue!(
@@ -318,9 +364,13 @@ pub fn frame(
     if app.connect_open {
         let items = app.connect_items();
         let (col, row, count) = app.connect_geo();
-        let width = 38usize.min(cols.saturating_sub(usize::from(col)).saturating_sub(2));
+        let width = usize::from(crate::App::connect_box_width(col, app.cols.max(1)));
         let mut buf = Vec::new();
-        let _ = queue!(buf, SetForegroundColor(Color::White), SetBackgroundColor(Color::DarkBlue));
+        let _ = queue!(
+            buf,
+            SetForegroundColor(Color::White),
+            SetBackgroundColor(Color::DarkBlue)
+        );
         let top: String = format!("+{:-<width$}+", "");
         let _ = queue!(buf, MoveTo(col, row), Print(top));
         let title = if app.profiles.is_empty() {
@@ -328,7 +378,14 @@ pub fn frame(
         } else {
             " connect ".to_string()
         };
-        let _ = queue!(buf, MoveTo(col, row + 1), Print(format!("|{title:^width$}|")));
+        // Truncate before the centering fill: `{:^width$}` never shortens,
+        // so a title wider than the box would expand past it and wrap (#241).
+        let title = truncate(&title, width);
+        let _ = queue!(
+            buf,
+            MoveTo(col, row + 1),
+            Print(format!("|{title:^width$}|"))
+        );
         for (idx, item) in items.iter().enumerate().take(count) {
             let line = format!("| {:<width$} |", truncate(item, width.saturating_sub(2)));
             let _ = queue!(buf, MoveTo(col, row + idx as u16 + 2), Print(line));
@@ -342,5 +399,74 @@ pub fn frame(
 }
 
 fn truncate(s: &str, cols: usize) -> String {
-    s.chars().take(cols).collect()
+    // Cut by cell width, not char count: CJK glyphs take two columns (#199).
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in s.chars() {
+        let w = noviewlog_terminal::terminal::width::char_width(ch);
+        if width + w > cols {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cells(s: &str) -> usize {
+        s.chars()
+            .map(noviewlog_terminal::terminal::width::char_width)
+            .sum()
+    }
+
+    #[test]
+    fn label_width_counts_display_cells() {
+        // Wide CJK glyphs occupy two cells: span width is 2× chars, matching
+        // the cursor advance the emulator applies (#241).
+        assert_eq!(label_width("日志"), 4);
+        assert_eq!(label_width(" [日志] "), 8);
+        assert_eq!(label_width("abc"), 3);
+    }
+
+    #[test]
+    fn label_width_saturates_instead_of_overflowing() {
+        // A label wider than u16::MAX cells must saturate, not wrap/panic
+        // in debug builds (#254).
+        let huge = "a".repeat(70_000);
+        assert_eq!(label_width(&huge), u16::MAX);
+    }
+
+    #[test]
+    fn tab_add_span_fits_at_last_column() {
+        // "+" ending exactly at the last column renders; one cell later it
+        // does not (#254).
+        assert_eq!(tab_add_span(7, 10), Some((7, 3)));
+        assert_eq!(tab_add_span(0, 3), Some((0, 3)));
+        assert_eq!(tab_add_span(8, 10), None);
+        assert_eq!(tab_add_span(u16::MAX, 10), None);
+    }
+
+    #[test]
+    fn truncate_connect_title_stays_in_box() {
+        // The 42-char connect title at a 38-wide box: truncation before the
+        // centering fill keeps the drawn line inside the overlay (#241).
+        let title = " no ssh profiles — add tui_ssh_profiles ".to_string();
+        assert!(cells(&title) > 38);
+        let cut = truncate(&title, 38);
+        assert!(cells(&cut) <= 38);
+        let line = format!("|{cut:^38}|");
+        assert!(cells(&line) <= 40);
+    }
+
+    #[test]
+    fn truncate_is_char_boundary_safe() {
+        // Wide chars at an odd width: stop before the glyph, never mid-char.
+        let cut = truncate("日日日", 3);
+        assert_eq!(cut, "日");
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+    }
 }

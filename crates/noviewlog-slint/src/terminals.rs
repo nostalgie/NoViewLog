@@ -35,8 +35,8 @@ pub(crate) fn install(
 ) {
     install_switch(ui, ctx, terminals_model.clone(), files_model.clone());
     install_move(ui, ctx);
-    install_rename(ui, ctx, terminals_model.clone(), files_model);
-    install_add(ui, ctx, terminals_model);
+    install_rename(ui, ctx, terminals_model.clone(), files_model.clone());
+    install_add(ui, ctx, terminals_model.clone(), files_model.clone());
     install_close(ui, ctx);
     install_start_stop(ui, ctx);
     install_sidebar(ui, ctx);
@@ -107,13 +107,21 @@ fn install_rename(
     });
 }
 
-fn install_add(ui: &AppWindow, ctx: &Ctx, terminals_model: Rc<VecModel<TerminalInfo>>) {
+fn install_add(
+    ui: &AppWindow,
+    ctx: &Ctx,
+    terminals_model: Rc<VecModel<TerminalInfo>>,
+    files_model: Rc<VecModel<TerminalInfo>>,
+) {
     let ctx = ctx.clone();
     let ui_term = ui.as_weak();
     ui.on_terminal_add(move || {
         let _ = ctx.send(Command::TerminalAdd);
         // Optimistic highlight; full row (with id) comes from immediate stats flush.
-        let next = terminals_model.row_count() as i32;
+        // active-terminal-index is a GLOBAL session index across TERMINALS + FILES
+        // (engine_bridge), so the new terminal's index is the combined row count —
+        // using the TERMINALS count alone highlighted the wrong row with files open.
+        let next = (terminals_model.row_count() + files_model.row_count()) as i32;
         if let Some(ui) = ui_term.upgrade() {
             ui.set_active_terminal_index(next);
         }

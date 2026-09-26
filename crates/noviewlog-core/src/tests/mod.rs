@@ -5,6 +5,34 @@ use std::sync::Mutex;
 /// User config.yaml is process-global; serialize tests that write it.
 pub(crate) static USER_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
+/// Redirect the user config directory to a fresh temp dir for the duration of
+/// a test, so tests that opt into real persistence never touch the
+/// developer's `~/.config/noviewlog` (issue #239). The override is cleared and
+/// the directory removed on drop, including on a failed assertion.
+pub(crate) struct ConfigDirGuard {
+    dir: std::path::PathBuf,
+}
+
+impl ConfigDirGuard {
+    pub(crate) fn new(name: &str) -> Self {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("noviewlog-test-cfg-{name}-{stamp}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::core::config::set_config_dir_override(Some(dir.clone()));
+        Self { dir }
+    }
+}
+
+impl Drop for ConfigDirGuard {
+    fn drop(&mut self) {
+        crate::core::config::set_config_dir_override(None);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// Generate (once, cached) a >8 MiB perf fixture log so the large-file tests
 /// run on any host instead of silently skipping without `/home/dima/big.log`
 /// (issue #72). ~55 B/line; every ~20th line carries the `11:01:13` needle

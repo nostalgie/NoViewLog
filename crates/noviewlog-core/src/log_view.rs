@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::core::buffer::RecordBuffer;
@@ -173,6 +174,10 @@ pub struct LogView {
     /// Bumped whenever the scan inputs change; results from a background scan
     /// thread carrying a stale token are dropped (issue #55).
     pub match_scan_token: u64,
+    /// Cancellation flag shared with the in-flight scan worker; flipped when
+    /// the token bumps so the worker stops reading the file instead of
+    /// running to the cap/EOF for a discarded result (#206).
+    pub match_scan_cancel: Option<Arc<AtomicBool>>,
     /// A background scan thread is running for this view (issue #55).
     pub match_scan_inflight: bool,
     /// True when the last completed match scan stopped at
@@ -215,6 +220,7 @@ impl LogView {
             match_scan_pos: None,
             match_window_start: 0,
             match_scan_token: 0,
+            match_scan_cancel: None,
             match_scan_inflight: false,
             match_capped: false,
             match_window_inflight: None,
@@ -286,6 +292,7 @@ impl LogView {
         self.match_scan_pos = Some(0);
         self.match_window_start = 0;
         self.match_scan_token = self.match_scan_token.wrapping_add(1);
+        Self::cancel_match_scan(&mut self.match_scan_cancel);
         self.match_scan_inflight = false;
         self.match_capped = false;
         self.match_window_inflight = None;
@@ -296,9 +303,17 @@ impl LogView {
         self.match_scan_pos = None;
         self.match_window_start = 0;
         self.match_scan_token = self.match_scan_token.wrapping_add(1);
+        Self::cancel_match_scan(&mut self.match_scan_cancel);
         self.match_scan_inflight = false;
         self.match_capped = false;
         self.match_window_inflight = None;
+    }
+
+    /// Flip and drop the shared cancellation flag of an in-flight scan.
+    fn cancel_match_scan(flag: &mut Option<Arc<AtomicBool>>) {
+        if let Some(f) = flag.take() {
+            f.store(true, Ordering::Relaxed);
+        }
     }
 
     pub fn uses_match_index(&self) -> bool {
@@ -673,8 +688,11 @@ impl LogView {
     /// `old_total` / `new_total` are committed Record counts (live screen is not in the buffer).
     /// `old_overlay` is the previous overlay line count at the end of `flat_lines`.
     ///
-    /// When the ring drops a stable prefix (`shifted_raw_lines` > 0), drops the matching
-    /// flat-line prefix instead of failing into a full rebuild.
+    /// When the ring drops a stable prefix (`shifted_flat_lines` > 0), drops the matching
+    /// flat-line prefix instead of failing into a full rebuild. `shifted_records`
+    /// is the same trim counted in records: a multiline record removes one
+    /// record but several flat lines, and the record slice below must be
+    /// indexed in record space (`old_total - shifted_records`), not flat lines.
     ///
     /// Returns `false` when the view must fall back to a full dirty rebuild
     /// (filters, search, severity, or inconsistent cursors).
@@ -685,7 +703,8 @@ impl LogView {
         old_total: usize,
         overlay: &[FlatLine],
         new_total: usize,
-        shifted_raw_lines: usize,
+        shifted_records: usize,
+        shifted_flat_lines: usize,
     ) -> bool {
         if self.flat_lines_dirty {
             return false;
@@ -701,7 +720,7 @@ impl LogView {
         }
         let stable_before = old_total;
         let stable_after = new_total;
-        if shifted_raw_lines == 0 && stable_after < stable_before {
+        if shifted_flat_lines == 0 && stable_after < stable_before {
             return false;
         }
 
@@ -710,27 +729,36 @@ impl LogView {
             return false;
         }
         let stable_flat_before = len - old_overlay;
-        if shifted_raw_lines > 0 && stable_flat_before < shifted_raw_lines {
+        if shifted_flat_lines > 0 && stable_flat_before == 0 {
             return false;
         }
-        let k = stable_flat_before - shifted_raw_lines;
-        if k > stable_after {
+        // The feed's trim counters also cover records created and dropped
+        // within the same tick — those were never in this view. Clamp both
+        // counters to what the view actually holds: if any in-view record
+        // survives, no out-of-view record was dropped (FIFO), so the raw
+        // counters are already in-view; otherwise everything is dropped and
+        // both clamps saturate to the view's full prefix.
+        let shifted_flat = shifted_flat_lines.min(stable_flat_before);
+        let shifted_in_view = shifted_records.min(old_total);
+        let k = stable_flat_before - shifted_flat;
+        let record_base = old_total - shifted_in_view;
+        if record_base > stable_after {
             return false;
         }
 
         let lines = Arc::make_mut(&mut self.flat_lines);
         lines.truncate(stable_flat_before);
 
-        if shifted_raw_lines > 0 {
-            lines.drain(0..shifted_raw_lines);
+        if shifted_flat > 0 {
+            lines.drain(0..shifted_flat);
         }
 
         debug_assert_eq!(lines.len(), k);
 
         let records = buffer.records();
-        if k < stable_after {
+        if record_base < stable_after {
             let appended = rebuild_flat_lines_for_records(
-                &records[k..stable_after],
+                &records[record_base..stable_after],
                 &self.filter_engine,
                 self.severity_filter,
                 &self.expanded_record_ids,
@@ -743,7 +771,7 @@ impl LogView {
         self.visual_row_index.patch_after_ring_shift(
             self.wrap_lines,
             stable_flat_before,
-            shifted_raw_lines,
+            shifted_flat,
             &self.flat_lines,
         );
         true

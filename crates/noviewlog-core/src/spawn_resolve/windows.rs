@@ -19,7 +19,9 @@ pub fn normalize_windows_cwd(cwd: &str) -> String {
         .or_else(|| trimmed.strip_prefix("//?/"))
     {
         let rest_norm = rest.replace('/', "\\");
-        if rest_norm.len() >= 4 && rest_norm[..4].eq_ignore_ascii_case(r"UNC\") {
+        // Byte-wise compare: a string slice at a fixed offset panics when the
+        // boundary lands inside a multi-byte char (issue #233).
+        if rest_norm.len() >= 4 && rest_norm.as_bytes()[..4].eq_ignore_ascii_case(b"UNC\\") {
             format!(r"\\{}", &rest_norm[4..])
         } else {
             rest_norm
@@ -426,12 +428,22 @@ fn resolve_existing_candidate(
         if base.is_file() {
             return Some(base);
         }
-        if base.extension().is_none() {
-            for ext in extensions {
-                let with_ext = base.with_extension(ext.trim_start_matches('.'));
-                if with_ext.is_file() {
-                    return Some(with_ext);
-                }
+        // CreateProcess appends PATHEXT extensions to the name as given, so a
+        // dotted name (`my.tool`) resolves via `my.tool.exe` — probe that
+        // first (#255). Also keep the legacy with_extension probe so the name
+        // still resolves via an extension-replaced variant (`my.exe`).
+        for ext in extensions {
+            let ext_body = ext.trim_start_matches('.');
+            let mut os = base.clone().into_os_string();
+            os.push(".");
+            os.push(ext_body);
+            let appended = PathBuf::from(os);
+            if appended.is_file() {
+                return Some(appended);
+            }
+            let with_ext = base.with_extension(ext_body);
+            if with_ext.is_file() {
+                return Some(with_ext);
             }
         }
     }
@@ -457,7 +469,10 @@ fn probe_dir(dir: &Path, program: &str, extensions: &[String]) -> Option<PathBuf
 
     for ext in extensions {
         let ext_body = ext.trim_start_matches('.');
-        let candidate = dir.join(program).with_extension(ext_body);
+        // Append, not with_extension: that replaces everything after the last
+        // dot, so a dotted program name ("my.tool") probed as "my.exe"
+        // instead of "my.tool.exe".
+        let candidate = dir.join(format!("{program}.{ext_body}"));
         if !candidate.is_file() {
             continue;
         }
@@ -480,4 +495,36 @@ fn pathext_list() -> Vec<String> {
         .filter_map(|p| p.into_os_string().into_string().ok())
         .map(|s| s.to_ascii_lowercase())
         .collect()
+}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotted_full_path_resolves_appended_ext() {
+        // Issue #255: `C:\...\my.tool` must probe `my.tool.exe` (which
+        // CreateProcess would find), not only `my.exe`.
+        let dir = std::env::temp_dir().join(format!("nvl-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("my.tool");
+        let appended = dir.join("my.tool.exe");
+        let replaced = dir.join("my.exe");
+        std::fs::write(&appended, b"MZ").unwrap();
+
+        let resolved = resolve_existing_candidate(&base, None, &["exe".to_string()])
+            .expect("must resolve via appended extension");
+        assert_eq!(resolved, appended, "appended form must win");
+
+        // Both orderings: with only `my.exe` present, the with_extension
+        // probe still resolves.
+        std::fs::remove_file(&appended).unwrap();
+        std::fs::write(&replaced, b"MZ").unwrap();
+        let resolved = resolve_existing_candidate(&base, None, &["exe".to_string()])
+            .expect("must resolve via with_extension");
+        assert_eq!(resolved, replaced);
+
+        std::fs::remove_file(&replaced).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
 }

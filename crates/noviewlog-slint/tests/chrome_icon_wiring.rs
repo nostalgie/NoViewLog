@@ -29,26 +29,64 @@ fn slint_sources() -> Vec<(PathBuf, String)> {
     out
 }
 
-/// Collect `text: "..."` / `text: '...'` string literals (Slint chrome).
+/// Truncate a code line at the first `//` that sits outside a string literal
+/// (issue #255): a trailing comment such as `text: "Save" // old "✕"` used to
+/// leak its literals into the extraction and trip the guard falsely.
+fn strip_trailing_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '/' if line[i..].starts_with("//") => return &line[..i],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// Collect every quoted string literal on lines that feed chrome text roles
+/// (`text:` / `title:` / `label:`). Scanning the whole line (not just a
+/// literal right after `text:`) keeps conditional icons such as
+/// `text: flag ? "✕" : ""` inside the guard — a one-line refactor previously
+/// reintroduced tofu with a green test.
 fn text_literals(src: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut rest = src;
-    while let Some(idx) = rest.find("text:") {
-        let after = &rest[idx + 5..];
-        let after = after.trim_start();
-        let (lit, next) = if let Some(s) = after.strip_prefix('"') {
-            if let Some(end) = s.find('"') {
-                (&s[..end], &s[end + 1..])
-            } else {
-                rest = &rest[idx + 5..];
-                continue;
-            }
-        } else {
-            rest = &rest[idx + 5..];
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
             continue;
-        };
-        out.push(lit);
-        rest = next;
+        }
+        if !["text:", "title:", "label:"]
+            .iter()
+            .any(|k| line.contains(k))
+        {
+            continue;
+        }
+        // Drop trailing `//` comments first so literals quoted inside them
+        // (`// old "✕"`) cannot trip the guard (#255). Multi-line `text:`
+        // values remain a documented limitation.
+        let mut rest = strip_trailing_comment(line);
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            match after.find('"') {
+                Some(end) => {
+                    out.push(&after[..end]);
+                    rest = &after[end + 1..];
+                }
+                None => break, // unterminated quote (line continuation) — stop
+            }
+        }
     }
     out
 }
@@ -161,5 +199,22 @@ fn launch_preview_strip_is_theme_bar_not_accent() {
     assert!(
         chunk.contains("overflow: elide"),
         "launch preview text must elide"
+    );
+}
+
+#[test]
+fn trailing_comment_literals_are_not_extracted() {
+    // Issue #255: a trailing comment's quoted glyph must not trip the guard,
+    // while `//` inside a real string literal must keep the literal intact.
+    let code = r#"text: root.running ? "Stop" : "Run" // old "✕" glyph"#;
+    assert_eq!(text_literals(code), vec!["Stop", "Run"]);
+
+    let url = r#"text: root.hint // see "https://example.com/a//b" docs"#;
+    assert_eq!(text_literals(url), Vec::<&str>::new());
+
+    let literal_with_slashes = r#"text: "https://example.com""#;
+    assert_eq!(
+        text_literals(literal_with_slashes),
+        vec!["https://example.com"]
     );
 }

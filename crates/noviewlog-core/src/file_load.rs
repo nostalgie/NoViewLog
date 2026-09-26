@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::file_index::{
     decode_lossy_line, read_line_bounded, FileBackedLog, LineIndex, TempFileGuard,
@@ -321,18 +321,51 @@ fn open_tail_reader(
     file.seek(SeekFrom::Start(seek_pos))
         .map_err(|e| format!("Seek failed: {e}"))?;
 
+    // True when the byte just before the seek offset is a '\n' (or the seek
+    // is at the file start): the run we read below is then a *complete* line
+    // rather than the tail of a longer one.
+    let boundary_before = if seek_pos > 0 {
+        let mut prev = [0u8; 1];
+        let at_newline = file
+            .seek(SeekFrom::Start(seek_pos - 1))
+            .and_then(|_| file.read_exact(&mut prev))
+            .map(|_| prev[0] == b'\n')
+            .unwrap_or(false);
+        file.seek(SeekFrom::Start(seek_pos))
+            .map_err(|e| format!("Seek failed: {e}"))?;
+        at_newline
+    } else {
+        false
+    };
+
     let mut reader = BufReader::new(file);
     let mut content_start = seek_pos;
     if seek_pos > 0 {
         // The seek offset is arbitrary and may land inside a multi-byte UTF-8
-        // sequence (Cyrillic / CJK / emoji logs). Discard the partial line as
+        // sequence (Cyrillic / CJK / emoji logs). Discard a *partial* line as
         // raw bytes: `read_line` would fail UTF-8 validation and abort the
         // whole file open. Content starts after the discarded bytes, at the
-        // next line start (issue #161).
+        // next line start (issue #161). When the seek lands exactly on a
+        // line boundary the line is intact — re-seek and keep it instead of
+        // silently dropping one full line (#197).
         let mut discard = Vec::new();
-        let (consumed, _) = read_line_bounded(&mut reader, &mut discard)
+        let (consumed, truncated) = read_line_bounded(&mut reader, &mut discard)
             .map_err(|err| format!("Read error after seek: {err}"))?;
-        content_start = seek_pos + consumed as u64;
+        // Intact = boundary before, complete run (newline present, nothing
+        // capped) and valid UTF-8. A seek landing mid-line still reads up to
+        // the next '\n', but that run starts inside a character or mid-text
+        // and must be dropped.
+        let intact_line = boundary_before
+            && !truncated
+            && discard.last() == Some(&b'\n')
+            && std::str::from_utf8(&discard).is_ok();
+        if intact_line {
+            reader
+                .seek(SeekFrom::Start(seek_pos))
+                .map_err(|e| format!("Seek failed: {e}"))?;
+        } else {
+            content_start = seek_pos + consumed as u64;
+        }
     }
 
     Ok((Some(reader), content_start))
@@ -367,6 +400,10 @@ pub enum LoadEvent {
 pub struct FileLoadHandle {
     pub path: String,
     rx: mpsc::Receiver<LoadEvent>,
+    /// Pending-event gauge the worker increments before each send and the
+    /// receiver decrements in [`Self::drain`]. Test hook for the #238
+    /// backpressure bound; the sync channel itself is the enforcement.
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Mirrored worker state for stats (`file_index_progress`).
     pub index_progress: f32,
     pub content_lines_read: u64,
@@ -374,25 +411,23 @@ pub struct FileLoadHandle {
 }
 
 impl FileLoadHandle {
+    /// Events sent by the worker and not yet drained. May briefly overcount
+    /// by one while the sender is parked inside a blocking send.
+    #[cfg(test)]
+    fn in_flight(&self) -> usize {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.in_flight.load(Relaxed)
+    }
+
     /// Take at most `max` pending events (never blocks).
     pub fn drain(&mut self, max: usize) -> Vec<LoadEvent> {
+        use std::sync::atomic::Ordering::Relaxed;
         let mut out = Vec::new();
         while out.len() < max {
             match self.rx.try_recv() {
                 Ok(event) => {
-                    match &event {
-                        LoadEvent::Progress {
-                            content_lines_read,
-                            index_progress,
-                            index_done,
-                            ..
-                        } => {
-                            self.content_lines_read = *content_lines_read;
-                            self.index_progress = *index_progress;
-                            self.index_done = *index_done;
-                        }
-                        LoadEvent::Done { .. } | LoadEvent::Failed(_) => {}
-                    }
+                    self.in_flight.fetch_sub(1, Relaxed);
+                    self.note(&event);
                     out.push(event);
                 }
                 Err(_) => break,
@@ -400,25 +435,101 @@ impl FileLoadHandle {
         }
         out
     }
+
+    /// True once the worker channel is disconnected: the worker thread
+    /// dropped its sender without ever posting Done/Failed (e.g. it panicked
+    /// after channel setup). Such a load can never finish, so the engine
+    /// converts it to `Failed` instead of waiting forever (issue #253).
+    ///
+    /// Drains and RETURNS any events that landed meanwhile instead of
+    /// consuming them silently: a bare `try_recv` probe could eat a `Done` /
+    /// `Failed` that arrived between the caller's drain and this check,
+    /// misclassifying a healthy finished load as stalled.
+    pub fn probe(&mut self) -> (bool, Vec<LoadEvent>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::sync::mpsc::TryRecvError;
+        let mut out = Vec::new();
+        loop {
+            match self.rx.try_recv() {
+                Ok(event) => {
+                    self.in_flight.fetch_sub(1, Relaxed);
+                    self.note(&event);
+                    out.push(event);
+                }
+                Err(TryRecvError::Empty) => return (false, out),
+                Err(TryRecvError::Disconnected) => return (true, out),
+            }
+        }
+    }
+
+    fn note(&mut self, event: &LoadEvent) {
+        if let LoadEvent::Progress {
+            content_lines_read,
+            index_progress,
+            index_done,
+            ..
+        } = event
+        {
+            self.content_lines_read = *content_lines_read;
+            self.index_progress = *index_progress;
+            self.index_done = *index_done;
+        }
+    }
 }
 
 /// Cap on load events applied per engine tick: bounds UI work per tick while
 /// the worker free-runs ahead (the channel buffers the rest in order).
 pub const LOAD_EVENTS_PER_TICK: usize = 32;
 
+/// Last-resort backstop for a background load whose worker neither posts
+/// events nor disconnects (e.g. a blocked network-share `open`) — issue #253.
+/// A healthy worker sends Progress/Done far more often than this; when the
+/// quiet period lapses the engine fails the load so `host_work_pending`
+/// cannot wedge the fast tick cadence forever. A *disconnected* worker is
+/// failed immediately without waiting this long.
+pub const FILE_LOAD_STALL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Worker→UI channel capacity (issue #238): the worker blocks in `send` once
+/// this many [`LoadEvent`]s are pending, so a stalled UI can no longer let the
+/// queue grow with the whole file. Payload skipping is not an option here —
+/// each Progress event's lines extend the contiguous tail buffer window
+/// (`push_lines` + `buffer_line_start/end` bookkeeping), so dropping a payload
+/// would punch holes into the visible lines. Blocking the worker caps memory
+/// instead and cannot deadlock: the UI never waits on the worker, and a
+/// dropped handle disconnects the channel so the blocked send fails.
+pub const LOAD_CHANNEL_CAP: usize = 8;
+
 /// Start a background load of `path`: opening, BOM sniffing, UTF-16
 /// transcoding, content reads, and index scans all run on a worker thread
 /// (issue #55). The handle drains [`LoadEvent`]s on the engine tick.
 pub fn spawn_file_load(path: &str) -> FileLoadHandle {
-    let (tx, rx) = mpsc::channel();
+    // Bounded (issue #238): the worker blocks on send once the UI falls
+    // LOAD_CHANNEL_CAP events behind instead of buffering the whole file.
+    let (tx, rx) = mpsc::sync_channel(LOAD_CHANNEL_CAP);
+    let spawn_err_tx = tx.clone();
     let owned_path = path.to_string();
-    std::thread::Builder::new()
+    let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let worker_in_flight = in_flight.clone();
+    let spawned = std::thread::Builder::new()
         .name("noviewlog-file-load".into())
         .spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            // Gauge wrapper around the blocking send: on disconnect the
+            // message is not delivered, so the pending count comes back down.
+            let send = |event: LoadEvent| -> bool {
+                worker_in_flight.fetch_add(1, Relaxed);
+                match tx.send(event) {
+                    Ok(()) => true,
+                    Err(_) => {
+                        worker_in_flight.fetch_sub(1, Relaxed);
+                        false
+                    }
+                }
+            };
             let mut state = match FileLoadState::open(&owned_path) {
                 Ok(state) => state,
                 Err(message) => {
-                    let _ = tx.send(LoadEvent::Failed(message));
+                    let _ = send(LoadEvent::Failed(message));
                     return;
                 }
             };
@@ -453,7 +564,7 @@ pub fn spawn_file_load(path: &str) -> FileLoadHandle {
                             index_progress: state.index_progress(),
                             tail_start_line,
                         };
-                        if tx.send(event).is_err() {
+                        if !send(event) {
                             return;
                         }
                         if state.is_finished() {
@@ -461,30 +572,35 @@ pub fn spawn_file_load(path: &str) -> FileLoadHandle {
                             let tail_start_line = exact_tail_start_line(&mut state);
                             match state.into_backed() {
                                 Ok(backed) => {
-                                    let _ = tx.send(LoadEvent::Done {
+                                    let _ = send(LoadEvent::Done {
                                         backed: Box::new(backed),
                                         content_lines_read,
                                         tail_start_line,
                                     });
                                 }
                                 Err(message) => {
-                                    let _ = tx.send(LoadEvent::Failed(message));
+                                    let _ = send(LoadEvent::Failed(message));
                                 }
                             }
                             return;
                         }
                     }
                     Err(message) => {
-                        let _ = tx.send(LoadEvent::Failed(message));
+                        let _ = send(LoadEvent::Failed(message));
                         return;
                     }
                 }
             }
-        })
-        .expect("spawn file-load worker");
+        });
+    if let Err(err) = spawned {
+        // Thread exhaustion must degrade to a Failed load, not panic the UI
+        // process — every other open failure reports through the channel (#197).
+        let _ = spawn_err_tx.send(LoadEvent::Failed(format!("spawn file-load worker: {err}")));
+    }
     FileLoadHandle {
         path: path.to_string(),
         rx,
+        in_flight,
         index_progress: 0.0,
         content_lines_read: 0,
         index_done: false,
@@ -502,6 +618,39 @@ pub fn write_test_log(path: &std::path::Path, line_count: usize) -> std::io::Res
     Ok(())
 }
 
+/// Test seam (issue #253): a handle whose worker already disconnected —
+/// the sender was dropped without ever posting Done/Failed, exactly like a
+/// worker that panicked after channel setup.
+#[cfg(test)]
+pub fn disconnected_file_load_handle_for_test(path: &str) -> FileLoadHandle {
+    let (_, rx) = mpsc::sync_channel(LOAD_CHANNEL_CAP);
+    FileLoadHandle {
+        path: path.to_string(),
+        rx,
+        in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        index_progress: 0.0,
+        content_lines_read: 0,
+        index_done: false,
+    }
+}
+
+/// Test seam: a live handle plus its sender, for probe/drain semantics tests.
+#[cfg(test)]
+pub fn channel_handle_for_test(path: &str) -> (mpsc::SyncSender<LoadEvent>, FileLoadHandle) {
+    let (tx, rx) = mpsc::sync_channel(LOAD_CHANNEL_CAP);
+    (
+        tx,
+        FileLoadHandle {
+            path: path.to_string(),
+            rx,
+            in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            index_progress: 0.0,
+            content_lines_read: 0,
+            index_done: false,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +663,32 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("noviewlog-{name}-{stamp}.log"))
+    }
+
+    /// Issue #238 regression: while the UI does not drain, pending events stay at
+    /// the channel cap (worker blocks) instead of growing with the file.
+    #[test]
+    #[ignore = "slow tier: sleeps to let the worker run ahead; run with -- --ignored"]
+    fn load_channel_is_backpressured_when_ui_stalls() {
+        let path = temp_log_path("backpressure");
+        write_test_log(&path, 200_000).unwrap();
+        let mut handle = spawn_file_load(path.to_str().unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Snapshot the gauge without draining: draining concurrently would let
+        // the worker refill while we count. With the worker parked in a blocking
+        // send this is the channel's pending depth (allowing one in-send slot).
+        let pending = handle.in_flight();
+        assert!(
+            pending <= LOAD_CHANNEL_CAP + 1,
+            "queue depth {pending} exceeds cap {LOAD_CHANNEL_CAP} (+1 in-send)"
+        );
+        assert!(pending > 0, "worker must have produced events");
+        // Drain to completion so the worker exits before the temp file is removed.
+        while !matches!(
+            handle.drain(LOAD_CHANNEL_CAP).last(),
+            Some(LoadEvent::Done { .. })
+        ) {}
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -603,6 +778,44 @@ mod tests {
             state.tick().unwrap();
         }
         assert_eq!(state.index.total_lines(), 209_715);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "slow tier: generates + indexes a large fixture; run with -- --ignored"]
+    fn tail_seek_on_line_boundary_keeps_the_line() {
+        // Issue #197: when file_size - FILE_INITIAL_TAIL_BYTES lands exactly
+        // on a line start, that intact line must open as the first content
+        // line instead of being discarded. Layout: 'a' * 6_291_459 + '\n'
+        // (prefix ends on a newline so the boundary check sees one), then
+        // 262_144 lines of "sNNNNNN\n" (8 bytes). Size = 8_388_612 >
+        // FILE_LARGE_BYTES, and seek_pos = size - 2 MiB = 6_291_460 = the
+        // first line's start offset.
+        let path = temp_log_path("tail-boundary");
+        let prefix_len: usize = 6_291_460;
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&vec![b'a'; prefix_len - 1]).unwrap();
+            f.write_all(b"\n").unwrap();
+            for i in 0..262_144usize {
+                writeln!(f, "s{i:06}").unwrap();
+            }
+        }
+        let mut state = FileLoadState::open(path.to_str().unwrap()).unwrap();
+        assert!(state.file_size > FILE_LARGE_BYTES);
+        assert_eq!(state.content_start_byte, prefix_len as u64);
+
+        let mut first_line: Option<String> = None;
+        while first_line.is_none() && !state.content_finished {
+            let (lines, _, _) = state.tick().unwrap();
+            first_line = lines.first().cloned();
+        }
+        assert_eq!(
+            first_line.as_deref(),
+            Some("s000000"),
+            "the intact line at the seek boundary must be kept"
+        );
 
         let _ = std::fs::remove_file(path);
     }
@@ -870,5 +1083,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(path);
+    }
+    // Issue found in pass 2: the old liveness probe used a bare try_recv and
+    // could CONSUME a Done/Failed that landed between the caller's drain and
+    // the check, so a healthy finished load was misclassified as "stalled".
+    #[test]
+    fn probe_returns_landed_events_instead_of_eating_them() {
+        let (tx, mut handle) = channel_handle_for_test("probe-live");
+        // Drain sees an empty queue, then the worker posts the final event.
+        assert!(handle.drain(32).is_empty());
+        tx.send(LoadEvent::Failed("done-as-failed".into())).unwrap();
+        let (disconnected, events) = handle.probe();
+        assert!(!disconnected, "sender still alive during probe");
+        assert_eq!(events.len(), 1, "probe must return the landed event");
+        // Queue is now empty but the channel is still connected.
+        let (disconnected, events) = handle.probe();
+        assert!(!disconnected);
+        assert!(events.is_empty());
+        drop(tx);
+        let (disconnected, events) = handle.probe();
+        assert!(disconnected);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn probe_reports_disconnected_only_when_queue_drained() {
+        let (tx, mut handle) = channel_handle_for_test("probe-disc");
+        tx.send(LoadEvent::Failed("late failure".into())).unwrap();
+        drop(tx);
+        // A disconnect with events still queued must deliver the events first.
+        let (disconnected, events) = handle.probe();
+        assert!(disconnected);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], LoadEvent::Failed(ref m) if m == "late failure"));
+        let (disconnected, events) = handle.probe();
+        assert!(disconnected);
+        assert!(events.is_empty());
     }
 }

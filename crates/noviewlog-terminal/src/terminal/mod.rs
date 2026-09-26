@@ -24,7 +24,7 @@
 //! correctly while every finalized line (tables, ✔ steps, banners) survives.
 
 mod screen;
-mod width;
+pub mod width;
 
 use std::sync::Arc;
 
@@ -274,9 +274,11 @@ impl Perform for TerminalEmulator {
                 self.line_feed();
             }
             b'M' => {
-                // Reverse index: cursor up, scroll down at top.
+                // Reverse index: cursor up, scroll down at the top row (DEC RI).
                 self.wrap_pending = false;
-                if self.cursor_row > 0 {
+                if self.cursor_row == 0 {
+                    self.scroll_down();
+                } else {
                     self.cursor_row -= 1;
                 }
             }
@@ -430,29 +432,48 @@ impl TerminalIngest {
         let _ = self.commit_available(buffer, parser);
     }
 
-    fn commit_available(&mut self, buffer: &mut RecordBuffer, parser: &mut RecordParser) -> usize {
-        let mut shifted = 0usize;
+    fn commit_available(
+        &mut self,
+        buffer: &mut RecordBuffer,
+        parser: &mut RecordParser,
+    ) -> (usize, usize) {
+        let mut shifted_records = 0usize;
+        let mut shifted_lines = 0usize;
+        let mut committed = false;
         for line in self.emu.take_committed() {
+            committed = true;
             for record in parser.push_line(line) {
-                shifted += buffer.add(record);
+                let (records, lines) = buffer.add_counting(record);
+                shifted_records += records;
+                shifted_lines += lines;
             }
         }
         // Scrolled-off lines that are still "open" in the RecordParser would
         // otherwise sit invisible in pending until the next line or idle_flush
         // (~120ms) — Follow sees them vanish and reappear. Flush immediately.
-        if let Some(rec) = parser.flush_pending() {
-            shifted += buffer.add(rec);
+        // Only when rows actually scrolled off: flushing on every chunk would
+        // split a multiline record arriving across successive PTY reads
+        // (the normal case for slow output) into one record per chunk.
+        if committed {
+            if let Some(rec) = parser.flush_pending() {
+                let (records, lines) = buffer.add_counting(rec);
+                shifted_records += records;
+                shifted_lines += lines;
+            }
         }
-        shifted
+        (shifted_records, shifted_lines)
     }
 
-    /// Feed a raw PTY byte chunk. Returns raw lines dropped from the ring (scrollback trim).
+    /// Feed a raw PTY byte chunk. Returns `(records, raw lines)` dropped from
+    /// the ring (scrollback trim). A multiline record dropped by the ring
+    /// removes one record but several flat lines — callers patching the
+    /// flat-line prefix vs the record cursor need each count in its own space.
     pub fn feed(
         &mut self,
         bytes: &[u8],
         buffer: &mut RecordBuffer,
         parser: &mut RecordParser,
-    ) -> usize {
+    ) -> (usize, usize) {
         parser.begin_chunk();
         self.parser.advance(&mut self.emu, bytes);
         self.commit_available(buffer, parser)
@@ -590,6 +611,28 @@ mod tests {
         assert!(!emu.cursor_visible());
         feed(&mut emu, b"\x1b[?25h");
         assert!(emu.cursor_visible());
+    }
+
+    #[test]
+    fn reverse_index_at_top_scrolls_down() {
+        // Issue #236: DEC RI with the cursor on the top row must scroll the
+        // grid down one line, like index at the bottom scrolls up.
+        let mut emu = TerminalEmulator::new(80, 4);
+        feed(&mut emu, b"top\r\nbottom");
+        feed(&mut emu, b"\x1b[1;1H\x1bM");
+        assert_eq!(emu.screen_cursor(), ScreenCursor { line: 0, col: 0 });
+        let lines = emu.screen_lines();
+        assert_eq!(lines[0], "");
+        assert_eq!(lines[1], "top");
+        assert_eq!(lines[2], "bottom");
+    }
+
+    #[test]
+    fn reverse_index_below_top_moves_cursor_up() {
+        let mut emu = TerminalEmulator::new(80, 4);
+        feed(&mut emu, b"top\r\nbottom");
+        feed(&mut emu, b"\x1bM");
+        assert_eq!(emu.screen_cursor(), ScreenCursor { line: 0, col: 6 });
     }
 
     #[test]

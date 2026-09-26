@@ -47,7 +47,9 @@ const ZERO_RANGES: &[(u32, u32)] = &[
 ];
 
 /// Grid cell width of `c`: 0 (zero-width), 2 (double-width) or 1 (normal).
-pub(super) fn char_width(c: char) -> usize {
+/// Public so the TUI host paints and hit-tests in the same cell space as
+/// the emulator.
+pub fn char_width(c: char) -> usize {
     let v = c as u32;
     if in_ranges(v, ZERO_RANGES) {
         0

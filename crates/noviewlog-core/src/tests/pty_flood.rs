@@ -209,6 +209,7 @@ fn ring_trim_anchors_scroll_when_follow_off() {
 }
 
 #[test]
+#[ignore = "slow tier: real shell + 12 MiB fixture, latency-sensitive; run with -- --ignored"]
 fn cat_big_log_poll_ticks_stay_bounded() {
     // Issue #72: generated fixture instead of a hardcoded dev-machine path.
     let path = crate::tests::big_log_fixture();
@@ -906,5 +907,148 @@ fn include_filter_tab_keeps_committed_matches_across_overlay_only() {
     assert_eq!(
         short_committed, committed_keep,
         "committed matching count must stay stable while overlay tail may change"
+    );
+}
+
+#[test]
+fn idle_flush_commits_background_terminal_pending_tail() {
+    // Issue #193: `flush_idle_pending` ran for the active terminal only, so a
+    // background terminal's last pushed line stayed pending in the
+    // RecordParser — its scrollback missed the tail until the user switched
+    // back or the process exited.
+    let mut engine = Engine::new();
+    engine
+        .send_command_json(r#"{"cmd":"set_format","format_id":"raw"}"#)
+        .expect("set_format raw");
+    // Raw format keeps the last pushed line pending until the next line or
+    // the idle flush.
+    engine.push_lines_for_test(["bg-1".into(), "bg-2".into(), "bg-tail".into()]);
+    let background = 0usize;
+    assert_eq!(
+        engine.terminals[background].buffer.records_len(),
+        2,
+        "last line must sit pending before the idle flush"
+    );
+    engine.terminal_add_blank_for_test();
+    assert_eq!(engine.active_terminal_index_for_test(), 1);
+
+    // Age the background terminal past the idle window without sleeping.
+    engine.terminals[background].last_line_at = Some(Instant::now() - Duration::from_secs(1));
+
+    engine.poll_pty_for_test();
+
+    assert_eq!(
+        engine.terminals[background].buffer.records_len(),
+        3,
+        "background terminal must flush its pending tail on idle"
+    );
+    assert!(engine.terminals[background].last_line_at.is_none());
+    assert!(
+        engine.terminals[background]
+            .views
+            .iter()
+            .all(|v| v.is_flat_lines_dirty()),
+        "background terminal's views must rebuild on next selection"
+    );
+}
+
+#[test]
+#[ignore = "slow tier: real PTY child spawn + fixed settle sleeps; run with -- --ignored"]
+fn stop_releases_reader_parked_on_full_queue() {
+    // Issue #196: `stop()` (kill child, drop master) can unblock a reader
+    // parked in `read`, but never one parked in a blocking queue `send`.
+    // With the host not draining and the queue full, the reader and the
+    // exit-waiter joined to it leaked until the engine dropped `pty_rx`.
+    use crate::pty::PtyManager;
+    use crate::spawn_resolve::PreparedSpawn;
+
+    const GENERATION: u64 = 7;
+    let filler = |data: Vec<u8>| PtyEvent::Bytes {
+        id: "queue-filler".into(),
+        data,
+        generation: 0,
+    };
+
+    // Tiny bounded queue, filled before the session starts: the reader's
+    // chunks must go through the full-queue send path, not the blocking
+    // one that `stop()` cannot release.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<PtyEvent>(2);
+    let tx_test = tx.clone();
+    for _ in 0..2 {
+        tx.send(filler(vec![0u8; 16])).expect("fill bounded queue");
+    }
+
+    // A child that emits one chunk right away and then ticks ~once a
+    // second: the first chunk proves output flows, the next one parks in
+    // the full-queue send while the queue stays full.
+    let (command, args): (String, Vec<String>) = if cfg!(windows) {
+        (
+            "ping".into(),
+            vec!["-n".into(), "60".into(), "127.0.0.1".into()],
+        )
+    } else {
+        (
+            "sh".into(),
+            vec![
+                "-c".into(),
+                "while true; do echo tick; sleep 1; done".into(),
+            ],
+        )
+    };
+    let mut pty = PtyManager::new();
+    pty.start_prepared(
+        tx,
+        "t-196".into(),
+        PreparedSpawn {
+            command,
+            args,
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        },
+        GENERATION,
+        None,
+    )
+    .expect("PTY child spawn");
+
+    // Prove the child's first chunk passed through the send path: drain
+    // (freeing slots) until a session event pops out ahead of the parked
+    // send completing.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut first_chunk_flowed = false;
+    while Instant::now() < deadline {
+        match rx.try_recv() {
+            Ok(PtyEvent::Bytes { generation, .. }) if generation == GENERATION => {
+                first_chunk_flowed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    assert!(
+        first_chunk_flowed,
+        "child output must reach the queue (send path works)"
+    );
+
+    // Refill to full and give the child its ~1 s cadence: the next chunk
+    // parks the reader on the full queue and stays parked while rx lives.
+    while tx_test.try_send(filler(vec![0u8; 16])).is_ok() {}
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(
+        !pty.test_session_threads_finished(),
+        "precondition: session threads alive while the queue is full"
+    );
+
+    pty.stop();
+
+    // rx stays alive and the queue stays full, so a parked blocking send
+    // could never resolve: the reader must still exit promptly, and the
+    // exit-waiter joined to it with it.
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline && !pty.test_session_threads_finished() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        pty.test_session_threads_finished(),
+        "stop() must release the reader + exit-waiter even on a full queue"
     );
 }

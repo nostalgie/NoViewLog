@@ -54,6 +54,9 @@ pub(crate) struct TickDeps {
     pub(crate) find_stats_tab: Rc<Cell<i32>>,
     pub(crate) find_pending: FindPending,
     pub(crate) find_debounce: Rc<Timer>,
+    /// Viewport focus deferred by `on_viewport_focused` when the engine was
+    /// already borrowed (issue #252); applied and cleared here each tick.
+    pub(crate) pending_viewport_focus: Rc<Cell<Option<bool>>>,
     /// Reused RGBA buffer across paints (recreate only on size change).
     pub(crate) viewport_pixels: ViewportPixels,
 }
@@ -92,6 +95,7 @@ pub(crate) fn install_host_tick(deps: TickDeps) -> TickControls {
         find_stats_tab: find_stats_tab_tick,
         find_pending: find_pending_tick,
         find_debounce: find_debounce_tick,
+        pending_viewport_focus: pending_viewport_focus_tick,
         viewport_pixels,
     } = deps;
 
@@ -154,11 +158,40 @@ pub(crate) fn install_host_tick(deps: TickDeps) -> TickControls {
             }
             was_occluded_tick.set(occluded);
 
+            // Apply a viewport focus deferred by on_viewport_focused when the
+            // engine was already borrowed (issue #252). Must run before the
+            // main `engine_tick.borrow_mut()` below.
+            if let Some(focused) = pending_viewport_focus_tick.take() {
+                let mut eng = engine_tick.borrow_mut();
+                crate::viewport::apply_viewport_focus(
+                    &ui.as_weak(),
+                    &mut eng,
+                    focused,
+                    &force_tick,
+                    &timer_tick,
+                    &timer_fast_tick,
+                    &logical_tick,
+                );
+            }
+
             let mut eng = engine_tick.borrow_mut();
             eng.tick();
 
             if occluded {
-                while eng.poll_event_json().is_some() {}
+                // Drain events even when occluded, but keep one-shot
+                // Status/Exit messages: a process exiting while minimized
+                // must still update the status bar on restore (#198).
+                while let Some(ev) = eng.poll_event_json() {
+                    match parse_engine_event(&ev) {
+                        Some(EngineEvent::Status { message }) => {
+                            ui.set_status_text(SharedString::from(message));
+                        }
+                        Some(EngineEvent::Exit { code, .. }) => {
+                            ui.set_status_text(SharedString::from(format!("exit {code}")));
+                        }
+                        _ => {}
+                    }
+                }
                 if became_occluded || timer_fast_tick.get() {
                     set_occluded_timer(&timer_tick, &timer_fast_tick);
                 }
@@ -282,6 +315,13 @@ pub(crate) fn install_host_tick(deps: TickDeps) -> TickControls {
             }
             let more = needs_retick.load(Ordering::Acquire) || eng.take_pty_drain_pending();
             drop(eng);
+            // `buffer.clone()` is a refcount bump (SharedVector is shared), not a
+            // pixel copy. The copy is required and happens once per frame either
+            // way: the Image must own stable bytes for texture upload while the
+            // engine rewrites the same SharedPixelBuffer next tick, so
+            // `make_mut_bytes` above COW-copies it. A double-buffer flip could
+            // only remove that copy at the cost of upload/render race risk —
+            // deliberately not taken.
             ui.set_viewport_image(Image::from_rgba8(buffer.clone()));
             if !presented_tick.get() {
                 presented_tick.set(true);

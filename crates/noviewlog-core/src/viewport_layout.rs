@@ -220,7 +220,9 @@ pub fn build_visual_lines(
     cell_width: u32,
 ) -> Vec<VisualLine> {
     if wrap {
-        let cols = max_cols(content_width(viewport_width), cell_width);
+        // Same clamp as every other call site: selection/link mapping and the
+        // scroll-height index must share one row space even at degenerate widths.
+        let cols = max_cols(content_width(viewport_width), cell_width).max(1);
         lines
             .iter()
             .enumerate()
@@ -507,13 +509,27 @@ pub fn pos_at_pixel(
     }
 }
 
+/// Byte offset of the character under display-cell column `col`.
+///
+/// Columns are display cells, not raw chars: zero-width marks (VS16, ZWJ,
+/// combining marks — [`char_kind`] `!= Advance`) occupy no cell, matching the
+/// draw path's glyph placement (issue #238). `col` past the line end maps to
+/// `text.len()`.
 pub fn byte_offset_for_char_col(text: &str, col: usize) -> usize {
     if col == 0 {
         return 0;
     }
-    text.char_indices()
-        .nth(col)
-        .map_or(text.len(), |(byte_idx, _)| byte_idx)
+    let mut cells = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        if char_kind(ch) != CharKind::Advance {
+            continue;
+        }
+        if cells == col {
+            return byte_idx;
+        }
+        cells += 1;
+    }
+    text.len()
 }
 
 pub fn selection_slice_range(
@@ -557,10 +573,23 @@ pub fn selection_plain_text(flat_lines: &[FlatLine], sel: &TextSelection) -> Str
     if start.line_index >= flat_lines.len() || end.line_index >= flat_lines.len() {
         return String::new();
     }
+    // Clamp byte offsets to char boundaries: a selection that survived a
+    // buffer swap can hold stale offsets landing mid-character, and plain
+    // slicing would panic. Internal producers emit boundaries today; this
+    // guard keeps the function total.
+    fn floor_boundary(s: &str, at: usize) -> usize {
+        let at = at.min(s.len());
+        if s.is_char_boundary(at) {
+            at
+        } else {
+            (0..at).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+        }
+    }
+
     if start.line_index == end.line_index {
         let line = &flat_lines[start.line_index].raw;
-        let from = start.byte_offset.min(line.len());
-        let to = end.byte_offset.min(line.len()).max(from);
+        let from = floor_boundary(line, start.byte_offset);
+        let to = floor_boundary(line, end.byte_offset).max(from);
         return line[from..to].to_string();
     }
 
@@ -572,10 +601,10 @@ pub fn selection_plain_text(flat_lines: &[FlatLine], sel: &TextSelection) -> Str
         .take(end.line_index - start.line_index + 1)
     {
         if i == start.line_index {
-            let from = start.byte_offset.min(line.raw.len());
+            let from = floor_boundary(&line.raw, start.byte_offset);
             out.push_str(&line.raw[from..]);
         } else if i == end.line_index {
-            let to = end.byte_offset.min(line.raw.len());
+            let to = floor_boundary(&line.raw, end.byte_offset);
             out.push_str(&line.raw[..to]);
         } else {
             out.push_str(&line.raw);
@@ -750,6 +779,28 @@ mod tests {
         }
     }
 
+    /// Issue #238: click columns are display cells — VS16 (`⏱️` = U+23F1 +
+    /// U+FE0F) and combining marks occupy no cell, matching the draw path.
+    #[test]
+    fn click_column_maps_display_cells_not_raw_chars() {
+        let line = "ab\u{23F1}\u{FE0F}cd";
+        // Cells: a=0, b=1, ⏱=2, c=3, d=4 (FE0F is a silent skip).
+        assert_eq!(byte_offset_for_char_col(line, 0), 0);
+        assert_eq!(byte_offset_for_char_col(line, 2), "ab".len());
+        assert_eq!(
+            byte_offset_for_char_col(line, 3),
+            "ab\u{23F1}\u{FE0F}".len()
+        );
+        assert_eq!(
+            byte_offset_for_char_col(line, 4),
+            "ab\u{23F1}\u{FE0F}c".len()
+        );
+        assert_eq!(byte_offset_for_char_col(line, 5), line.len());
+        assert_eq!(byte_offset_for_char_col(line, 99), line.len());
+        // Combining mark overlays the previous cell — no column of its own.
+        assert_eq!(byte_offset_for_char_col("a\u{0301}b", 1), "a\u{0301}".len());
+    }
+
     #[test]
     fn visual_row_index_matches_naive_count() {
         let lines: Vec<_> = (0..100)
@@ -761,6 +812,36 @@ mod tests {
             idx.total_rows(),
             build_visual_lines(&lines, true, 80, 8).len()
         );
+    }
+
+    #[test]
+    fn degenerate_width_keeps_visual_row_parity() {
+        // Issue #205: at viewport widths <= LEFT_PAD the content width is 0;
+        // selection/link mapping (build_visual_lines) and scroll height
+        // (VisualRowIndex) must still agree on the row space.
+        let lines = vec![
+            flat_line("abcdef"),
+            flat_line(""),
+            flat_line(&"x".repeat(7)),
+        ];
+        for width in [0, 1, LEFT_PAD - 1, LEFT_PAD, LEFT_PAD + 1] {
+            let idx = VisualRowIndex::rebuild(&lines, true, width, 8);
+            assert_eq!(
+                idx.total_rows(),
+                build_visual_lines(&lines, true, width, 8).len(),
+                "index/full-build parity broken at viewport_width={width}"
+            );
+            assert_eq!(
+                idx.total_rows(),
+                count_visual_rows(&lines, true, width, 8),
+                "index/count parity broken at viewport_width={width}"
+            );
+            assert_eq!(
+                collect_visible_visual_lines(&lines, true, width, 8, 0, idx.total_rows()),
+                build_visual_lines(&lines, true, width, 8),
+                "visible-slice parity broken at viewport_width={width}"
+            );
+        }
     }
 
     #[test]

@@ -3,8 +3,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use noviewlog_core::Command;
-use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer};
+use noviewlog_core::{Command, Engine};
+use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, Timer, Weak};
 
 use crate::caret::sync_terminal_caret;
 use crate::ctx::Ctx;
@@ -55,27 +55,60 @@ pub(crate) fn install_focused(
     let force_render = ctx.force_render.clone();
     let timer = ctx.timer.clone();
     let timer_fast = ctx.timer_fast.clone();
+    let pending_viewport_focus = ctx.pending_viewport_focus.clone();
     let ui_focus = ui.as_weak();
     ui.on_viewport_focused(move |focused| {
         viewport_focused.set(focused);
-        let mut eng = engine.borrow_mut();
-        let _ = eng.send_command(Command::SetViewportFocus { focused });
-        if focused {
-            eng.reset_caret_blink();
-            force_render.set(true);
-            bump_fast_timer(&timer, &timer_fast);
-            if let Some(ui) = ui_focus.upgrade() {
-                ui.set_caret_blink_on(true);
-                let (lw, lh) = *logical_size.borrow();
-                let scale = ui.window().scale_factor().max(0.5) as f32;
-                let width = (lw * scale).ceil().max(1.0) as u32;
-                let height = (lh * scale).ceil().max(1.0) as u32;
-                let _ = sync_terminal_caret(&ui, &eng, width, height, scale);
-            }
-        } else if let Some(ui) = ui_focus.upgrade() {
-            ui.set_caret_visible(false);
-        }
+        // Re-entry guard (issue #252): a synchronous caller may still hold an
+        // engine borrow across focus-viewport. Never panic — defer the engine
+        // update to the next tick instead.
+        let Ok(mut eng) = engine.try_borrow_mut() else {
+            pending_viewport_focus.set(Some(focused));
+            return;
+        };
+        // This handler just observed the freshest focus state — a stale
+        // deferred value (from an earlier re-entry) must not override it.
+        pending_viewport_focus.set(None);
+        apply_viewport_focus(
+            &ui_focus,
+            &mut eng,
+            focused,
+            &force_render,
+            &timer,
+            &timer_fast,
+            &logical_size,
+        );
     });
+}
+
+/// Apply a resolved viewport-focus change to the engine + caret overlay.
+/// Caller must hold the engine borrow; shared by the live handler and the
+/// deferred next-tick application in `tick.rs` (issue #252).
+pub(crate) fn apply_viewport_focus(
+    ui: &Weak<AppWindow>,
+    eng: &mut Engine,
+    focused: bool,
+    force_render: &Rc<Cell<bool>>,
+    timer: &Rc<Timer>,
+    timer_fast: &Rc<Cell<bool>>,
+    logical_size: &Rc<RefCell<(f32, f32)>>,
+) {
+    let _ = eng.send_command(Command::SetViewportFocus { focused });
+    if focused {
+        eng.reset_caret_blink();
+        force_render.set(true);
+        bump_fast_timer(timer, timer_fast);
+        if let Some(ui) = ui.upgrade() {
+            ui.set_caret_blink_on(true);
+            let (lw, lh) = *logical_size.borrow();
+            let scale = ui.window().scale_factor().max(0.5) as f32;
+            let width = (lw * scale).ceil().max(1.0) as u32;
+            let height = (lh * scale).ceil().max(1.0) as u32;
+            let _ = sync_terminal_caret(&ui, eng, width, height, scale);
+        }
+    } else if let Some(ui) = ui.upgrade() {
+        ui.set_caret_visible(false);
+    }
 }
 
 /// Send a zoom step and remember the size locally (`Zoom` menu + Ctrl shortcuts).
@@ -113,6 +146,10 @@ pub(crate) fn install_zoom(ui: &AppWindow, ctx: &Ctx, viewport_font_size: Rc<Cel
         let ctx = ctx.clone();
         let viewport_font_size = viewport_font_size.clone();
         ui.on_viewport_zoom_wheel(move |delta_y| {
+            // Zero-delta events (trackpad momentum end) must not zoom.
+            if delta_y == 0.0 {
+                return;
+            }
             let step = if delta_y > 0.0 { 1.0 } else { -1.0 };
             let next = (viewport_font_size.get() + step).clamp(8.0, 32.0);
             if (next - viewport_font_size.get()).abs() < f32::EPSILON {
@@ -153,6 +190,10 @@ pub(crate) fn install_scroll(ui: &AppWindow, ctx: &Ctx, syncing_scroll: Rc<Cell<
     {
         let ctx = ctx.clone();
         ui.on_viewport_scrolled(move |delta_y| {
+            // Zero-delta events (trackpad momentum end) must not scroll.
+            if delta_y == 0.0 {
+                return;
+            }
             let lines = if delta_y > 0.0 { -3 } else { 3 };
             ctx.send_refresh(Command::ScrollLines { delta: lines });
         });
@@ -160,7 +201,11 @@ pub(crate) fn install_scroll(ui: &AppWindow, ctx: &Ctx, syncing_scroll: Rc<Cell<
     {
         let ctx = ctx.clone();
         ui.on_viewport_scrolled_x(move |delta_x| {
-            // Logical-ish step; engine clamps to max_scroll_x.
+            // Logical-ish step; engine clamps to max_scroll_x. Zero-delta
+            // wheel events (momentum end) must not scroll.
+            if delta_x == 0.0 {
+                return;
+            }
             let delta = if delta_x > 0.0 { -40.0 } else { 40.0 };
             ctx.send_refresh(Command::ScrollHorizontal { delta });
         });

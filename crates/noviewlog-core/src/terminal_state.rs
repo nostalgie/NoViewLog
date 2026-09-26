@@ -74,6 +74,12 @@ pub struct TerminalState {
     pub selection: Option<TextSelection>,
     pub scroll_to_row: Option<usize>,
     pub file_load: Option<FileLoadHandle>,
+    /// When the pending `file_load` last showed progress (issue #253). A
+    /// load whose worker died or blocks forever would otherwise pin the
+    /// fast tick cadence forever; once this is older than
+    /// [`crate::file_load`] `FILE_LOAD_STALL_TIMEOUT` the engine fails the
+    /// load. `None` while no load is pending or progress was just observed.
+    pub file_load_stalled_at: Option<Instant>,
     /// On-demand reads after a file load completes.
     pub file_backed: Option<FileBackedLog>,
     /// True when the watched file changed on disk after open (issue #151):
@@ -93,6 +99,24 @@ pub struct TerminalState {
 }
 
 impl TerminalState {
+    /// True while a pending background load should keep the fast tick
+    /// cadence (issue #253): pending AND not stalled past
+    /// `FILE_LOAD_STALL_TIMEOUT`, so a dead or blocked worker cannot wedge
+    /// the cadence forever.
+    pub fn file_load_active(&self) -> bool {
+        self.file_load.is_some()
+            && self
+                .file_load_stalled_at
+                .is_none_or(|at| at.elapsed() < crate::file_load::FILE_LOAD_STALL_TIMEOUT)
+    }
+
+    /// Pure stall-backstop decision (issue #253): a load that produced no
+    /// events since `stalled_since` is failed once the timeout lapses,
+    /// measured against `now`. Exposed as a pure function so the backstop is
+    /// testable without actually waiting 120 s.
+    pub fn file_load_stall_expired(stalled_since: Instant, now: Instant) -> bool {
+        now.duration_since(stalled_since) >= crate::file_load::FILE_LOAD_STALL_TIMEOUT
+    }
     pub fn new(
         id: String,
         launch: LaunchConfig,
@@ -124,6 +148,7 @@ impl TerminalState {
             selection: None,
             scroll_to_row: None,
             file_load: None,
+            file_load_stalled_at: None,
             file_backed: None,
             file_changed: false,
             buffer_line_start: 0,

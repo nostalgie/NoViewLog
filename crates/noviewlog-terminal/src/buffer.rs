@@ -18,27 +18,36 @@ impl RecordBuffer {
     }
 
     /// Drop oldest records when over `max_records`.
-    /// Returns the number of raw lines removed from the front.
+    /// Returns `(records removed, raw lines removed)` from the front.
     ///
     /// Uses `pop_front` so cost is O(dropped), not O(capacity).
-    fn trim_overflow(&mut self) -> usize {
+    fn trim_overflow(&mut self) -> (usize, usize) {
         if self.records.len() <= self.max_records {
-            return 0;
+            return (0, 0);
         }
         let overflow = self.records.len() - self.max_records;
+        let mut shifted_records = 0usize;
         let mut shifted_lines = 0usize;
         for _ in 0..overflow {
             let Some(rec) = self.records.pop_front() else {
                 break;
             };
             shifted_lines += rec.lines.len();
+            shifted_records += 1;
             self.dropped += 1;
         }
-        shifted_lines
+        (shifted_records, shifted_lines)
     }
 
     /// Returns the number of raw lines dropped from the front when the cap is exceeded.
     pub fn add(&mut self, record: LogRecord) -> usize {
+        self.add_counting(record).1
+    }
+
+    /// Like [`Self::add`], but also returns how many records were dropped.
+    /// Multiline records make the two counts differ; ring-shift patching needs
+    /// both (flat lines for the flat-line prefix, records for the record cursor).
+    pub fn add_counting(&mut self, record: LogRecord) -> (usize, usize) {
         self.records.push_back(record);
         // Compact while the ring is already hot (issue #126): after this, the
         // deque stays contiguous until the next push actually wraps, so the
@@ -80,7 +89,7 @@ impl RecordBuffer {
     /// Returns the number of raw lines removed from the front.
     pub fn set_max_records(&mut self, max_records: usize) -> usize {
         self.max_records = max_records.max(1);
-        self.trim_overflow()
+        self.trim_overflow().1
     }
 
     pub fn clear(&mut self) {
@@ -96,15 +105,6 @@ impl RecordBuffer {
             self.records.push_back(record);
         }
         self.trim_overflow();
-    }
-
-    /// Remove the last `n` records. Used by tests / leftover callers.
-    pub fn pop_last(&mut self, n: usize) {
-        for _ in 0..n {
-            if self.records.pop_back().is_none() {
-                break;
-            }
-        }
     }
 
     pub fn last_is_overwrite_single_line(&self) -> bool {

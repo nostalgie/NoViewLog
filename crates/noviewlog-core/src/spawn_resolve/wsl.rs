@@ -134,8 +134,10 @@ pub fn parse_wsl_unc(path: &str) -> Option<(String, String)> {
         return None;
     }
     let (distro, linux_rel) = match after_host.split_once('\\') {
-        Some((d, r)) => (d, r),
-        None => (after_host, ""),
+        // Trim the distro segment: a trailing space in a copied UNC path
+        // would otherwise be sent to WSL as part of `-d` and rejected (#255).
+        Some((d, r)) => (d.trim(), r),
+        None => (after_host.trim(), ""),
     };
     if distro.is_empty() {
         return None;

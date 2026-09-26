@@ -16,6 +16,10 @@ pub(crate) struct Ctx {
     pub(crate) force_render: Rc<Cell<bool>>,
     pub(crate) timer: Rc<Timer>,
     pub(crate) timer_fast: Rc<Cell<bool>>,
+    /// Viewport-focus change that could not be applied because the engine was
+    /// already borrowed (synchronous re-entry, issue #252). Applied and
+    /// cleared by the next host tick.
+    pub(crate) pending_viewport_focus: Rc<Cell<Option<bool>>>,
 }
 
 impl Ctx {
@@ -30,6 +34,7 @@ impl Ctx {
             force_render,
             timer,
             timer_fast,
+            pending_viewport_focus: Rc::new(Cell::new(None)),
         }
     }
 
