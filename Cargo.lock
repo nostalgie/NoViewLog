@@ -3181,6 +3181,7 @@ dependencies = [
  "crossterm",
  "noviewlog-core",
  "noviewlog-terminal",
+ "portable-pty",
 ]
 
 [[package]]

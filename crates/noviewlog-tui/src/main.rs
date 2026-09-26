@@ -548,6 +548,13 @@ impl App {
                 }
             }
             MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                // ConPTY/WT decode drag motion with an unreliable X (it snaps
+                // to end of line), while press/release decode faithfully — so
+                // the release point is the authoritative selection end, for
+                // both the kept highlight and the copied text.
+                if let Some(cell) = self.cell_at(&m) {
+                    self.sel_current = Some(cell);
+                }
                 // Keep the highlight; copy the selected text from the
                 // visible slice on our own (no engine coordinate math).
                 if let (Some(a), Some(b)) = (self.sel_anchor, self.sel_current) {
@@ -714,17 +721,55 @@ fn shell_key_bytes(key: &KeyEvent) -> Vec<u8> {
     }
 }
 
+/// How long the UI thread waits for the clipboard worker before falling back
+/// to OSC 52. Generous against normal contention, short enough that a hang
+/// never reaches the user.
+const CLIPBOARD_WAIT: Duration = Duration::from_millis(150);
+
 /// Copy to the real clipboard: arboard first (native), OSC 52 fallback
 /// (modern terminals sync their clipboard from it).
+///
+/// The win32 clipboard is a global resource other processes (clipboard
+/// managers, the terminal syncing its own clipboard) hold open
+/// intermittently; arboard's `OpenClipboard` then retries with sleeps. On
+/// the event-loop thread that froze the whole terminal the moment a
+/// selection copy ran — so the native attempt runs on a throwaway thread
+/// and the UI thread only waits briefly before falling back to OSC 52.
 fn copy_to_clipboard(text: &str) {
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if cb.set_text(text.to_owned()).is_ok() {
-            return;
-        }
-    }
     let mut out = stdout();
+    copy_with_fallback(&mut out, text, CLIPBOARD_WAIT, spawn_arboard_worker);
+}
+
+/// Spawn the native clipboard attempt on a throwaway thread; the receiver
+/// yields `true` on success, `false` on failure.
+fn spawn_arboard_worker(text: &str) -> std::sync::mpsc::Receiver<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = text.to_owned();
+    std::thread::spawn(move || {
+        let ok = arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(owned))
+            .is_ok();
+        let _ = tx.send(ok);
+    });
+    rx
+}
+
+/// Wait `wait` for the native worker; on timeout/failure emit the OSC 52
+/// fallback instead. Returns `true` when the native copy won.
+///
+/// The whole point (PR #266 regression): a hung or slow worker must never
+/// hold the UI thread beyond `wait`.
+fn copy_with_fallback<W: Write, F>(out: &mut W, text: &str, wait: Duration, spawn_worker: F) -> bool
+where
+    F: FnOnce(&str) -> std::sync::mpsc::Receiver<bool>,
+{
+    let rx = spawn_worker(text);
+    if rx.recv_timeout(wait) == Ok(true) {
+        return true;
+    }
     let _ = write!(out, "\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
     let _ = out.flush();
+    false
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -938,6 +983,81 @@ mod tests {
         assert!(buf.chars().all(|c| c == 'é'));
         assert!(buf.len() <= FILTER_BUF_CAP);
         assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
+    }
+
+    // --- Clipboard copy must never hold the UI thread (PR #266). The freeze
+    // bug: arboard ran synchronously in the mouse-up handler and win32
+    // clipboard contention froze the whole event loop. ---
+
+    /// Worker that answers after `delay` with `result`.
+    fn delayed_worker(
+        delay: Duration,
+        result: bool,
+    ) -> impl FnOnce(&str) -> std::sync::mpsc::Receiver<bool> {
+        move |_text: &str| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                let _ = tx.send(result);
+            });
+            rx
+        }
+    }
+
+    #[test]
+    fn hung_clipboard_worker_cannot_block_ui_and_falls_back() {
+        // Regression for the reported freeze: a worker stuck on clipboard
+        // contention must release the UI after the wait budget, and the copy
+        // must still happen via the OSC 52 fallback.
+        let mut out: Vec<u8> = Vec::new();
+        let started = Instant::now();
+        let copied = copy_with_fallback(
+            &mut out,
+            "selection",
+            Duration::from_millis(50),
+            delayed_worker(Duration::from_secs(5), true),
+        );
+        let elapsed = started.elapsed();
+        assert!(!copied, "timeout worker must lose to the fallback");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "UI thread blocked {elapsed:?} — the old sync freeze is back"
+        );
+        let s = String::from_utf8(out).unwrap();
+        assert_eq!(
+            s,
+            format!("\x1b]52;c;{}\x07", base64_encode(b"selection")),
+            "OSC 52 fallback with exact payload"
+        );
+    }
+
+    #[test]
+    fn fast_clipboard_success_skips_fallback() {
+        let mut out: Vec<u8> = Vec::new();
+        let copied = copy_with_fallback(
+            &mut out,
+            "text",
+            Duration::from_millis(200),
+            delayed_worker(Duration::from_millis(10), true),
+        );
+        assert!(copied);
+        assert!(out.is_empty(), "no OSC 52 when the native copy won");
+    }
+
+    #[test]
+    fn failing_clipboard_worker_falls_back_to_osc52() {
+        let mut out: Vec<u8> = Vec::new();
+        let copied = copy_with_fallback(
+            &mut out,
+            "abc",
+            Duration::from_millis(200),
+            delayed_worker(Duration::from_millis(10), false),
+        );
+        assert!(!copied);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("\x1b]52;c;{}\x07", base64_encode(b"abc"))
+        );
     }
 
     #[test]

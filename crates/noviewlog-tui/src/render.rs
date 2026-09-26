@@ -64,6 +64,10 @@ fn queue_segments(
     hl: Option<(usize, usize)>,
 ) {
     let mut col = 0usize;
+    // SGR background persists across cells until changed: leaving the
+    // selected span must emit an explicit reset, or every following cell of
+    // the row would stay DarkBlue and the highlight would grow to EOL.
+    let mut selected_prev = false;
     for seg in segments {
         if col >= cols {
             break;
@@ -84,9 +88,17 @@ fn queue_segments(
                     SetBackgroundColor(Color::DarkBlue),
                     Print(ch)
                 )
+            } else if selected_prev {
+                queue!(
+                    buf,
+                    SetBackgroundColor(Color::Reset),
+                    SetForegroundColor(fg),
+                    Print(ch)
+                )
             } else {
                 queue!(buf, SetForegroundColor(fg), Print(ch))
             };
+            selected_prev = selected;
             // Wide glyphs occupy two cells in the emulator; zero-width marks
             // occupy none — count cells, not chars, so selection spans and
             // truncation line up with what the user sees (#199).

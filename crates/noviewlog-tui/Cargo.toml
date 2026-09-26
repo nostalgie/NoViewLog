@@ -17,5 +17,8 @@ noviewlog-terminal = { path = "../noviewlog-terminal" }
 crossterm = "0.29"
 arboard = "3"
 
+[dev-dependencies]
+portable-pty = "0.8"
+
 [lints]
 workspace = true

@@ -28,10 +28,10 @@ jobs:
         include:
           - os: windows-latest
             name: win-x64
-            archive: NoViewLog-win-x64.zip
+            archive: noviewlog-win-x64.zip
           - os: ubuntu-latest
             name: linux-x64
-            archive: NoViewLog-linux-x64.tar.gz
+            archive: noviewlog-linux-x64.tar.gz
     steps:
       - uses: actions/checkout@v4
 
